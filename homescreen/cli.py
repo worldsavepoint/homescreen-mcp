@@ -21,6 +21,10 @@ def _confirm(msg: str) -> bool:
 
 
 async def run(args: argparse.Namespace) -> int:
+    if args.cmd == "diagnose":
+        from .diagnostics import diagnostics
+        _print(await diagnostics(expected_version=args.expected_version))
+        return 0
     s = session()
     if args.cmd == "read":
         _print(await s.read())
@@ -81,6 +85,8 @@ def main() -> None:
     r = sub.add_parser("restore", help="write a backup to the phone")
     r.add_argument("name")
     sub.add_parser("probe", help="dump raw icon state in every format version (read-only)")
+    d = sub.add_parser("diagnose", help="read-only USB compatibility check; never pair or write layout")
+    d.add_argument("--expected-version", help="stop before reading layout if iOS differs")
     u = sub.add_parser("ui", help="open the Homescreen app in your browser")
     u.add_argument("--port", type=int, default=8765)
     u.add_argument("--no-browser", action="store_true")
@@ -91,7 +97,7 @@ def main() -> None:
         return
     try:
         sys.exit(asyncio.run(run(args)))
-    except LayoutError as e:
+    except (LayoutError, ValueError, TimeoutError) as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
 

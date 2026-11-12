@@ -9,19 +9,52 @@ Rules:
 from __future__ import annotations
 
 import copy
+import asyncio
 import datetime as dt
+import fcntl
 import json
+import os
 import uuid
 import plistlib
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
 from . import colors
-from .device import Source
-from .model import Grid, Layout, LayoutError, Node, structure
+from .device import Source, require_writable
+from .model import Grid, Layout, LayoutError, Node, structure, widget_configuration
 
 KEEP_READS = 10
 MAX_UNDO = 200
+OPERATION_TIMEOUT = 30.0
+
+
+def _sync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _exclusive_file(path: Path, data: bytes) -> None:
+    """Create a private file without overwriting another operation's recovery data."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    _sync_directory(path.parent)
+
+
+def _private_replace(path: Path, data: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        _exclusive_file(temporary, data)
+        os.replace(temporary, path)
+        _sync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _stamp() -> str:
@@ -114,7 +147,8 @@ def placed_structure(state: list[Any], library: list[Any] | None, keyed_pins: di
     for page in lay.pages:
         pos, _ = lay.place(page)
         order = sorted(page, key=lambda n: (pos[n.id][0], pos[n.id][1]) if n.id in pos else (99, 0))
-        pages.append([[n.id, pos.get(n.id, (0, 0))[:2]] if n.kind != "folder" else
+        pages.append([[("widget:" + widget_configuration(n.raw)) if n.kind == "widget" else n.id,
+                       pos.get(n.id, (0, 0))[:2]] if n.kind != "folder" else
                       [n.name, [[c.id for c in fp] for fp in n.children]] for n in order])
     return json.dumps({"dock": [n.id for n in lay.dock], "pages": pages,
                        "library": None if library is None else sorted(n.id for n in lay.library or [])},
@@ -137,7 +171,14 @@ class Session:
         None keeps the single shared draft the CLI and MCP server use."""
         self.source = source
         self.dir = Path(data_dir)
-        self.dir.mkdir(parents=True, exist_ok=True)
+        if self.dir.is_symlink():
+            raise LayoutError("the Session data directory must not be a symlink")
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(self.dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fchmod(fd, 0o700)
+        finally:
+            os.close(fd)
         self._draft_key = device
         self.layout: Layout | None = None
         self.device_id: str | None = device
@@ -149,6 +190,37 @@ class Session:
         self._load_draft()
 
     # ---- persistence ------------------------------------------------------------
+
+    @contextmanager
+    def _exclusive(self):
+        fd = os.open(self.dir / ".session.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as e:
+                raise LayoutError("another Session operation holds the local data lock; try again after it finishes") from e
+            yield
+        finally:
+            os.close(fd)
+
+    @property
+    def _pending_path(self) -> Path:
+        return self.dir / ".pending-write.json"
+
+    def _require_known(self) -> None:
+        if self._pending_path.exists():
+            raise LayoutError("a pending write has an unknown outcome; perform an explicit read before any further write")
+
+    def _clear_pending(self) -> None:
+        if self._pending_path.exists():
+            self._pending_path.unlink()
+            _sync_directory(self.dir)
+
+    async def _assert_identity(self) -> None:
+        info = await asyncio.wait_for(self.source.info(), OPERATION_TIMEOUT)
+        actual = info.get("UniqueDeviceID")
+        if not isinstance(actual, str) or not actual or actual != self.device_id:
+            raise LayoutError("device identity changed or is unavailable; explicitly read the intended device again")
 
     @property
     def draft_path(self) -> Path:
@@ -169,7 +241,7 @@ class Session:
                 "bank": self.layout.to_bank(), "pins": self.layout.pins, "source_pins": self.layout.source_pins,
                 "grid": self.grid.to_dict()}
         blob = {k: v for k, v in blob.items() if v is not None}  # plists have no null
-        self.draft_path.write_bytes(plistlib.dumps(blob, fmt=plistlib.FMT_BINARY))
+        _private_replace(self.draft_path, plistlib.dumps(blob, fmt=plistlib.FMT_BINARY))
 
     def _load_draft(self) -> None:
         if self.draft_path.exists():
@@ -316,7 +388,7 @@ class Session:
         return library + [dict(w) for i, w in sorted(self._known_webclips().items()) if i not in here]
 
     async def _read_source(self) -> tuple[list[Any], list[Any] | None]:
-        state, library = await self.source.read()
+        state, library = await asyncio.wait_for(self.source.read(), OPERATION_TIMEOUT)
         self._remember_widget_ids(state)
         self._remember_webclips(state, library)
         return state, self._with_webclips(state, library)
@@ -353,19 +425,42 @@ class Session:
         return getattr(self.source, "pins", None) is not None
 
     async def read(self) -> dict[str, Any]:
-        info = await self.source.info()
-        self.device_id = info.get("UniqueDeviceID") or self.source.name
-        self.info = {k: v for k, v in info.items() if k in ("DeviceName", "ProductType", "ProductVersion")}
-        self.grid = Grid.from_metrics(info.get("icon_metrics"))
-        state, library = await self._read_source()
-        reads = self._dev_dir("reads")
-        (reads / f"{_stamp()}.plist").write_bytes(_pack(state, library))
-        for old in sorted(reads.glob("*.plist"))[:-KEEP_READS]:
-            old.unlink()
-        self.layout = self._layout_from(state, library)
-        self._undo.clear()
-        self._redo.clear()
-        self._save_draft()
+        with self._exclusive():
+            return await self._read_locked()
+
+    async def _read_locked(self) -> dict[str, Any]:
+        info = await asyncio.wait_for(self.source.info(), OPERATION_TIMEOUT)
+        device_id = info.get("UniqueDeviceID")
+        if not isinstance(device_id, str) or not device_id:
+            raise LayoutError("device identity is unavailable; no layout was loaded")
+        grid = Grid.from_metrics(info.get("icon_metrics"))
+        state, library = await asyncio.wait_for(self.source.read(), OPERATION_TIMEOUT)
+        verified = await asyncio.wait_for(self.source.info(), OPERATION_TIMEOUT)
+        if verified.get("UniqueDeviceID") != device_id:
+            raise LayoutError("device identity changed during read; no layout was loaded")
+        Layout(state, library=library, grid=grid)  # validate the shape before committing identity
+        previous = self.device_id, self.info, self.grid, self.layout, self._undo, self._redo
+        try:
+            self.device_id = device_id
+            self.info = {k: v for k, v in info.items() if k in ("DeviceName", "ProductType", "ProductVersion")}
+            self.grid = grid
+            self._remember_widget_ids(state)
+            self._remember_webclips(state, library)
+            library = self._with_webclips(state, library)
+            reads = self._dev_dir("reads")
+            _private_replace(reads / f"{_stamp()}.plist", _pack(state, library))
+            for old in sorted(reads.glob("*.plist"))[:-KEEP_READS]:
+                old.unlink()
+            self.layout = self._layout_from(state, library)
+            self._undo, self._redo = [], []
+            self._save_draft()
+            if self._pending_path.exists():
+                pending = json.loads(self._pending_path.read_text())
+                if pending.get("device_id") == self.device_id:
+                    self._clear_pending()
+        except BaseException:
+            self.device_id, self.info, self.grid, self.layout, self._undo, self._redo = previous
+            raise
         return {"device": {k: v for k, v in info.items() if k != "UniqueDeviceID"},
                 **self.layout.summary()["counts"]}
 
@@ -399,45 +494,76 @@ class Session:
 
     def _backup(self, state: list[Any], library: list[Any] | None, label: str,
                 pins: list[dict[str, int]] | None = None) -> Path:
-        p = self._dev_dir("backups") / f"{_stamp()}-{label}.plist"
-        p.write_bytes(_pack(state, library, pins))
+        if not self.device_id:
+            raise LayoutError("device identity is required for a backup")
+        p = self._dev_dir("backups") / f"{_stamp()}-{label}-{uuid.uuid4().hex}.plist"
+        blob = plistlib.loads(_pack(state, library, pins))
+        blob["provenance"] = {"version": 1, "device_id": self.device_id}
+        _exclusive_file(p, plistlib.dumps(blob, fmt=plistlib.FMT_BINARY))
+        # The device and backups directories may have been created by this call.
+        _sync_directory(p.parent.parent)
+        _sync_directory(self.dir)
         return p
 
     async def _write_verified(self, target: list[Any], target_lib: list[Any] | None,
-                              label: str, pins: list[dict[str, int]] | None = None) -> dict[str, Any]:
+                              label: str, pins: list[dict[str, int]] | None = None,
+                              expected: tuple[list[Any], list[Any] | None] | None = None,
+                              expected_pins: dict[str, int] | None = None) -> dict[str, Any]:
+        await self._assert_identity()
         current, current_lib = await self._read_source()
+        baseline = expected if expected is not None else (current, current_lib)
+        baseline_pins = copy.deepcopy(getattr(self.source, "pins", None))
+        if structure(current, current_lib) != structure(*baseline):
+            raise LayoutError("the phone's layout changed since it was read; read again and redo the edits")
+        if baseline_pins is not None and expected_pins is not None and baseline_pins != expected_pins:
+            raise LayoutError("the phone's exported gaps changed since it was read; read again and redo the edits")
         backup = self._backup(current, current_lib, label,
                               pins_by_page(self._layout_from(current, current_lib)))
         target = self._restore_widget_ids(target)
         if target_lib is not None:
             target_lib = self._with_webclips(target, target_lib)
-        # A backup made before the App Library was tracked has no library list; judge the
-        # result on dock and pages only (the source keeps unlisted apps in the library).
+        # The final read is checked under the same cross-process lock as the write.
+        final, final_lib = await self._read_source()
+        if structure(final, final_lib) != structure(*baseline):
+            raise LayoutError("the phone's layout changed during the final prewrite read; read again")
+        if getattr(self.source, "pins", None) != baseline_pins:
+            raise LayoutError("the phone's exported gaps changed during the final prewrite read; read again")
+        await self._assert_identity()
+        # A source without an exported library can only be judged on dock and pages.
         lib_known = target_lib is not None
+        _exclusive_file(self._pending_path, json.dumps({"device_id": self.device_id,
+                        "backup": backup.name, "status": "pending"}).encode())
+        write_error = None
         try:
-            await self.source.write(target, target_lib, pins)
+            await asyncio.wait_for(self.source.write(target, target_lib, pins), OPERATION_TIMEOUT)
         except Exception as e:
-            # A lost response doesn't tell us whether the write landed. Look, don't retry.
+            write_error = str(e) or type(e).__name__
+        caveat = ("Verification covers exported layout fields only. The device may not export "
+                  "all widget configuration, page metadata or gaps; those cannot be verified.")
+        try:
             after, after_lib = await self._read_source()
+            await self._assert_identity()
             want_pins = {k: v for page in pins or [] for k, v in page.items()}
             got_pins = getattr(self.source, "pins", None)
-            landed = (placed_structure(after, after_lib if lib_known else None,
-                                       want_pins if got_pins is None else got_pins, self.grid)
-                      == placed_structure(target, target_lib, want_pins, self.grid))
-            return {"ok": landed, "backup": backup.name,
-                    "error": f"write call failed ({e}); re-read shows the new layout "
-                             f"{'DID' if landed else 'did NOT'} land. Not retrying."}
-        after, after_lib = await self._read_source()
-        want_pins = {k: v for page in pins or [] for k, v in page.items()}
-        # the phone can't report gaps; there the written gaps are taken as given and the order checked
-        got_pins = getattr(self.source, "pins", None)
-        got_pins = want_pins if got_pins is None else got_pins
-        ok = (placed_structure(after, after_lib if lib_known else None, got_pins, self.grid)
-              == placed_structure(target, target_lib, want_pins, self.grid))
-        res: dict[str, Any] = {"ok": ok, "backup": backup.name}
+            # USB cannot report gaps; this comparison is limited by the caveat below.
+            got_pins = want_pins if got_pins is None else got_pins
+            ok = (placed_structure(after, after_lib if lib_known else None, got_pins, self.grid)
+                  == placed_structure(target, target_lib, want_pins, self.grid))
+        except Exception as e:
+            return {"ok": False, "status": "unknown", "backup": backup.name,
+                    "warnings": [caveat],
+                    "error": f"write outcome unknown: readback failed ({type(e).__name__}). "
+                             "No retry or rollback was attempted. Perform an explicit read before another write."}
+        res: dict[str, Any] = {"ok": ok, "status": "verified" if ok else "unknown",
+                               "backup": backup.name, "warnings": [caveat]}
+        if write_error is not None:
+            res["error"] = (f"write call failed ({write_error}); re-read shows the new layout "
+                            f"{'DID' if ok else 'did NOT'} land. Not retrying.")
         if after_lib is not None:
             res["app_library_only"] = len(after_lib)
         if not ok:
+            res["error"] = (res.get("error", "Readback did not match the exported target layout.")
+                            + " Outcome remains unknown; perform an explicit read before another write.")
             want = Layout(target, library=target_lib, grid=self.grid)
             got = Layout(after, library=after_lib if lib_known else None, grid=self.grid)
             wp, gp = want.positions(), got.positions()
@@ -464,27 +590,56 @@ class Session:
         self._undo.clear()
         self._redo.clear()
         self._save_draft()
+        if ok:
+            self._clear_pending()
         return res
 
     async def apply(self, token: str) -> dict[str, Any]:
+        require_writable()
+        with self._exclusive():
+            self._require_known()
+            return await self._apply_locked(token)
+
+    async def _apply_locked(self, token: str) -> dict[str, Any]:
         lay = self.require()
         if token != lay.token():
             raise LayoutError("token doesn't match the current draft; run diff and use its apply_token")
         problems = lay.validate()
         if problems:
             raise LayoutError(f"draft has problems, not applying: {problems}")
-        now, now_lib = await self._read_source()
-        if structure(now, now_lib) != structure(lay.source, lay.source_library):
-            raise LayoutError("the phone's layout changed since it was read (app installed or moved?). "
-                              "Read again and redo the edits.")
-        return await self._write_verified(lay.to_state(), lay.to_library(), "before-apply", pins_by_page(lay))
+        return await self._write_verified(lay.to_state(), lay.to_library(), "before-apply", pins_by_page(lay),
+                                          (lay.source, lay.source_library),
+                                          {k: v for page in pins_by_page(lay.original()) for k, v in page.items()})
 
     def backups(self) -> list[str]:
         return sorted(p.name for p in self._dev_dir("backups").glob("*.plist"))
 
     async def restore(self, name: str) -> dict[str, Any]:
+        require_writable()
+        with self._exclusive():
+            self._require_known()
+            return await self._restore_locked(name)
+
+    async def _restore_locked(self, name: str) -> dict[str, Any]:
         p = self._dev_dir("backups") / name
-        if not p.exists() or p.parent != self._dev_dir("backups"):
+        if not p.exists() or p.is_symlink() or p.parent != self._dev_dir("backups"):
             raise LayoutError(f"no backup named {name!r}")
         data = p.read_bytes()
+        try:
+            blob = plistlib.loads(data)
+            provenance = blob.get("provenance") if isinstance(blob, dict) else None
+            if not isinstance(provenance, dict) or provenance.get("version") != 1:
+                raise LayoutError("backup has no trusted device identity provenance; legacy backups cannot be restored")
+            if not self.device_id or provenance.get("device_id") != self.device_id:
+                raise LayoutError("backup device identity does not match this Session's device")
+            state, library = _unpack(data)
+            if not isinstance(state, list) or (library is not None and not isinstance(library, list)):
+                raise ValueError("invalid layout payload")
+            problems = Layout(state, library=library, grid=self.grid).validate()
+            if problems:
+                raise LayoutError(f"backup layout has problems, not restoring: {problems}")
+        except LayoutError:
+            raise
+        except (ValueError, TypeError, KeyError, plistlib.InvalidFileException) as e:
+            raise LayoutError("backup identity or layout data is invalid") from e
         return await self._write_verified(*_unpack(data), "before-restore", _unpack_pins(data))

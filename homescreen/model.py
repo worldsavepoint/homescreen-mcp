@@ -713,15 +713,25 @@ def _lcs(a: list[str], b: list[str]) -> set[str]:
     return out
 
 
+def widget_configuration(raw: dict[str, Any]) -> str:
+    """Compare every exported widget field, including configuration and stack elements.
+
+    USB may attach an empty iconLists which the root archive omits. Private device
+    configuration that is never exported cannot be verified by this fingerprint.
+    """
+    fields = {k: v for k, v in raw.items() if k != "iconLists" or v}
+    return plistlib.dumps(fields, fmt=plistlib.FMT_BINARY, sort_keys=True).hex()
+
+
 def structure(state: list[Any], library: list[Any] | None = None) -> str:
-    """Comparable fingerprint of a state: ids and nesting only, not volatile fields."""
+    """Comparable layout fingerprint, including all exported widget configuration."""
     lay = Layout(state, library=library)
 
     def key(n: Node) -> Any:
         if n.kind == "folder":
             return [n.name, [shape(p) for p in n.children]]
-        if n.kind == "widget":  # widget ids are positional, so compare by content
-            return f"widget:{n.name}:{n.raw.get('gridSize')}"
+        if n.kind == "widget":  # generated model ids are positional
+            return "widget:" + widget_configuration(n.raw)
         return n.id
 
     def shape(nodes: list[Node]) -> list[Any]:

@@ -16,21 +16,22 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Utilities",
 ]
-dependencies = ["pymobiledevice3>=11", "mcp>=2,<3", "pillow", "starlette>=0.40", "uvicorn>=0.30"]
+dependencies = ["pymobiledevice3==11.52.1", "mcp==2.3.0", "pillow==13.0.0", "starlette==1.10.0", "uvicorn==0.54.0"]
 
 [project.optional-dependencies]
-dev = ["pytest", "httpx"]
+dev = ["pytest==9.2.0", "httpx==0.28.1"]
+build = ["pyinstaller==6.22.3", "setuptools==84.2.1", "wheel==0.48.0", "pip==26.2.2"]
 
 [project.urls]
-Homepage = "https://github.com/kats1123/homescreen-mcp"
-Issues = "https://github.com/kats1123/homescreen-mcp/issues"
+Homepage = "https://github.com/worldsavepoint/homescreen-mcp"
+Issues = "https://github.com/worldsavepoint/homescreen-mcp/issues"
 
 [project.scripts]
 homescreen = "homescreen.cli:main"
 homescreen-mcp = "homescreen.server:main"
 
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]

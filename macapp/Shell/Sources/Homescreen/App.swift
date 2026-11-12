@@ -133,24 +133,27 @@ struct WebView: NSViewRepresentable {
         let origin: URL
         init(origin: URL) { self.origin = origin }
 
-        private func isLocal(_ url: URL?) -> Bool {
-            url?.host == origin.host && url?.port == origin.port
-        }
-
         // links to anything but the engine open in the default browser
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            if let url = action.request.url, !isLocal(url), url.scheme != "about", url.scheme != "data" {
+            guard let url = action.request.url else { decisionHandler(.cancel); return }
+            switch NavigationPolicy.destination(url, origin: origin) {
+            case .browser:
                 NSWorkspace.shared.open(url)
                 decisionHandler(.cancel)
-            } else {
+            case .embedded:
                 decisionHandler(.allow)
+            case .blocked:
+                decisionHandler(.cancel)
             }
         }
 
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-            if let url = action.request.url { NSWorkspace.shared.open(url) }
+            if let url = action.request.url,
+               NavigationPolicy.destination(url, origin: origin) != .blocked {
+                NSWorkspace.shared.open(url)
+            }
             return nil
         }
 

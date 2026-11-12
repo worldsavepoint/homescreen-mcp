@@ -7,6 +7,8 @@ Widgets and folders keep their relative order and go first unless a sort says ot
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -113,7 +115,16 @@ LOOKUP = "https://itunes.apple.com/lookup?"
 def fetch_categories(bundle_ids: list[str], cache: Path, country: str = "us") -> dict[str, str]:
     """Primary App Store genre per bundle id, via Apple's public lookup API. Only bundle ids are
     sent. Results (and misses, as "") are cached so each id is asked about once."""
-    known: dict[str, str] = json.loads(cache.read_text()) if cache.exists() else {}
+    cache.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cache.parent.chmod(0o700)
+    try:
+        fd = os.open(cache, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        known: dict[str, str] = {}
+    else:
+        with os.fdopen(fd) as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            known = json.load(stream)
     todo = [b for b in bundle_ids if b not in known and not b.startswith("com.apple.")]
     for i in range(0, len(todo), 100):
         chunk = todo[i:i + 100]
@@ -126,8 +137,13 @@ def fetch_categories(bundle_ids: list[str], cache: Path, country: str = "us") ->
     for b in bundle_ids:
         if b.startswith("com.apple.") and b not in known:
             known[b] = "Apple"
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(known, indent=1, sort_keys=True))
+    fd, temporary = tempfile.mkstemp(prefix=".categories-", dir=cache.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(json.dumps(known, indent=1, sort_keys=True))
+        os.replace(temporary, cache)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
     return {b: known.get(b, "") for b in bundle_ids}
 
 

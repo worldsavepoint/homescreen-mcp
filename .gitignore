@@ -7,3 +7,5 @@ build/
 dist/
 macapp/Shell/.build/
 .swiftpm/
+.task-tools/
+private-diagnostics/

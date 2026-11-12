@@ -1,27 +1,26 @@
 #!/bin/zsh
 # Build Homescreen.app and Homescreen-<version>.dmg into build/.
 #   macapp/build.sh            full build
-#   SKIP_ENGINE=1 macapp/build.sh   reuse the last engine build (shell/UI-only changes)
+# Requires Python 3.12 and Xcode command line tools. See macapp/BUILDING.md.
 set -euo pipefail
 
 ROOT=${0:A:h:h}
 BUILD=$ROOT/build
-VENV=${HOMESCREEN_BUILD_VENV:-$HOME/.local/share/homescreen-mcp/buildvenv}
+PYTHON=${HOMESCREEN_BUILD_PYTHON:-python3.12}
+VENV=$(mktemp -d "${TMPDIR:-/tmp}/homescreen-build.XXXXXXXX")
+trap 'rm -rf "$VENV"' EXIT
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' $ROOT/pyproject.toml)
 APP=$BUILD/Homescreen.app
 
-if [[ ! -x $VENV/bin/pyinstaller ]]; then
-  python3 -m venv $VENV
-  $VENV/bin/pip install -q --upgrade pip pyinstaller
-fi
+"$PYTHON" -m venv "$VENV"
+"$VENV/bin/python" -m pip install --require-hashes --only-binary=:all: -r "$ROOT/requirements-build.lock"
+"$VENV/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 12), "Build lock requires Python 3.12"'
+"$VENV/bin/python" -m pip install --no-deps --no-build-isolation "$ROOT"
+"$VENV/bin/python" -m pip check
 
-if [[ -z ${SKIP_ENGINE:-} ]]; then
-  echo "• engine"
-  $VENV/bin/pip install -q --no-deps --force-reinstall $ROOT
-  $VENV/bin/pip install -q $ROOT
-  (cd $ROOT/macapp && $VENV/bin/pyinstaller --noconfirm --log-level ERROR \
-      --distpath $BUILD/dist --workpath $BUILD/work engine.spec)
-fi
+echo "• engine"
+(cd "$ROOT/macapp" && "$VENV/bin/pyinstaller" --clean --noconfirm --log-level ERROR \
+    --distpath "$BUILD/dist" --workpath "$BUILD/work" engine.spec)
 
 echo "• shell"
 (cd $ROOT/macapp/Shell && swift build -c release --arch arm64 2>&1 | grep -E "error|Build complete")
@@ -32,6 +31,9 @@ rm -rf $APP
 mkdir -p $APP/Contents/MacOS $APP/Contents/Resources
 cp $SHELL_BIN $APP/Contents/MacOS/Homescreen
 cp -R $BUILD/dist/engine $APP/Contents/Resources/engine
+"$VENV/bin/python" -c 'import importlib.metadata as m; print("\n".join(sorted(d.metadata["Name"] + "==" + d.version for d in m.distributions())))' \
+  > "$APP/Contents/Resources/dependencies.txt"
+cp "$ROOT/requirements-build.lock" "$APP/Contents/Resources/requirements-build.lock"
 $VENV/bin/python $ROOT/macapp/make_icon.py $BUILD/AppIcon.iconset
 iconutil -c icns $BUILD/AppIcon.iconset -o $APP/Contents/Resources/AppIcon.icns
 cat > $APP/Contents/Info.plist <<PLIST

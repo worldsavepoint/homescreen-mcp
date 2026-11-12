@@ -1,0 +1,63 @@
+# Local editor sessions
+
+The editor listens on `127.0.0.1`. The launcher supplies `HOMESCREEN_UI_TOKEN`
+and opens the editor with a `#token=...` fragment. The browser consumes and
+removes that fragment, then establishes a session with the endpoint below.
+API credentials are transmitted in headers, rather than query parameters.
+
+## Authenticate [since this fork]
+
+`POST /v1/authenticate`
+
+Send `X-Token: <HOMESCREEN_UI_TOKEN>`. A successful request returns
+`{"ok": true}` and sets the `homescreen_session` HttpOnly, SameSite=Strict cookie.
+Browser mutation requests include the matching local `Origin` header.
+The existing `/api/auth` route remains an alias.
+
+## Backend health [since this fork]
+
+`GET /v1/health`
+
+The native launcher sets `HOMESCREEN_HEALTH_SECRET` separately from the UI token.
+It sends a fresh 64-character hexadecimal `X-Homescreen-Challenge` header.
+The response contains:
+
+```json
+{"app": "homescreen", "ready": true, "proof": "<64-character hexadecimal HMAC>"}
+```
+
+`proof` is HMAC-SHA256 over the challenge's UTF-8 bytes, using the health secret's
+UTF-8 bytes as the key. The launcher validates this response before opening the
+editor. For standalone CLI launches without a health secret, the endpoint uses
+`X-Token` authentication and returns `app` and `ready` without `proof`.
+The existing `/health` route remains an alias.
+
+## Authentication and session errors
+
+Authentication/session responses use the following error representation:
+
+```json
+{
+  "error": {
+    "message": "authentication required",
+    "type": "authentication_error",
+    "param": null,
+    "code": "invalid_credentials"
+  }
+}
+```
+
+HTTP 400 indicates an invalid health challenge, 401 indicates missing or invalid
+authentication, and 403 indicates a session or origin permission error.
+Existing layout-operation responses retain their original representation;
+the browser displays both string errors and `error.message` responses.
+
+The session error codes are registered here:
+
+- `invalid_credentials`: missing or invalid authentication (401).
+- `invalid_host`: unsupported local host (403).
+- `invalid_origin`: Origin differs from the editor address (403).
+- `cross_site_request`: browser identifies a cross-site request (403).
+- `origin_required`: session mutation is missing its Origin header (403).
+- `invalid_health_challenge`: health challenge has an invalid format (400).
+- `read_only`: the selected session uses read-only mode (403).

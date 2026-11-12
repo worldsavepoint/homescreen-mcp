@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import colorsys
 import io
+import warnings
 from collections import Counter
 
 from PIL import Image
@@ -29,7 +30,19 @@ def _pick(bins: Counter) -> tuple[float, float, float]:
 def dominant(png: bytes) -> dict:
     """Main color of an icon. A colorful glyph on a white/black tile (News, Health) counts
     as its glyph color when it covers enough of the icon; the tile color is in 'background'."""
-    img = Image.open(io.BytesIO(png)).convert("RGBA").resize((32, 32))
+    if len(png) > 4 * 1024 * 1024:
+        raise ValueError("PNG icon is too large")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(png), formats=["PNG"]) as source:
+                if max(source.size) > 2048:
+                    raise ValueError("PNG icon is too large")
+                source.verify()
+            with Image.open(io.BytesIO(png), formats=["PNG"]) as source:
+                img = source.convert("RGBA").resize((32, 32))
+    except (OSError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ValueError("Invalid or too large PNG icon") from exc
     bins: Counter = Counter()
     vivid: Counter = Counter()
     total = 0

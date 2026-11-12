@@ -49,6 +49,8 @@ async def render(session: Session, out: Path, show_original: bool = True) -> Pat
         name = html.escape(node.name)
         if node.kind == "widget":
             size = str(node.raw.get("gridSize", "small")).lower()
+            if size not in {"small", "medium", "large", "extralarge"}:
+                size = "small"
             return f'<div class="widget w-{size}">{name}</div>'
         if node.kind == "folder":
             inner = "".join([await img(c) for p in node.children for c in p][:9])
