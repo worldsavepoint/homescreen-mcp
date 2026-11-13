@@ -17,6 +17,7 @@ import os
 import uuid
 import plistlib
 from contextlib import contextmanager
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
@@ -97,9 +98,16 @@ def pin_key(node: Node) -> str | None:
 
 
 def memory_key(node: Node) -> str | None:
-    """How a gap is remembered across phone reads. Phone folders come back without ids, so
-    folders are remembered by name."""
-    return f"folder:{node.name}" if node.kind == "folder" else pin_key(node)
+    """Folders can omit UUIDs on readback; their name and ordered contents identify gaps."""
+    if node.kind == "folder":
+        return "folder-content:" + json.dumps([node.name, [[child.id for child in page]
+                                                         for page in node.children]], separators=(",", ":"))
+    return pin_key(node)
+
+
+def memory_pins(lay: Layout) -> dict[str, int]:
+    return {key: lay.pins[node.id] for page in lay.pages for node in page
+            if node.id in lay.pins and (key := memory_key(node))}
 
 
 def pins_by_page(lay: Layout) -> list[dict[str, int]]:
@@ -125,9 +133,18 @@ def node_pins(lay: Layout, keyed: dict[str, int], by_memory: bool = False,
     """Resolve wire pins. Reads may discard stale gaps; write comparison must reject them."""
     wanted: dict[str, int] = {}
     matched = set()
+    if by_memory:
+        identities = Counter(memory_key(n) for page in lay.pages for n in page)
+        names = Counter(n.name for page in lay.pages for n in page if n.kind == "folder")
     for page in lay.pages:
         for n in page:
             key = memory_key(n) if by_memory else pin_key(n)
+            if by_memory:
+                if identities[key] != 1:
+                    continue
+                # Older gap files used only folder names. Migrate only unambiguous names.
+                if key not in keyed and n.kind == "folder" and names[n.name] == 1:
+                    key = f"folder:{n.name}"
             if key and key in keyed:
                 if strict and (type(keyed[key]) is not int or not 0 <= keyed[key] < lay.grid.slots):
                     raise LayoutError(f"invalid pin cell for {n.name!r} on the loaded grid")
@@ -146,13 +163,13 @@ def node_pins(lay: Layout, keyed: dict[str, int], by_memory: bool = False,
 
 
 def placed_structure(state: list[Any], library: list[Any] | None, keyed_pins: dict[str, int] | None,
-                     grid: Grid | None = None) -> str:
+                     grid: Grid | None = None, by_memory: bool = False) -> str:
     """Like model.structure, but each page lists its items in grid order (row by row) after
     gaps are applied. iOS reorders a page's list by position when it has gaps, so list order
     alone would report a correct write as a mismatch."""
     lay = Layout(state, library=library, grid=grid)
     if keyed_pins:
-        node_pins(lay, keyed_pins, strict=True)
+        node_pins(lay, keyed_pins, by_memory=by_memory, strict=True)
 
     def semantic(node: Node) -> Any:
         if node.kind == "folder":
@@ -453,13 +470,7 @@ class Session:
         return self._dev_dir("gaps") / "pins.json"
 
     def _remember_gaps(self, lay: Layout) -> None:
-        mem = {}
-        for page in lay.pages:
-            for n in page:
-                key = memory_key(n)
-                if key and n.id in lay.pins:
-                    mem[key] = lay.pins[n.id]
-        self._gaps_path.write_text(json.dumps(mem, indent=1, sort_keys=True))
+        self._gaps_path.write_text(json.dumps(memory_pins(lay), indent=1, sort_keys=True))
 
     def _layout_from(self, state: list[Any], library: list[Any] | None) -> Layout:
         """A Layout with gaps: from the source when it can report them, else from memory."""
@@ -598,9 +609,15 @@ class Session:
             after, after_lib = await self._read_source()
             await self._assert_identity()
             got_pins = getattr(self.source, "pins", None)
-            # Use requested pin locations when the source returns no pin map.
-            got_pins = want_pins if got_pins is None else got_pins
-            ok = (placed_structure(after, after_lib if lib_known else None, got_pins, self.grid)
+            unreported = got_pins is None
+            if unreported:
+                # Retain requested gaps under the no-pin-map contract. Match folders by
+                # exported content without adding outgoing UUIDs to the returned state.
+                requested = Layout(target, library=target_lib, grid=self.grid)
+                node_pins(requested, want_pins, strict=True)
+                got_pins = memory_pins(requested)
+            ok = (placed_structure(after, after_lib if lib_known else None, got_pins, self.grid,
+                                   by_memory=unreported)
                   == placed_structure(target, target_lib, want_pins, self.grid))
         except Exception as e:
             return {"ok": False, "status": "unknown", "backup": backup.name,
@@ -636,7 +653,7 @@ class Session:
         if ok:
             # remember the gaps that were just written (the phone won't report them back)
             written = Layout(after, library=after_lib, grid=self.grid)
-            node_pins(written, {k: v for page in pins or [] for k, v in page.items()})
+            node_pins(written, got_pins, by_memory=unreported, strict=True)
             self._remember_gaps(written)
         self.layout = self._layout_from(after, after_lib)
         self._undo.clear()

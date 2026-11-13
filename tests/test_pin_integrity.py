@@ -280,3 +280,152 @@ def test_folder_preparation_does_not_mutate_draft_when_prewrite_is_rejected(tmp_
     assert reloaded.require().pins == {"folder:1": 23}
     assert reloaded.require().pages[0][0].id == "folder:1"
     assert source.payloads == []
+
+
+class USBArchiveSource(ArchiveSource):
+    """Serialize every write, but omit gap metadata and folder identity on every read."""
+
+    def __init__(self, cols=4, rows=6, identifiers="omitted"):
+        super().__init__(cols, rows, "dictionary")
+        self.identifiers = identifiers
+        self.read_count = 0
+        self.reverse_folders = False
+
+    async def read(self):
+        state, library = await super().read()
+        state = copy.deepcopy(state)
+        self.pins = None
+        self.read_count += 1
+        for page in state:
+            for index, item in enumerate(page):
+                if item.get("listType") == "folder":
+                    item.pop("uniqueIdentifier", None)
+                    if self.identifiers == "regenerated":
+                        item["uniqueIdentifier"] = f"returned-{self.read_count}-{index}"
+        if self.reverse_folders and self.payloads:
+            state[1].reverse()
+        return state, library
+
+
+@pytest.mark.parametrize("identifiers", ["omitted", "regenerated"])
+@pytest.mark.parametrize("cols,rows,cell", [(4, 6, 23), (5, 7, 34)])
+def test_usb_folder_pin_survives_apply_reload_read_and_restore(tmp_path, identifiers, cols, rows, cell):
+    source = USBArchiveSource(cols, rows, identifiers)
+    source.raw = to_root_archive(folder_state(False), [])
+    session = Session(source, tmp_path / "data")
+    run(session.read())
+    session.edit(lambda lay: lay.pin(lay.pages[0][0].id, 1, cell))
+    result = apply(session)
+    assert result["status"] == "verified"
+    assert not session._pending_path.exists()
+    outgoing = source.payloads[-1]
+    uid = outgoing["iconLists"][0][0]["uniqueIdentifier"]
+    assert metadata(outgoing)["fixedLocations"] == {uid: cell}
+    assert source.pins is None
+    assert session.require().summary()["pages"]["1"][0]["placed_at"] == {"row": rows, "column": cols}
+    assert ("uniqueIdentifier" in session.require().pages[0][0].raw) is (identifiers == "regenerated")
+    session = Session(source, session.dir)
+    assert session.require().summary()["pages"]["1"][0]["placed_at"] == {"row": rows, "column": cols}
+    run(session.read())
+    assert session.require().summary()["pages"]["1"][0]["placed_at"] == {"row": rows, "column": cols}
+    session.edit(lambda lay: lay.pin(lay.pages[0][0].id, 1, 0))
+    second = apply(session)
+    assert second["status"] == "verified"
+    assert run(session.restore(second["backup"]))["status"] == "verified"
+    run(session.read())
+    assert session.require().summary()["pages"]["1"][0]["placed_at"] == {"row": rows, "column": cols}
+    assert source.raw["iconLists"][0][0]["iconLists"] == [["example.a", "example.b"]]
+
+
+def test_usb_same_name_folders_keep_distinct_content_positions(tmp_path):
+    source = USBArchiveSource()
+    source.raw = to_root_archive([[], [folder("Tools", [app("example.a", "A")]),
+                                      folder("Tools", [app("example.b", "B")])]], [])
+    source.reverse_folders = True
+    session = Session(source, tmp_path / "data")
+    run(session.read())
+    session.edit(lambda lay: lay.pin("folder:1", 1, 23))
+    session.edit(lambda lay: lay.pin("folder:2", 1, 18))
+    assert apply(session)["status"] == "verified"
+    session = Session(source, session.dir)
+    run(session.read())
+    contents_to_cell = {node.children[0][0].id: session.require().pins[node.id]
+                        for node in session.require().pages[0]}
+    assert contents_to_cell == {"example.a": 23, "example.b": 18}
+    assert apply(session)["status"] == "verified"
+
+
+@pytest.mark.parametrize("change", ["name", "children"])
+def test_usb_changed_folder_semantics_remain_unknown(tmp_path, change):
+    source = USBArchiveSource()
+    source.raw = to_root_archive(folder_state(False), [])
+    session = Session(source, tmp_path / "data")
+    run(session.read())
+    session.edit(lambda lay: lay.pin("folder:1", 1, 23))
+    original_write = source.set_icon_state
+
+    async def write(payload):
+        await original_write(payload)
+        item = source.raw["iconLists"][0][0]
+        if change == "name":
+            item["displayName"] = "Changed"
+        else:
+            item["iconLists"][0].reverse()
+
+    source.set_icon_state = write
+    assert apply(session)["status"] == "unknown"
+    assert session._pending_path.exists()
+    assert not session._gaps_path.exists()
+
+
+@pytest.mark.parametrize("same_name", [False, True])
+def test_usb_legacy_folder_memory_only_migrates_unambiguous_names(tmp_path, same_name):
+    source = USBArchiveSource()
+    state = folder_state(False)
+    if same_name:
+        state.append([folder("Tools", [app("example.c", "C")])])
+    source.raw = to_root_archive(state, [])
+    session = Session(source, tmp_path / "data")
+    run(session.read())
+    session._gaps_path.write_text('{"folder:Tools": 23}')
+    run(session.read())
+    if same_name:
+        assert session.require().pins == {}
+    else:
+        assert session.require().pins == {"folder:1": 23}
+        assert apply(session)["status"] == "verified"
+        assert '"folder:Tools"' not in session._gaps_path.read_text()
+        run(session.read())
+        assert session.require().pins == {"folder:1": 23}
+
+
+def test_usb_indistinguishable_folders_do_not_guess_a_pin_owner(tmp_path):
+    source = USBArchiveSource()
+    source.raw = to_root_archive([[], [folder("Empty", []), folder("Empty", [])]], [])
+    session = Session(source, tmp_path / "data")
+    run(session.read())
+    session.edit(lambda lay: lay.pin("folder:1", 1, 23))
+    assert apply(session)["status"] == "unknown"
+    assert session._pending_path.exists()
+    assert not session._gaps_path.exists()
+
+
+@pytest.mark.parametrize("reported", [{}, {"absent-folder-id": 23}])
+def test_reported_folder_pins_never_use_usb_semantic_fallback(tmp_path, reported):
+    source = USBArchiveSource()
+    source.raw = to_root_archive(folder_state(False), [])
+    session = Session(source, tmp_path / "data")
+    run(session.read())
+    session.edit(lambda lay: lay.pin("folder:1", 1, 23))
+    original_read = source.read
+
+    async def read():
+        state, library = await original_read()
+        if source.payloads:
+            source.pins = reported
+        return state, library
+
+    source.read = read
+    assert apply(session)["status"] == "unknown"
+    assert session._pending_path.exists()
+    assert not session._gaps_path.exists()
