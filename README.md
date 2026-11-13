@@ -5,6 +5,8 @@
 
 **Original project by Jonathan Kats · Fork of [kats1123/homescreen-mcp](https://github.com/kats1123/homescreen-mcp).**
 
+[![Release](https://img.shields.io/github/v/release/worldsavepoint/homescreen-mcp)](https://github.com/worldsavepoint/homescreen-mcp/releases)
+[![Build](https://github.com/worldsavepoint/homescreen-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/worldsavepoint/homescreen-mcp/actions/workflows/tests.yml)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-14%2B-222222?logo=apple)](macapp/BUILDING.md)
 [![Source build](https://img.shields.io/badge/source_build-Python_3.12_%C2%B7_arm64-3776AB)](macapp/BUILDING.md)
@@ -44,16 +46,35 @@ This fork maintains changes to device sessions, backups, the local editor and th
 - **Read-only sessions:** `HOMESCREEN_READ_ONLY=1` lets you read and edit a local draft while Apply and Restore are disabled in the editor, CLI and MCP session.
 - **Device and backup handling:** Apply and Restore refresh the device identity and layout, record backup provenance, and check the result. Run Read after an interrupted or mismatching operation. Restore selects backups with matching device provenance.
 - **Local editor and launcher:** authenticated editor sessions, backend health checks and launcher URL/request validation. See the [local editor API reference](docs/LOCAL-EDITOR.md).
+- **Legacy layouts and distribution:** iOS 16 placement guidance, simulator icon rendering, and tag-triggered DMG/ZIP releases with SHA256 checksums.
 - **Source builds:** pinned, hash-checked Python wheels for macOS arm64 / Python 3.12. See [build instructions](macapp/BUILDING.md).
 
 <a id="install"></a>
 
-## 📦 Install from source
+## 📦 Install
+
+**Apple silicon Mac · macOS 14 or later · iOS 16 / 17 / 18 / 26 / 27**
+
+### Download the Mac app
+
+Open [Releases](https://github.com/worldsavepoint/homescreen-mcp/releases) and download `Homescreen-<version>-macos-arm64.dmg`. Open it and drag **Homescreen** into **Applications**. A ZIP archive is also provided.
+
+The app uses **ad-hoc signing**. If macOS requests approval, open **System Settings → Privacy & Security → Open Anyway**, then launch Homescreen again.
+
+To verify a download, place both release archives and `SHA256SUMS.txt` in the same directory and run:
+
+```sh
+shasum -a 256 --check SHA256SUMS.txt
+```
+
+PR builds are available under [Actions](https://github.com/worldsavepoint/homescreen-mcp/actions/workflows/tests.yml) → the completed run → **homescreen-macos-arm64**. Version tags publish the same archive formats to Releases.
+
+### Install from source
 
 Use an **Apple silicon Mac with macOS 14+ and Python 3.12**. Connect an iPhone or iPad over USB and trust the Mac on the device. The commands below use the dependency lock for **macOS arm64 / CPython 3.12**; other platforms need a separately resolved and tested lock.
 
 ```sh
-git clone --branch fix/safety-and-readonly-ios18 --single-branch https://github.com/worldsavepoint/homescreen-mcp.git
+git clone https://github.com/worldsavepoint/homescreen-mcp.git
 cd homescreen-mcp
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-build.lock
@@ -77,7 +98,7 @@ macapp/build.sh
 
 The script creates the app and a DMG in `build/`, using its own fresh Python environment and the same dependency lock. It applies **ad-hoc signing**. See [macOS build and signing details](macapp/BUILDING.md).
 
-Build this fork's Mac app from source. The original project maintains its builds in [upstream releases](https://github.com/kats1123/homescreen-mcp/releases).
+Create release archives with `python3.12 macapp/release.py package`. The output directory `build/release/` contains the DMG, ZIP and `SHA256SUMS.txt`. See [tagged release publishing](macapp/BUILDING.md#tagged-releases).
 
 <a id="get-started"></a>
 
@@ -117,7 +138,9 @@ This prints the reported software version and aggregate layout counts.
 
 ## 📱 Compatibility
 
-- **iOS and iPadOS:** Homescreen reads the reported software version and layout. See the [compatibility workflow](docs/COMPATIBILITY.md) for local checks.
+- **iOS 16:** app order, folders, Dock and App Library organization. Icons follow sequential page order; place folders after widgets at the start of a page. The editor guides placement as you edit.
+- **iOS 17, 18, 26 and 27:** app and folder organization, Dock, App Library, widget preservation and fixed-position layout editing.
+- **Simulator development:** icon metadata and asset-catalog rendering are supported across these version families. See [layout modes and compatibility checks](docs/COMPATIBILITY.md).
 - **iPad:** grid, dock and folder capacities come from the device. MCP/CLI operations and the editor use those capacities; widget pages retain the shape supplied by iPadOS.
 - **Python:** package metadata permits Python 3.11+, while this fork's supplied build lock targets Python 3.12 on macOS arm64. Intel Macs require a separately resolved and tested lock.
 
@@ -227,7 +250,7 @@ References: [macOS builds and dependency lock](macapp/BUILDING.md) · [local edi
 
 **Jonathan Kats** created Homescreen. Credit for the original Mac app, editor, screenshots and SpringBoard investigation belongs to the [upstream project](https://github.com/kats1123/homescreen-mcp) and its contributors. Thanks also to [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) for the USB device interface.
 
-- **This fork:** [source and changes](https://github.com/worldsavepoint/homescreen-mcp/tree/fix/safety-and-readonly-ios18) · [issues and support](https://github.com/worldsavepoint/homescreen-mcp/issues).
+- **This fork:** [source and changes](https://github.com/worldsavepoint/homescreen-mcp) · [issues and support](https://github.com/worldsavepoint/homescreen-mcp/issues).
 - **Original project:** [upstream source](https://github.com/kats1123/homescreen-mcp) · [upstream issues and support](https://github.com/kats1123/homescreen-mcp/issues) · [upstream releases](https://github.com/kats1123/homescreen-mcp/releases).
 
 For issues with this fork, include the installation method, reproduction steps, expected result and a redacted error message.

@@ -1,17 +1,111 @@
 name: tests
-on: [push, pull_request]
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: distribution-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
+    name: Layout, editor and macOS package
     runs-on: macos-15
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - run: python -m venv .venv
-      - run: >-
+      - name: Check build architecture and release version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          test "$(uname -m)" = arm64
+          if [ "$REF_TYPE" = tag ]; then
+            python macapp/release.py version --tag "$REF_NAME"
+          else
+            python macapp/release.py version
+          fi
+      - name: Install locked development dependencies
+        run: |
+          python -m venv .venv
           .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-build.lock
-      - run: .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
-      - run: .venv/bin/python -m pip check
-      - run: .venv/bin/python -m pytest -q tests
-      - run: swift build --package-path macapp/Shell -c release --arch arm64
+          .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+          .venv/bin/python -m pip check
+      - name: Validate layouts, draft edits, backups and editor routes
+        run: .venv/bin/python -m pytest -q tests
+      - name: Build and verify the Mac app
+        env:
+          HOMESCREEN_BUILD_PYTHON: python
+        run: |
+          macapp/build.sh
+          build/Homescreen.app/Contents/Resources/engine/engine --help
+          test -f build/Homescreen.app/Contents/Resources/engine/_internal/homescreen/web/index.html
+          test -f build/Homescreen.app/Contents/Resources/engine/_internal/homescreen/simulator_icon.m
+          cmp LICENSE build/Homescreen.app/Contents/Resources/LICENSE
+          codesign --verify --deep --strict build/Homescreen.app
+          hdiutil verify build/Homescreen-*.dmg
+      - name: Assemble release archives and checksums
+        run: |
+          python macapp/release.py package
+          ditto -x -k build/release/Homescreen-*-macos-arm64.zip "$RUNNER_TEMP/homescreen-archive"
+          codesign --verify --deep --strict "$RUNNER_TEMP/homescreen-archive/Homescreen.app"
+          cd build/release
+          shasum -a 256 --check SHA256SUMS.txt
+      - name: Upload installable archives
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: homescreen-macos-arm64
+          path: build/release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish tagged release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: homescreen-macos-arm64
+          path: release
+      - name: Verify assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd release
+          sha256sum --check SHA256SUMS.txt
+          cat > notes.md <<'NOTES'
+          Arrange Home Screen apps, folders, widgets and the App Library from your Mac.
+
+          - Layout support for iOS 16, 17, 18, 26 and 27; iOS 16 uses sequential icon placement.
+          - Per-device drafts and backups, readback comparison, local editor and CLI.
+          - Apple silicon Mac, macOS 14 or later; ad-hoc signed app.
+
+          Install: open the DMG and drag Homescreen into Applications, or extract the ZIP. Open System Settings → Privacy & Security → Open Anyway when macOS requests approval.
+
+          Download SHA256SUMS.txt alongside an archive and run `shasum -a 256 --check SHA256SUMS.txt` with both archives in the same directory.
+
+          Original project by Jonathan Kats: https://github.com/kats1123/homescreen-mcp · MIT License.
+          NOTES
+          prerelease=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$RELEASE_TAG" --verify-tag --title "Homescreen $RELEASE_TAG" \
+            --notes-file notes.md "${prerelease[@]}" ./*.dmg ./*.zip SHA256SUMS.txt

@@ -1,5 +1,19 @@
 # Compatibility checks
 
+## Supported iOS layout modes
+
+- **iOS 16:** sequential app placement, folders, Dock and App Library organization.
+  Keep folders after widgets originally read at the start of a page. The draft
+  editor provides guidance when a placement needs adjustment.
+- **iOS 17, 18, 26 and 27:** app and folder organization, Dock and App Library,
+  preservation of widget configuration and fixed-position layout editing.
+- **iPadOS:** grid, Dock and folder capacity follow the device's reported metrics.
+
+The simulator adapter supports application-bundle icon metadata and standalone
+UIKit rendering of asset-catalog and dynamic icons across these version families.
+
+## Local checks
+
 Run the local fixture checks to exercise layout parsing, draft editing, backup
 restoration and transport behavior:
 

@@ -74,3 +74,49 @@ the release for Apple notarization using the publisher's Apple credentials.
 The Swift package includes a request/URL validation harness. A full `build.sh` run
 creates the app bundle and DMG in `build/`. Install and launch the resulting app
 as a separate step.
+
+## Release archives
+
+After `macapp/build.sh`, assemble the distributable files:
+
+```sh
+python3.12 macapp/release.py package
+cd build/release
+shasum -a 256 --check SHA256SUMS.txt
+```
+
+The package command checks the bundle version, preserves executable permissions in
+the ZIP, and produces `Homescreen-<version>-macos-arm64.dmg`,
+`Homescreen-<version>-macos-arm64.zip` and `SHA256SUMS.txt`.
+
+## Tagged releases
+
+Pull requests and pushes to `main` run layout, draft, backup, editor and launcher
+checks, build the Mac app, verify its signature and engine startup, then upload
+installable archives as the `homescreen-macos-arm64` Actions artifact.
+
+To publish a release after merging the contribution:
+
+1. Set `project.version` in `pyproject.toml` to the release version and merge it.
+2. Check the matching tag locally, then push it:
+
+   ```sh
+   python3.12 macapp/release.py version --tag v1.1.1
+   git tag v1.1.1
+   git push origin v1.1.1
+   ```
+
+3. The tag workflow builds the app, verifies its archives, and publishes the DMG,
+   ZIP and checksums to GitHub Releases. Tags match the project version exactly.
+   Versions such as `1.2.0-beta.1` produce GitHub prereleases.
+
+The app's standard macOS version fields contain the numeric release core, such as
+`1.2.0`. `HomescreenReleaseVersion` retains the complete release version, including
+the prerelease suffix; archive filenames and Git tags use this complete version.
+
+CI uses macOS arm64, Python 3.12, hash-checked dependencies and commit-pinned
+GitHub actions. App builds use ad-hoc signing. The release job receives repository
+contents write permission to publish its assets.
+
+Original application and packaging by Jonathan Kats, distributed under the MIT
+license. This fork maintains its release workflow and compatibility changes.

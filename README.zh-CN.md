@@ -5,6 +5,8 @@
 
 **原作：Jonathan Kats · 本仓库为 [kats1123/homescreen-mcp](https://github.com/kats1123/homescreen-mcp) 的独立维护 fork。**
 
+[![Release](https://img.shields.io/github/v/release/worldsavepoint/homescreen-mcp)](https://github.com/worldsavepoint/homescreen-mcp/releases)
+[![Build](https://github.com/worldsavepoint/homescreen-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/worldsavepoint/homescreen-mcp/actions/workflows/tests.yml)
 [![MIT 许可证](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-14%2B-222222?logo=apple)](macapp/BUILDING.md)
 [![源码构建](https://img.shields.io/badge/source_build-Python_3.12_%C2%B7_arm64-3776AB)](macapp/BUILDING.md)
@@ -44,16 +46,35 @@
 - **只读会话：** 设置 `HOMESCREEN_READ_ONLY=1` 后，可读取设备并编辑本地草稿；编辑器、CLI 和 MCP 会话中的 Apply 与 Restore 均禁用。
 - **设备与备份处理：** Apply 和 Restore 会刷新设备身份与布局、记录备份来源，并核对操作结果。操作中断或结果不符后，重新执行 Read。Restore 选择设备来源信息匹配的备份。
 - **本地编辑器与启动器：** 编辑器会话认证、后端健康检查，以及启动器 URL/请求校验。见[本地编辑器 API 参考](docs/LOCAL-EDITOR.md)。
+- **旧版布局与分发：** iOS 16 位置调整提示、模拟器图标渲染，以及版本标签触发的 DMG/ZIP 发布和 SHA256 校验文件。
 - **源码构建：** 为 macOS arm64 / Python 3.12 固定 Python wheel 版本并校验哈希。见[构建说明](macapp/BUILDING.md)。
 
 <a id="install"></a>
 
-## 📦 从源码安装
+## 📦 安装
+
+**Apple 芯片 Mac · macOS 14 及以上 · iOS 16 / 17 / 18 / 26 / 27**
+
+### 下载 Mac App
+
+打开 [Releases](https://github.com/worldsavepoint/homescreen-mcp/releases)，下载 `Homescreen-<version>-macos-arm64.dmg`，打开后将 **Homescreen** 拖入 **Applications（应用程序）**。发行版同时提供 ZIP 压缩包。
+
+应用使用 **ad-hoc 签名**。macOS 提示确认时，前往**系统设置 → 隐私与安全性 → 仍要打开**，再启动 Homescreen。
+
+校验下载文件时，将两种发行包与 `SHA256SUMS.txt` 放在同一目录，运行：
+
+```sh
+shasum -a 256 --check SHA256SUMS.txt
+```
+
+PR 构建产物位于 [Actions](https://github.com/worldsavepoint/homescreen-mcp/actions/workflows/tests.yml) → 已完成的运行 → **homescreen-macos-arm64**。版本标签会将同格式安装包发布到 Releases。
+
+### 从源码安装
 
 需要 **Apple 芯片 Mac、macOS 14+ 和 Python 3.12**。通过 USB 连接 iPhone 或 iPad，并在设备上信任这台 Mac。以下命令使用适用于 **macOS arm64 / CPython 3.12** 的依赖锁；其他平台需要单独解析并验证依赖锁。
 
 ```sh
-git clone --branch fix/safety-and-readonly-ios18 --single-branch https://github.com/worldsavepoint/homescreen-mcp.git
+git clone https://github.com/worldsavepoint/homescreen-mcp.git
 cd homescreen-mcp
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-build.lock
@@ -77,7 +98,7 @@ macapp/build.sh
 
 脚本使用全新的 Python 环境和同一依赖锁，在 `build/` 中生成 App 和 DMG，并应用 **ad-hoc 签名**。详见 [macOS 构建与签名说明](macapp/BUILDING.md)。
 
-本 fork 的 Mac App 从源码构建。原项目在[上游 Releases](https://github.com/kats1123/homescreen-mcp/releases) 维护其发行包。
+执行 `python3.12 macapp/release.py package` 可生成发行文件。`build/release/` 中包含 DMG、ZIP 与 `SHA256SUMS.txt`。发布步骤见[版本标签发布说明](macapp/BUILDING.md#tagged-releases)。
 
 <a id="get-started"></a>
 
@@ -117,7 +138,9 @@ HOMESCREEN_READ_ONLY=1 .venv/bin/homescreen diagnose
 
 ## 📱 兼容性
 
-- **iOS 与 iPadOS：** Homescreen 读取系统报告的软件版本与布局。本地检查步骤见[兼容性工作流](docs/COMPATIBILITY.md)。
+- **iOS 16：** 支持 App 顺序、文件夹、程序坞和 App 资源库整理。图标按页面顺序排列；页面开头有小组件时，将文件夹放在其后。编辑器会提供位置调整提示。
+- **iOS 17、18、26、27：** 支持 App 与文件夹整理、程序坞、App 资源库、小组件保留和固定位置布局编辑。
+- **模拟器开发：** 覆盖这些版本系列的图标元数据读取与资源目录图标渲染。见[布局模式与兼容性检查](docs/COMPATIBILITY.md)。
 - **iPad：** MCP/CLI 与编辑器采用设备提供的网格、程序坞和文件夹容量，小组件页面保留 iPadOS 提供的结构。
 - **Python：** 包元数据支持 Python 3.11+，本 fork 提供的构建依赖锁针对 macOS arm64 / Python 3.12。Intel Mac 需要单独解析并验证依赖锁。
 
@@ -227,7 +250,7 @@ HOMESCREEN_SIM=booted .venv/bin/homescreen ui
 
 **Jonathan Kats** 创建了 Homescreen。原始 Mac App、编辑器、截图和 SpringBoard 研究的贡献归属于[上游项目](https://github.com/kats1123/homescreen-mcp)及其贡献者。感谢 [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) 提供 USB 设备通信接口。
 
-- **本 fork：** [源码与改动](https://github.com/worldsavepoint/homescreen-mcp/tree/fix/safety-and-readonly-ios18) · [问题反馈与支持](https://github.com/worldsavepoint/homescreen-mcp/issues)。
+- **本 fork：** [源码与改动](https://github.com/worldsavepoint/homescreen-mcp) · [问题反馈与支持](https://github.com/worldsavepoint/homescreen-mcp/issues)。
 - **原始项目：** [上游源码](https://github.com/kats1123/homescreen-mcp) · [上游问题反馈与支持](https://github.com/kats1123/homescreen-mcp/issues) · [上游发行版](https://github.com/kats1123/homescreen-mcp/releases)。
 
 本 fork 的问题请附安装方式、复现步骤、预期结果和脱敏后的错误信息。
