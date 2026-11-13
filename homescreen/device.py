@@ -28,7 +28,7 @@ from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any, Protocol
 
-from .model import is_folder, is_widget
+from .model import Grid, is_folder, is_widget
 
 Layout = tuple[list[Any], list[Any] | None]
 
@@ -57,7 +57,7 @@ class Source(Protocol):
     async def info(self) -> dict[str, Any]: ...
     async def read(self) -> Layout: ...
     async def write(self, state: list[Any], library: list[Any] | None,
-                    pins: list[dict[str, int]] | None = None) -> None: ...
+                    pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> None: ...
     async def icon_png(self, bundle_id: str) -> bytes | None: ...
 
 
@@ -124,11 +124,12 @@ def _modern(x: Any) -> Any:
 
 
 def to_root_archive(state: list[Any], library: list[Any],
-                    pins: list[dict[str, int]] | None = None) -> dict[str, Any]:
+                    pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> dict[str, Any]:
     """The dict form SpringBoard's importIconState accepts, App Library included.
     pins: per page, {identifier: grid cell} for items placed with gaps around them. The Today
     View keeps its value on the phone; page ids and gaps are replaced (iOS doesn't report gaps
-    over USB, so the phone's own gaps are lost either way)."""
+    over USB, so the phone's own gaps are lost either way).
+    grid supplies the loaded page dimensions; omitted metrics use the iPhone grid."""
     out = {
         "buttonBar": [_modern(x) for x in state[0]],
         "iconLists": [[_modern(x) for x in page] for page in state[1:]],
@@ -137,12 +138,14 @@ def to_root_archive(state: list[Any], library: list[Any],
     if pins and any(pins):
         ids = [str(uuid.uuid4()).upper() for _ in out["iconLists"]]
         out["listUniqueIdentifiers"] = ids
-        out["listMetadata"] = _list_metadata(ids, pins)
+        out["listMetadata"] = _list_metadata(ids, pins, grid)
     return out
 
 
-def _list_metadata(ids: list[str], pins: list[dict[str, int]]) -> dict[str, Any]:
-    return {ids[i]: {"fixedLocations": dict(p), "fixedLocationsGridColumns": 4, "fixedLocationsGridRows": 6}
+def _list_metadata(ids: list[str], pins: list[dict[str, int]], grid: Grid | None = None) -> dict[str, Any]:
+    grid = grid or Grid()
+    return {ids[i]: {"fixedLocations": dict(p), "fixedLocationsGridColumns": grid.cols,
+                     "fixedLocationsGridRows": grid.rows}
             for i, p in enumerate(pins) if p and i < len(ids)}
 
 
@@ -169,9 +172,10 @@ def disk_to_model(raw: dict[str, Any], names: dict[str, str] | None = None) -> L
 
 
 def model_to_disk(state: list[Any], library: list[Any] | None, base: dict[str, Any],
-                  pins: list[dict[str, int]] | None = None) -> dict[str, Any]:
+                  pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> dict[str, Any]:
     """Rebuild the dict format; keys we don't touch (today view, ids) come from base. pins
-    (per page) replace the gaps when given."""
+    (per page) replace the gaps when given. grid supplies their page dimensions, with
+    iPhone defaults when omitted."""
     out = dict(base)
     out["buttonBar"] = [_item_out(x) for x in state[0]]
     out["iconLists"] = [[_item_out(x) for x in page] for page in state[1:]]
@@ -181,7 +185,7 @@ def model_to_disk(state: list[Any], library: list[Any] | None, base: dict[str, A
     if pins is not None:
         if "listUniqueIdentifiers" not in out:
             out["listUniqueIdentifiers"] = [str(uuid.uuid4()).upper() for _ in out["iconLists"]]
-        meta = _list_metadata(out["listUniqueIdentifiers"], pins)
+        meta = _list_metadata(out["listUniqueIdentifiers"], pins, grid)
         if meta:
             out["listMetadata"] = meta
         else:
@@ -302,10 +306,10 @@ class PhoneSource:
 
     @_bounded
     async def write(self, state: list[Any], library: list[Any] | None,
-                    pins: list[dict[str, int]] | None = None) -> None:
+                    pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> None:
         require_writable()
         if self._last_dict is not None:
-            payload: Any = model_to_disk(state, library, self._last_dict, pins)
+            payload: Any = model_to_disk(state, library, self._last_dict, pins, grid)
         elif self.write_mode == "list":
             if library:
                 raise ValueError("HOMESCREEN_WRITE=list can't keep apps in the App Library")
@@ -317,7 +321,7 @@ class PhoneSource:
             listed = {_leaf_id(x) for x in library if isinstance(x, dict)}
             library += [x for x in library_from_installed(state, await self.installed_apps())
                         if x["bundleIdentifier"] not in listed]
-            payload = to_root_archive(state, library, pins)
+            payload = to_root_archive(state, library, pins, grid)
         await self._call(lambda sb: sb.set_icon_state(payload))
 
     @_bounded
@@ -425,10 +429,10 @@ class SimSource:
 
     @_bounded
     async def write(self, state: list[Any], library: list[Any] | None,
-                    pins: list[dict[str, int]] | None = None) -> None:
+                    pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> None:
         require_writable()
         base = plistlib.loads(self.path.read_bytes())
-        out = model_to_disk(state, library, base, pins if pins is not None else [])
+        out = model_to_disk(state, library, base, pins if pins is not None else [], grid)
         before = self._springboard_pid()
         self.path.write_bytes(plistlib.dumps(out, fmt=plistlib.FMT_BINARY))
         # SIGKILL so SpringBoard can't save its old in-memory layout over ours on the way out
@@ -518,10 +522,10 @@ class FileSource:
         return disk_to_model(raw) if is_dict_format(raw) else (raw, None)
 
     async def write(self, state: list[Any], library: list[Any] | None,
-                    pins: list[dict[str, int]] | None = None) -> None:
+                    pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> None:
         require_writable()
         raw = plistlib.loads(self.path.read_bytes())
-        out = model_to_disk(state, library, raw, pins if pins is not None else []) if is_dict_format(raw) else state
+        out = model_to_disk(state, library, raw, pins if pins is not None else [], grid) if is_dict_format(raw) else state
         self.path.write_bytes(plistlib.dumps(out, fmt=plistlib.FMT_BINARY))
 
     async def icon_png(self, bundle_id: str) -> bytes | None:

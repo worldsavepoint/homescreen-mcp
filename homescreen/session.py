@@ -556,7 +556,7 @@ class Session:
                         "backup": backup.name, "status": "pending"}).encode())
         write_error = None
         try:
-            await asyncio.wait_for(self.source.write(target, target_lib, pins), OPERATION_TIMEOUT)
+            await asyncio.wait_for(self.source.write(target, target_lib, pins, self.grid), OPERATION_TIMEOUT)
         except Exception as e:
             write_error = str(e) or type(e).__name__
         verification_note = "Readback compares the layout fields returned by the selected source."

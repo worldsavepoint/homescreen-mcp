@@ -97,3 +97,22 @@ def test_place_at_keeps_one_based_page_number_when_creating_next_page(draft):
     assert call("place_at", item_id="com.example.a", page=2, row=2, column=1)["ok"] is True
     assert session.require().pages[0] == []
     assert call("show_layout")["pages"]["2"][0]["placed_at"] == {"row": 2, "column": 1}
+
+
+@pytest.mark.parametrize("cols,rows", [(4, 6), (5, 7)])
+def test_close_gaps_then_arrange_changes_pinned_layout_to_sequential_order(draft, cols, rows):
+    session = draft(cols, rows)
+    session.layout = Layout([[], [{"bundleIdentifier": "com.example.a", "displayName": "A"},
+                                 {"bundleIdentifier": "com.example.b", "displayName": "B"}]],
+                            library=[], grid=session.grid)
+    ids = ["com.example.a", "com.example.b"]
+    assert call("place_at", item_id=ids[0], page=1, row=rows, column=cols)["ok"] is True
+    assert call("arrange", pages=[ids])["ok"] is True
+    assert session.require().place(session.require().pages[0])[0][ids[0]][:2] == (rows - 1, cols - 1)
+    assert call("close_gaps", item_ids=[ids[0]])["ok"] is True
+    assert call("arrange", pages=[ids])["ok"] is True
+    positions, problems = session.require().place(session.require().pages[0])
+    assert not problems
+    assert positions[ids[0]][:2] == (0, 0)
+    assert positions[ids[1]][:2] == (0, 1)
+    assert session.require().pins == {}

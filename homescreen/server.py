@@ -25,7 +25,9 @@ Move an app to 'library' to keep it in App Library; iOS restores apps omitted fr
 Read show_layout.grid for page cols/rows, Dock capacity (dock) and folder-page capacity (folder).
 Pages hold cols * rows slots. Widget footprints are small=2x2, medium=4x2, large=4x4.
 For fixed positions, inspect grid and call place_at with 1-based page/row/column coordinates.
-Use move or arrange for sequential item order; on iOS 16, use these sequential-order edits.
+Use move for sequential item order. For sequential arrange, call close_gaps on pinned items
+first; arrange retains fixed positions for items staying on the same page. On iOS 16, use
+these sequential-order edits.
 Moving an item clears its fixed position. USB reads omit phone-created gaps; apply uses the draft's positions.
 Preserve page 1 and Dock placement unless the user requests changes. optimize_by_usage preserves
 page-1 top-level placement when requested and optimizes folder contents throughout the draft,
@@ -114,12 +116,14 @@ async def get_icons(
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True,
                                       idempotentHint=False, openWorldHint=False))
 def arrange(
-    pages: Annotated[list[list[str]], Field(description="Pages in 1-based page order, each containing item ids in row-major order.")],
+    pages: Annotated[list[list[str]], Field(description="Pages in 1-based order; unpinned items flow in the supplied order. Clear same-page pins with close_gaps for row-major placement.")],
     dock: Annotated[list[str] | None, Field(description="Ordered Dock item ids; omitted leaves the Dock unchanged.")] = None,
     library: Annotated[list[str] | None, Field(description="App ids kept only in App Library; omitted leaves it unchanged.")] = None,
 ) -> dict[str, Any]:
     """Replace the loaded draft's top-level layout in one saved undo step.
     Every top-level item and App Library app must appear exactly once.
+    Same-page items retain fixed positions; items moved between pages lose them.
+    For sequential row-major placement, call close_gaps on pinned item ids before arranging.
     Omitted dock/library stay unchanged. Return ok and validation problems."""
     return _edit(lambda lay: lay.arrange(pages, dock, library))
 
@@ -240,8 +244,8 @@ def place_at(
     column: Annotated[int, Field(description="1-based grid column, from 1 through show_layout.grid.cols.")],
 ) -> dict[str, Any]:
     """Use show_layout.grid to pin a draft item at a page coordinate in one saved undo step.
-    Fixed-position placement leaves gaps. For sequential order, use move or arrange.
-    On iOS 16, use move or arrange for supported sequential-order edits.
+    Fixed-position placement leaves gaps. Use move for sequential order, or close_gaps then arrange.
+    On iOS 16, use these sequential-order edits.
     Other items flow around it; return ok and validation problems."""
     def run(lay: Layout) -> None:
         if not 1 <= row <= lay.grid.rows:
