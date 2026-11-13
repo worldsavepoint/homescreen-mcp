@@ -17,6 +17,7 @@ form, which carries the ignored list, so PhoneSource writes that (see to_root_ar
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import platform
@@ -28,7 +29,7 @@ from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any, Protocol
 
-from .model import Grid, is_folder, is_widget
+from .model import Grid, LayoutError, is_folder, is_widget, widget_wire_fields
 
 Layout = tuple[list[Any], list[Any] | None]
 
@@ -108,13 +109,11 @@ def _modern(x: Any) -> Any:
     if x.get(DISK_MARK):
         return x["bundleIdentifier"]
     if is_widget(x):
-        out = {k: v for k, v in x.items() if k != "iconLists"}
+        out = {k: v for k, v in widget_wire_fields(x).items() if k != "iconLists"}
         # Over USB a single widget's uniqueIdentifier isn't exported. Its configuration (which
         # script, which person) hangs off that id, and userSelectedElementIdentifier holds it for
         # configured widgets. Without it SpringBoard saves the widget with no id and the
         # configuration is lost, so put it back.
-        if "uniqueIdentifier" not in out and out.get("userSelectedElementIdentifier") and "elements" not in out:
-            out["uniqueIdentifier"] = out["userSelectedElementIdentifier"]
         return out
     if is_folder(x):
         out = {k: v for k, v in x.items() if k not in (NAME_MARK, "iconLists")}
@@ -149,14 +148,54 @@ def _list_metadata(ids: list[str], pins: list[dict[str, int]], grid: Grid | None
             for i, p in enumerate(pins) if p and i < len(ids)}
 
 
-def disk_pins(raw: dict[str, Any]) -> dict[str, int]:
-    """{identifier: grid cell} from the dict format's listMetadata (fixedLocations)."""
-    out: dict[str, int] = {}
-    meta = raw.get("listMetadata") or {}
-    for pid in raw.get("listUniqueIdentifiers") or []:
-        for key, cell in ((meta.get(pid) or {}).get("fixedLocations") or {}).items():
-            out[str(key)] = int(cell)
-    return out
+class ObservedPins(dict):
+    """Dict-compatible pin lookup retaining the archive evidence used to verify it.
+
+    Cells keep their exported types. Page IDs and metadata survive snapshots so a
+    flat lookup never becomes proof of page ownership or a coordinate frame.
+    """
+
+    def __init__(self, raw: dict[str, Any]):
+        self.archive = copy.deepcopy({k: raw[k] for k in ("listUniqueIdentifiers", "listMetadata") if k in raw})
+        super().__init__()
+        ids = self.archive.get("listUniqueIdentifiers", [])
+        meta = self.archive.get("listMetadata", {})
+        if isinstance(ids, list) and isinstance(meta, dict):
+            for pid in ids:
+                page = meta.get(pid, {}) if isinstance(pid, str) else {}
+                pins = page.get("fixedLocations", {}) if isinstance(page, dict) else {}
+                if isinstance(pins, dict):
+                    self.update(pins)
+
+    def validate(self, page_keys: list[set[str]], grid: Grid) -> None:
+        ids = self.archive.get("listUniqueIdentifiers", [])
+        meta = self.archive.get("listMetadata", {})
+        if not isinstance(meta, dict):
+            raise LayoutError("invalid exported pin metadata")
+        if not meta:
+            return
+        if (not isinstance(ids, list) or len(ids) != len(page_keys)
+                or any(not isinstance(pid, str) or not pid for pid in ids) or len(set(ids)) != len(ids)):
+            raise LayoutError("exported pin metadata has invalid page identifiers")
+        for pid, page in meta.items():
+            if pid not in ids or not isinstance(page, dict):
+                raise LayoutError("exported pin metadata does not identify a layout page")
+            for name, expected in (("fixedLocationsGridColumns", grid.cols), ("fixedLocationsGridRows", grid.rows)):
+                if name in page and (type(page[name]) is not int or page[name] != expected):
+                    raise LayoutError("exported pin metadata dimensions differ from the loaded grid")
+            pins = page.get("fixedLocations", {})
+            if not isinstance(pins, dict):
+                raise LayoutError("invalid exported pin locations")
+            for key, cell in pins.items():
+                if key not in page_keys[ids.index(pid)]:
+                    raise LayoutError("exported pin does not identify an item on its page")
+                if type(cell) is not int or not 0 <= cell < grid.slots:
+                    raise LayoutError("invalid exported pin cell on the loaded grid")
+
+
+def disk_pins(raw: dict[str, Any]) -> ObservedPins:
+    """Read actual page-scoped placement metadata, retaining raw values and dimensions."""
+    return ObservedPins(raw)
 
 
 def is_dict_format(raw: Any) -> bool:
@@ -294,15 +333,18 @@ class PhoneSource:
     @_bounded
     async def read(self) -> Layout:
         raw = await self.read_raw(self.format_version)
+        self.pins = None
+        self._last_dict = None
         if is_dict_format(raw):
             self._last_dict = raw
+            if "listMetadata" in raw:
+                self.pins = disk_pins(raw)
             return disk_to_model(raw)
-        self._last_dict = None
         if self.write_mode == "list":
             return raw, None
         return raw, library_from_installed(raw, await self.installed_apps())
 
-    pins: dict[str, int] | None = None  # the phone never reports gaps
+    pins: dict[str, int] | None = None  # ordinary USB list reads do not report gaps
 
     @_bounded
     async def write(self, state: list[Any], library: list[Any] | None,

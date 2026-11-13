@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import html
+from itertools import islice
 from pathlib import Path
 
 from .model import Layout, Node
@@ -56,7 +57,7 @@ async def render(session: Session, out: Path, show_original: bool = True) -> Pat
                 size = "small"
             return f'<div class="widget w-{size}"{style}>{name}</div>'
         if node.kind == "folder":
-            inner = "".join([await img(c) for p in node.children for c in p][:9])
+            inner = "".join([await img(c) for c in islice((c for p in node.children for c in p), 9)])
             return f'<div class="cell folder"{style}><div class="ph">{inner}</div><span>{name}</span></div>'
         cls = "cell moved" if mark and node.id in moved else "cell"
         return f'<div class="{cls}"{style}>{await img(node)}<span>{name}</span></div>'
@@ -87,7 +88,7 @@ async def render(session: Session, out: Path, show_original: bool = True) -> Pat
             f"{'no problems' if not d['problems'] else html.escape('; '.join(d['problems']))}</div>",
             "<h2>Draft</h2>", await phone(lay, "Draft", True)]
     if show_original:
-        body += ["<h2>On the phone now</h2>", await phone(lay.original(), "Current", False)]
+        body += ["<h2>Last read from the phone</h2>", await phone(lay.original(), "Last read", False)]
     out.write_text(f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' "
                    f"content='width=device-width,initial-scale=1'><title>Home Screen Draft</title>"
                    f"<style>{CSS}</style></head><body>{''.join(body)}</body></html>")

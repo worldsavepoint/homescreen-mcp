@@ -89,7 +89,8 @@ def find_apps(
 async def icon_colors(
     ids: Annotated[list[str] | None, Field(description="Item ids from show_layout; omitted or empty selects every app with a bundle id.")] = None,
 ) -> dict[str, Any]:
-    """Return dominant icon family, hex, background and hue for loaded draft items.
+    """Return results keyed by item id, with name and dominant icon family.
+    Analyzed icons add hex, background and hue; unavailable or empty icons have family='unknown'.
     Reads uncached icons from the selected source and saves them locally."""
     return await session().icon_colors(ids)
 
@@ -420,7 +421,7 @@ async def apply(
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False,
                                       idempotentHint=True, openWorldHint=False))
 def list_backups() -> list[str]:
-    """Return saved backup filenames for this session's device, oldest first.
+    """Return saved backup filenames for this session's device, sorted by filename.
     Creates the local session/backup directory as needed and sets session-directory permissions."""
     return session().backups()
 
@@ -433,6 +434,8 @@ async def restore(
     """Write a named trusted backup to the iPhone.
     Requires explicit user approval, HOMESCREEN_ALLOW_APPLY=1, a writable source
     and a previously read device identity.
+    Pinned backups require saved grid dimensions; trusted unpinned legacy backups remain supported.
+    Restored item footprints must fit the loaded grid.
     Backs up first and verifies after writing; returns status, replaces the draft and clears history."""
     if not ALLOW_APPLY:
         return {"ok": False, "error": f"restore from the assistant is off. The user can run `home-screen-organizer restore {backup}`."}

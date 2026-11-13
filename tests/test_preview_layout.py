@@ -72,7 +72,7 @@ def test_preview_renders_grid_pins_folder_and_widget_spans(tmp_path, cols, rows)
     for title, expected in {
         "Draft · Page 1": {"Pinned <A>": (rows, cols, 1, 1), "Folder & More": (1, 1, 1, 1),
                            "Weather": (1, 3, 2, 2)},
-        "Current · Page 1": {"Pinned <A>": (1, 1, 1, 1), "Folder & More": (1, 2, 1, 1),
+        "Last read · Page 1": {"Pinned <A>": (1, 1, 1, 1), "Folder & More": (1, 2, 1, 1),
                              "Weather": (1, 3, 2, 2)},
     }.items():
         section = sections[title]
@@ -104,3 +104,20 @@ def test_preview_lists_items_outside_the_grid_with_escaped_placement_errors(tmp_
     assert "no room for &lt;Oversized&gt;" in source
     assert any(text(n) == "Unplaced items" for n in elements(doc.root, tag="h4"))
     assert text(next(elements(doc.root, cls="widget"))) == "<Oversized>"
+
+
+def test_folder_thumbnail_reads_only_nine_visible_icons_across_both_snapshots(tmp_path):
+    session = Session(FileSource(tmp_path / "unused.plist"), tmp_path / "data")
+    session.layout = Layout([[], [folder("Many", [app(f"example.a{i}", f"A{i}") for i in range(108)])]])
+    calls = []
+
+    async def icon(bundle_id):
+        calls.append(bundle_id)
+        return b"synthetic-icon"
+
+    session.icon = icon
+    path = asyncio.run(preview.render(session, tmp_path / "preview.html"))
+    assert calls == [f"example.a{i}" for i in range(9)]
+    doc = Document(path.read_text())
+    assert len(list(elements(doc.root, tag="img"))) == 18
+    assert [text(n) for n in elements(doc.root, tag="h2")] == ["Draft", "Last read from the phone"]

@@ -713,13 +713,21 @@ def _lcs(a: list[str], b: list[str]) -> set[str]:
     return out
 
 
+def widget_wire_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    """Project a single widget's exported element identity onto its root-archive alias."""
+    fields = dict(raw)
+    if "uniqueIdentifier" not in fields and fields.get("userSelectedElementIdentifier") and "elements" not in fields:
+        fields["uniqueIdentifier"] = fields["userSelectedElementIdentifier"]
+    return fields
+
+
 def widget_configuration(raw: dict[str, Any]) -> str:
     """Compare every exported widget field, including configuration and stack elements.
 
     USB may attach an empty iconLists which the root archive omits. Private device
     configuration that is never exported cannot be verified by this fingerprint.
     """
-    fields = {k: v for k, v in raw.items() if k != "iconLists" or v}
+    fields = {k: v for k, v in widget_wire_fields(raw).items() if k != "iconLists" or v}
     return plistlib.dumps(fields, fmt=plistlib.FMT_BINARY, sort_keys=True).hex()
 
 
