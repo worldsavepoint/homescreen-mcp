@@ -284,5 +284,18 @@
   "error.usageAccess": "macOS hat den Zugriff auf Bildschirmzeitdaten blockiert. Erlaube der App oder dem Terminal Festplattenvollzugriff unter Systemeinstellungen › Datenschutz & Sicherheit.",
   "error.usageDays": "Keine Bildschirmzeitdaten dieses iPhone für die letzten {days} Tage.",
   "error.usageReports": "Dieses Gerät hat noch keine Speicherberichte. Versuche es nach einigen Nutzungstagen erneut oder verwende Bildschirmzeit.",
-  "error.usageSource": "Diese Quelle kann keine App-Nutzung melden."
+  "error.usageSource": "Diese Quelle kann keine App-Nutzung melden.",
+  "native.prepareError": "Die lokale Engine konnte nicht vorbereitet werden.",
+  "native.launchError": "Die lokale Engine konnte nicht gestartet werden.",
+  "mcp.modeHint": "Der gewählte Modus gilt für die Registrierung und die kopierte Konfiguration. Bestehende Registrierungen ändern sich erst beim Aktualisieren.",
+  "mcp.serviceError": "Die Engine hat Initialisierung und Werkzeugerkennung nicht abgeschlossen. Prüfen Sie die Diagnose und versuchen Sie es erneut.",
+  "mcp.notExecutable": "Die gewählte Datei kann nicht ausgeführt werden. Wählen Sie die ausführbare Clientdatei.",
+  "mcp.snapshotFailed": "Die bestehende Konfiguration konnte nicht zur Wiederherstellung gesichert werden. Sie wurde nicht ersetzt.",
+  "mcp.recoveryFailed": "Die vorherige Konfiguration konnte nicht wiederhergestellt werden. Prüfen Sie die Clientkonfiguration vor einem erneuten Versuch.",
+  "mcp.restored": "Die vorherige Konfiguration wurde wiederhergestellt.",
+  "mcp.invalidResponse": "Der Client hat eine unbekannte Konfigurationsantwort geliefert. Aktualisieren Sie den Status oder prüfen Sie die Clientkonfiguration.",
+  "mcp.operationFailed": "Der Clientvorgang ist fehlgeschlagen. Prüfen Sie die Diagnose und versuchen Sie es erneut.",
+  "error.pinIdentifier": "Dieses Element hat keine bekannte Positionskennung. Verwenden Sie die normale Seitenreihenfolge.",
+  "error.backupGrid": "Dieser Sicherung fehlen gültige Rastermaße. Verwenden Sie eine Sicherung mit dem ursprünglichen Raster.",
+  "error.savedPosition": "Die gespeicherten Positionen passen nicht zu diesem Layout oder Raster. Wählen Sie passende Positionen oder eine andere Sicherung."
 }

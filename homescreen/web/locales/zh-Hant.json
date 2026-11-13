@@ -284,5 +284,18 @@
   "error.usageAccess": "macOS 封鎖了螢幕使用時間資料的存取。請在「系統設定 › 隱私權與安全性」中授予 App 或終端機「完整磁碟存取權」。",
   "error.usageDays": "過去 {days} 天內沒有此 iPhone 的螢幕使用時間資料。",
   "error.usageReports": "此裝置尚無記憶體報告。請使用幾天後重試，或使用螢幕使用時間。",
-  "error.usageSource": "此來源無法回報 App 使用情況。"
+  "error.usageSource": "此來源無法回報 App 使用情況。",
+  "native.prepareError": "無法準備本機引擎。",
+  "native.launchError": "無法啟動本機引擎。",
+  "mcp.modeHint": "所選模式用於註冊及複製的設定。現有註冊僅在按下更新後變更。",
+  "mcp.serviceError": "引擎未完成初始化和工具探索。請查看診斷資訊後重試。",
+  "mcp.notExecutable": "所選檔案無法執行。請選擇用戶端執行檔。",
+  "mcp.snapshotFailed": "無法儲存現有設定以供復原。未嘗試取代。",
+  "mcp.recoveryFailed": "無法還原先前的設定。請檢查用戶端設定後重試。",
+  "mcp.restored": "已還原先前的設定。",
+  "mcp.invalidResponse": "用戶端傳回無法辨識的設定回應。請重新整理狀態或檢查用戶端設定。",
+  "mcp.operationFailed": "用戶端操作失敗。請查看診斷資訊後重試。",
+  "error.pinIdentifier": "此項目沒有已知的位置識別碼。請使用一般頁面順序。",
+  "error.backupGrid": "此備份缺少有效的原始格線尺寸。請使用包含原始格線資訊的備份。",
+  "error.savedPosition": "儲存的位置與此佈局或格線不相容。請選擇相容的位置或其他備份。"
 }

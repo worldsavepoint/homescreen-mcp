@@ -1,12 +1,14 @@
 import Foundation
 
-/// Read-only stdio configuration for the engine included in this app bundle.
+/// Stdio configuration for the engine included in this app bundle; read-only by default.
 struct MCPSetup {
     let executablePath: String
+    var mode: MCPAccessMode = .readOnly
 
     var launchCommand: String {
         let quotedPath = "'" + executablePath.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
-        return "HOMESCREEN_READ_ONLY=1 \(quotedPath) mcp"
+        let environment = mode == .readOnly ? "HOMESCREEN_READ_ONLY=1" : "HOMESCREEN_READ_ONLY=0 HOMESCREEN_ALLOW_APPLY=1"
+        return "\(environment) \(quotedPath) mcp"
     }
 
     var cursorClaudeJSON: String {
@@ -22,8 +24,9 @@ struct MCPSetup {
         args = ["mcp"]
 
         [mcp_servers.ios-homescreen-mcp.env]
-        HOMESCREEN_READ_ONLY = "1"
+        HOMESCREEN_READ_ONLY = "\(mode == .readOnly ? "1" : "0")"
         """
+        + (mode == .applyEnabled ? "\nHOMESCREEN_ALLOW_APPLY = \"1\"" : "")
     }
 
     var vscodeJSON: String {
@@ -34,7 +37,8 @@ struct MCPSetup {
     }
 
     private var server: [String: Any] {
-        ["command": executablePath, "args": ["mcp"], "env": ["HOMESCREEN_READ_ONLY": "1"]]
+        ["command": executablePath, "args": ["mcp"], "env": mode == .readOnly
+            ? ["HOMESCREEN_READ_ONLY": "1"] : ["HOMESCREEN_READ_ONLY": "0", "HOMESCREEN_ALLOW_APPLY": "1"]]
     }
 
     private func json(_ value: Any, options: JSONSerialization.WritingOptions = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) -> String {

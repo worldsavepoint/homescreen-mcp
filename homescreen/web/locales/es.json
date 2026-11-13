@@ -284,5 +284,18 @@
   "error.usageAccess": "macOS bloqueó el acceso a Tiempo de uso. Concede Acceso total al disco a la app o terminal en Ajustes del Sistema › Privacidad y seguridad.",
   "error.usageDays": "No hay datos de Tiempo de uso de este iPhone en los últimos {days} días.",
   "error.usageReports": "Este dispositivo aún no tiene informes de memoria. Inténtalo tras unos días de uso o usa Tiempo de uso.",
-  "error.usageSource": "Esta fuente no puede informar del uso de apps."
+  "error.usageSource": "Esta fuente no puede informar del uso de apps.",
+  "native.prepareError": "No se pudo preparar el motor local.",
+  "native.launchError": "No se pudo iniciar el motor local.",
+  "mcp.modeHint": "El modo seleccionado se usa al registrar y copiar la configuración. Los registros existentes solo cambian al actualizarlos.",
+  "mcp.serviceError": "El motor no completó la inicialización y la detección de herramientas. Revisa el diagnóstico e inténtalo de nuevo.",
+  "mcp.notExecutable": "El archivo seleccionado no se puede ejecutar. Elige el ejecutable del cliente.",
+  "mcp.snapshotFailed": "No se pudo guardar la configuración existente para recuperarla. No se intentó reemplazarla.",
+  "mcp.recoveryFailed": "No se pudo restaurar la configuración anterior. Revisa la configuración del cliente antes de reintentar.",
+  "mcp.restored": "Se restauró la configuración anterior.",
+  "mcp.invalidResponse": "El cliente devolvió una respuesta de configuración no reconocida. Actualiza el estado o revisa la configuración del cliente.",
+  "mcp.operationFailed": "La operación del cliente falló. Revisa el diagnóstico e inténtalo de nuevo.",
+  "error.pinIdentifier": "Este elemento no tiene un identificador de posición conocido. Usa el orden normal de la página.",
+  "error.backupGrid": "Esta copia no tiene dimensiones de cuadrícula válidas. Usa una copia que incluya su cuadrícula original.",
+  "error.savedPosition": "Las posiciones guardadas no son compatibles con este diseño o cuadrícula. Elige posiciones compatibles u otra copia."
 }

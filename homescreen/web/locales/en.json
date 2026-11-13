@@ -284,5 +284,18 @@
   "error.usageAccess": "macOS blocked Screen Time data access. Give the app or terminal Full Disk Access in System Settings › Privacy & Security.",
   "error.usageDays": "No Screen Time data from this iPhone in the last {days} days.",
   "error.usageReports": "This device has no memory reports yet. Try again after a few days of use, or use Screen Time.",
-  "error.usageSource": "This source cannot report app usage."
+  "error.usageSource": "This source cannot report app usage.",
+  "native.prepareError": "Couldn’t prepare the local engine.",
+  "native.launchError": "Couldn’t start the local engine.",
+  "mcp.modeHint": "The selected mode is used for registration and copied configuration. Existing registrations change only when you update them.",
+  "mcp.serviceError": "The engine did not complete initialization and tool discovery. Review the diagnostics and try again.",
+  "mcp.notExecutable": "The selected file cannot be executed. Choose the client executable.",
+  "mcp.snapshotFailed": "The existing configuration could not be saved for recovery. No replacement was attempted.",
+  "mcp.recoveryFailed": "The previous configuration could not be restored. Review the client configuration before retrying.",
+  "mcp.restored": "The previous configuration was restored.",
+  "mcp.invalidResponse": "The client returned an unrecognized configuration response. Refresh status or review the client configuration.",
+  "mcp.operationFailed": "The client operation failed. Review the diagnostics and try again.",
+  "error.pinIdentifier": "This item has no known placement identifier. Use ordinary page order for it.",
+  "error.backupGrid": "This backup lacks valid saved grid dimensions. Use a backup that includes its original grid.",
+  "error.savedPosition": "Saved positions do not fit this layout or grid. Choose compatible positions or another backup."
 }

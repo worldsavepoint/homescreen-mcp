@@ -284,5 +284,18 @@
   "error.usageAccess": "O macOS bloqueou os dados de Tempo de Uso. Conceda Acesso Total ao Disco ao app ou terminal em Ajustes do Sistema › Privacidade e Segurança.",
   "error.usageDays": "Sem dados de Tempo de Uso deste iPhone nos últimos {days} dias.",
   "error.usageReports": "Este dispositivo ainda não tem relatórios de memória. Tente após alguns dias de uso ou use Tempo de Uso.",
-  "error.usageSource": "Esta fonte não informa o uso de apps."
+  "error.usageSource": "Esta fonte não informa o uso de apps.",
+  "native.prepareError": "Não foi possível preparar o mecanismo local.",
+  "native.launchError": "Não foi possível iniciar o mecanismo local.",
+  "mcp.modeHint": "O modo selecionado é usado no registro e na configuração copiada. Registros existentes só mudam quando você os atualiza.",
+  "mcp.serviceError": "O mecanismo não concluiu a inicialização e a descoberta de ferramentas. Revise o diagnóstico e tente novamente.",
+  "mcp.notExecutable": "O arquivo selecionado não pode ser executado. Escolha o executável do cliente.",
+  "mcp.snapshotFailed": "Não foi possível salvar a configuração existente para recuperação. Nenhuma substituição foi tentada.",
+  "mcp.recoveryFailed": "Não foi possível restaurar a configuração anterior. Revise a configuração do cliente antes de tentar novamente.",
+  "mcp.restored": "A configuração anterior foi restaurada.",
+  "mcp.invalidResponse": "O cliente retornou uma resposta de configuração desconhecida. Atualize o status ou revise a configuração do cliente.",
+  "mcp.operationFailed": "A operação do cliente falhou. Revise o diagnóstico e tente novamente.",
+  "error.pinIdentifier": "Este item não tem um identificador de posição conhecido. Use a ordem normal da página.",
+  "error.backupGrid": "Este backup não tem dimensões de grade válidas. Use um backup que inclua a grade original.",
+  "error.savedPosition": "As posições salvas não cabem neste layout ou grade. Escolha posições compatíveis ou outro backup."
 }

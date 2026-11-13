@@ -284,5 +284,18 @@
   "error.usageAccess": "macOS bloque l’accès à Temps d’écran. Autorisez l’accès complet au disque pour l’app ou le terminal dans Réglages Système › Confidentialité et sécurité.",
   "error.usageDays": "Aucune donnée Temps d’écran de cet iPhone sur les {days} derniers jours.",
   "error.usageReports": "Cet appareil n’a pas encore de rapports mémoire. Réessayez après quelques jours d’utilisation ou utilisez Temps d’écran.",
-  "error.usageSource": "Cette source ne peut pas fournir l’utilisation des apps."
+  "error.usageSource": "Cette source ne peut pas fournir l’utilisation des apps.",
+  "native.prepareError": "Impossible de préparer le moteur local.",
+  "native.launchError": "Impossible de démarrer le moteur local.",
+  "mcp.modeHint": "Le mode sélectionné est utilisé pour l’enregistrement et la configuration copiée. Les enregistrements existants ne changent que si vous les mettez à jour.",
+  "mcp.serviceError": "Le moteur n’a pas terminé l’initialisation et la découverte des outils. Consultez le diagnostic et réessayez.",
+  "mcp.notExecutable": "Le fichier sélectionné ne peut pas être exécuté. Choisissez l’exécutable du client.",
+  "mcp.snapshotFailed": "Impossible de sauvegarder la configuration existante pour la restaurer. Aucun remplacement n’a été tenté.",
+  "mcp.recoveryFailed": "Impossible de restaurer la configuration précédente. Vérifiez la configuration du client avant de réessayer.",
+  "mcp.restored": "La configuration précédente a été restaurée.",
+  "mcp.invalidResponse": "Le client a renvoyé une réponse de configuration inconnue. Actualisez l’état ou vérifiez la configuration du client.",
+  "mcp.operationFailed": "L’opération du client a échoué. Consultez le diagnostic et réessayez.",
+  "error.pinIdentifier": "Cet élément n’a pas d’identifiant de position connu. Utilisez l’ordre normal de la page.",
+  "error.backupGrid": "Cette sauvegarde ne contient pas de dimensions de grille valides. Utilisez une sauvegarde incluant sa grille d’origine.",
+  "error.savedPosition": "Les positions enregistrées ne conviennent pas à cette disposition ou grille. Choisissez des positions compatibles ou une autre sauvegarde."
 }

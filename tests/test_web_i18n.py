@@ -254,6 +254,29 @@ assert.ok($('#toast').querySelector('pre').textContent.includes("widgets can't g
 ''', native=True)
 
 
+@pytest.mark.parametrize("message,key", [
+    ("widget 'name with quotes' has no known wire identifier; use ordinary page order", "error.pinIdentifier"),
+    ("folder 'name' has no wire identifier for its pin; use ordinary page order", "error.pinIdentifier"),
+    ("pinned backup has no saved grid dimensions; use a backup with grid provenance", "error.backupGrid"),
+    ("backup grid dimensions must be positive integers", "error.backupGrid"),
+    ("backup pins must identify items on each page", "error.savedPosition"),
+    ("backup pin is outside its saved grid or does not identify an item on its page", "error.savedPosition"),
+    ("backup pin footprint does not fit the saved or loaded grid", "error.savedPosition"),
+    ("invalid pin cell for 'example' on the loaded grid", "error.savedPosition"),
+    ("pin identifiers do not match the layout's page items", "error.savedPosition"),
+    ("pins do not fit the loaded grid: example", "error.savedPosition"),
+])
+def test_pin_integrity_errors_have_localized_primary_messages(message, key):
+    browser(f'''
+const message={json.dumps(message)}, key={json.dumps(key)};
+context.fetch=async path=>({{ok:false,status:400,json:async()=>({{error:message}})}});
+$('#undo').click();await tick();await tick();
+assert.notEqual(i18n.t(key),key);
+assert.ok($('#toast').textContent.startsWith(i18n.t(key)));
+assert.equal($('#toast').querySelector('pre').textContent,message);
+''', native=True)
+
+
 def test_setup_escape_preserves_editor_selection_and_open_folder():
     browser('''
 // Browser setup uses the same escape path as a native host's web panel.

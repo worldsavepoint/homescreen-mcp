@@ -284,5 +284,18 @@
   "error.usageAccess": "macOS 阻止了屏幕使用时间数据访问。请在“系统设置 › 隐私与安全性”中授予应用或终端“完全磁盘访问权限”。",
   "error.usageDays": "过去 {days} 天内没有此 iPhone 的屏幕使用时间数据。",
   "error.usageReports": "此设备尚无内存报告。请使用几天后重试，或使用屏幕使用时间。",
-  "error.usageSource": "此来源无法报告应用使用情况。"
+  "error.usageSource": "此来源无法报告应用使用情况。",
+  "native.prepareError": "无法准备本地引擎。",
+  "native.launchError": "无法启动本地引擎。",
+  "mcp.modeHint": "所选模式用于注册和复制的配置。现有注册仅在点击更新后更改。",
+  "mcp.serviceError": "引擎未完成初始化和工具发现。请查看诊断信息后重试。",
+  "mcp.notExecutable": "所选文件无法执行。请选择客户端可执行文件。",
+  "mcp.snapshotFailed": "无法保存现有配置以供恢复。未尝试替换。",
+  "mcp.recoveryFailed": "无法恢复之前的配置。请检查客户端配置后重试。",
+  "mcp.restored": "已恢复之前的配置。",
+  "mcp.invalidResponse": "客户端返回了无法识别的配置响应。请刷新状态或检查客户端配置。",
+  "mcp.operationFailed": "客户端操作失败。请查看诊断信息后重试。",
+  "error.pinIdentifier": "此项目没有已知的位置标识。请使用普通页面顺序。",
+  "error.backupGrid": "此备份缺少有效的原始网格尺寸。请使用包含原始网格信息的备份。",
+  "error.savedPosition": "保存的位置与此布局或网格不兼容。请选择兼容的位置或其他备份。"
 }

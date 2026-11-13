@@ -1,0 +1,218 @@
+import AppKit
+import SwiftUI
+
+@MainActor
+final class MCPSetupModel: ObservableObject {
+    @Published private(set) var detections: [MCPClient: MCPClientDetection] = [:]
+    @Published private(set) var queries: [MCPClient: MCPClientQuery] = [:]
+    @Published private(set) var registrations: [MCPClient: MCPClientRegistrationResult] = [:]
+    @Published private(set) var checkResult: MCPServiceCheckResult?
+    @Published private(set) var busy = false
+    @Published var mode: MCPAccessMode = .readOnly
+    private var selectedPaths: [MCPClient: String] = [:]
+    let enginePath: String
+    private let manager: MCPClientManager
+    private let serviceCheck: MCPServiceCheck
+
+    init(manager: MCPClientManager = MCPClientManager(), serviceCheck: MCPServiceCheck = MCPServiceCheck(),
+         enginePath: String = Engine.executable.path) {
+        self.manager = manager
+        self.serviceCheck = serviceCheck
+        self.enginePath = enginePath
+    }
+
+    func refresh(consent: LaunchConsent) async {
+        guard consent.accepted, !busy else { return }
+        busy = true
+        defer { busy = false }
+        for client in MCPClient.allCases {
+            detections[client] = await manager.detect(client: client, executablePath: selectedPaths[client])
+            queries[client] = await manager.query(client: client, executablePath: selectedPaths[client])
+        }
+    }
+
+    func choose(_ path: String, for client: MCPClient, consent: LaunchConsent) async {
+        guard consent.accepted, !busy else { return }
+        selectedPaths[client] = path
+        registrations[client] = nil
+        await refresh(consent: consent)
+    }
+
+    func register(_ client: MCPClient, consent: LaunchConsent) async {
+        guard consent.accepted, !busy else { return }
+        busy = true
+        defer { busy = false }
+        let result = await manager.register(client: client, executablePath: selectedPaths[client], enginePath: enginePath, mode: mode)
+        registrations[client] = result
+        if let query = result.query { queries[client] = query }
+        else { queries[client] = await manager.query(client: client, executablePath: selectedPaths[client]) }
+    }
+
+    func check(consent: LaunchConsent) async {
+        guard consent.accepted, !busy else { return }
+        busy = true
+        defer { busy = false }
+        checkResult = await serviceCheck.run(executablePath: enginePath)
+    }
+}
+
+struct MCPSetupView: View {
+    @EnvironmentObject private var localization: Localization
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: MCPSetupModel
+    @ObservedObject var consent: LaunchConsent
+    @State private var exportFormat = "json"
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                AppMark().frame(width: 40, height: 40).accessibilityHidden(true)
+                Text(localization.t("mcp.title")).font(.title2.bold())
+                Spacer()
+                LanguagePicker().frame(maxWidth: 240)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text(localization.t("mcp.intro"))
+                    Text(localization.t("mcp.lifecycle")).foregroundStyle(.secondary)
+                    ForEach(MCPClient.allCases, id: \.self) { client in clientCard(client) }
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Text(localization.t("mcp.startupCheck")).font(.headline)
+                                Spacer()
+                                Button(localization.t("mcp.checkService")) { Task { await model.check(consent: consent) } }
+                                    .disabled(model.busy || !consent.accepted)
+                            }
+                            Text(localization.t(model.checkResult.map { $0.code == .passed ? "mcp.checkPassed" : "mcp.checkFailed" } ?? "mcp.notChecked"))
+                            if let result = model.checkResult, result.code != .passed {
+                                Text(localization.t(result.code == .timedOut ? "mcp.timeout" : "mcp.serviceError"))
+                                DiagnosticsView(details: "\(result.code.rawValue)\n" + result.tools.sorted().joined(separator: "\n"))
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                    }
+                    GroupBox(localization.t("mcp.advanced")) {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Picker(localization.t("mcp.mode"), selection: $model.mode) {
+                                Text(localization.t("mcp.readOnlyMode")).tag(MCPAccessMode.readOnly)
+                                Text(localization.t("mcp.applyMode")).tag(MCPAccessMode.applyEnabled)
+                            }.disabled(model.busy)
+                            Text(localization.t("mcp.modeHint")).font(.callout).foregroundStyle(.secondary)
+                            LabeledContent(localization.t("mcp.executable")) { Text(model.enginePath).textSelection(.enabled) }
+                            LabeledContent(localization.t("mcp.transport"), value: "stdio")
+                            Picker(localization.t("mcp.configuration"), selection: $exportFormat) {
+                                Text("Cursor / Claude JSON").tag("json")
+                                Text("Codex TOML").tag("toml")
+                                Text("VS Code / Copilot JSON").tag("vscode")
+                                Text(localization.t("mcp.copyLaunch")).tag("launch")
+                            }
+                            ScrollView(.horizontal) {
+                                Text(exportText).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                            }.background(.background, in: RoundedRectangle(cornerRadius: 6))
+                            Button(localization.t(copied ? "common.copied" : "common.copy")) {
+                                NSPasteboard.general.clearContents()
+                                copied = NSPasteboard.general.setString(exportText, forType: .string)
+                            }
+                        }.padding(8)
+                    }
+                }.padding(.trailing, 8)
+            }
+            HStack {
+                Button(localization.t("mcp.refresh")) { Task { await model.refresh(consent: consent) } }
+                    .disabled(model.busy || !consent.accepted)
+                if model.busy { ProgressView().controlSize(.small); Text(localization.t("common.working")).foregroundStyle(.secondary) }
+                Spacer()
+                Button(localization.t("common.close")) { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(24).frame(minWidth: 680, idealWidth: 780, maxWidth: 920, minHeight: 580, idealHeight: 760, maxHeight: 860)
+        .task { await model.refresh(consent: consent) }
+        .onChange(of: exportText) { _, _ in copied = false }
+    }
+
+    private var exportText: String {
+        let setup = MCPSetup(executablePath: model.enginePath, mode: model.mode)
+        switch exportFormat {
+        case "toml": return setup.codexTOML
+        case "vscode": return setup.vscodeJSON
+        case "launch": return setup.launchCommand
+        default: return setup.cursorClaudeJSON
+        }
+    }
+
+    @ViewBuilder private func clientCard(_ client: MCPClient) -> some View {
+        let detection = model.detections[client]
+        let query = model.queries[client]
+        let result = model.registrations[client]
+        let name = localization.t("mcp." + client.rawValue)
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(name).font(.headline)
+                LabeledContent(localization.t("mcp.installation"), value: localization.t(detection.map {
+                    $0.availability == .available ? "mcp.installed" : "mcp.notInstalled"
+                } ?? "common.unknown"))
+                if let path = detection?.executablePath {
+                    LabeledContent(localization.t("mcp.executable")) {
+                        Text(path).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    }
+                }
+                LabeledContent(localization.t("mcp.configuration"), value: localization.t(configurationKey(query)))
+                if let mode = query?.mode {
+                    LabeledContent(localization.t("mcp.mode"), value: localization.t(mode == .readOnly ? "mcp.readOnlyMode" : "mcp.applyMode"))
+                }
+                LabeledContent(localization.t("mcp.connection"), value: localization.t(connectionKey(query)))
+                if detection?.availability != .available {
+                    Text(localization.t("mcp.clientMissing", ["client": name])).foregroundStyle(.secondary)
+                    Link(localization.t("mcp.installGuide"), destination: URL(string: client == .codex ? "https://developers.openai.com/codex/cli/" : "https://code.claude.com/docs/en/setup")!)
+                }
+                HStack {
+                    Button(localization.t(query?.configuration == .configured ? "mcp.update" : "mcp.register")) {
+                        Task { await model.register(client, consent: consent) }
+                    }.disabled(model.busy || !consent.accepted || detection?.availability != .available)
+                    Button(localization.t("mcp.chooseExecutable")) {
+                        let panel = NSOpenPanel()
+                        panel.canChooseDirectories = false
+                        panel.allowsMultipleSelection = false
+                        if panel.runModal() == .OK, let url = panel.url { Task { await model.choose(url.path, for: client, consent: consent) } }
+                    }.disabled(model.busy || !consent.accepted)
+                }
+                if let result {
+                    Text(localization.t(result.code == .success ? "mcp.registered" : operationKey(result.code), ["client": name]))
+                    if result.recovery != .notNeeded { Text(localization.t(result.recovery == .restored ? "mcp.restored" : "mcp.recoveryFailed")) }
+                    if result.code != .success { DiagnosticsView(details: "\(result.code.rawValue) · \(result.recovery.rawValue)") }
+                } else if let query, query.code != .success && query.code != .notFound {
+                    Text(localization.t(operationKey(query.code)))
+                    DiagnosticsView(details: query.code.rawValue)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+        }
+    }
+
+    private func configurationKey(_ query: MCPClientQuery?) -> String {
+        switch query?.configuration {
+        case .configured: return "mcp.configured"
+        case .notConfigured: return "mcp.notConfigured"
+        default: return "common.unknown"
+        }
+    }
+    private func connectionKey(_ query: MCPClientQuery?) -> String {
+        switch query?.connection {
+        case .connected: return "mcp.connected"
+        case .disconnected: return "mcp.disconnected"
+        default: return "mcp.connectionUnknown"
+        }
+    }
+    private func operationKey(_ code: MCPClientOperationCode) -> String {
+        switch code {
+        case .timedOut: return "mcp.timeout"
+        case .notFound: return "mcp.notInstalled"
+        case .notExecutable: return "mcp.notExecutable"
+        case .snapshotReadFailed: return "mcp.snapshotFailed"
+        case .recoveryFailed: return "mcp.recoveryFailed"
+        case .invalidResponse: return "mcp.invalidResponse"
+        default: return "mcp.operationFailed"
+        }
+    }
+}
