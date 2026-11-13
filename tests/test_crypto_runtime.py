@@ -24,3 +24,12 @@ def test_usb_pairing_certificate_generation_and_signatures():
     assert root.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
     assert not host.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
     assert not device.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
+
+
+def test_mcp_jwt_signing_and_verification_backend():
+    import jwt
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    token = jwt.encode({"sub": "runtime-fixture"}, key, algorithm="RS256")
+    claims = jwt.decode(token, key.public_key(), algorithms=["RS256"])
+    assert claims["sub"] == "runtime-fixture"
