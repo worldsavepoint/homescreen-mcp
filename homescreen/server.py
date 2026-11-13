@@ -21,12 +21,16 @@ draft (arrange / move / create_folder / sort_* / file_into_folders ...) -> diff 
 Item ids: apps use their bundle id; folders and widgets use folder:N / widget:N.
 Targets: 'dock', 'library', 'bank' (a holding tray; empty it before applying), 'page:N'
 (1-based; N = last+1 makes a new page), 'folder:<id>[:N]'.
-To take an app off the Home Screen, move it to 'library' (App Library only). Leaving it out
-does NOT work: iOS puts it back. Pages hold 24 slots (6 rows x 4 columns); widgets take
-small=2x2, medium=4x2, large=4x4. place_at puts an item in an exact spot, leaving gaps; any move
-drops that. iOS doesn't report gaps made on the phone over USB, so those close on apply. Folders hold 9 per page. Leave page 1 and the dock alone unless asked: they are
-muscle memory. To sort by color, call icon_colors first; get_icons only for the few you
-can't judge."""
+Move an app to 'library' to keep it in App Library; iOS restores apps omitted from the layout.
+Read show_layout.grid for page cols/rows, Dock capacity (dock) and folder-page capacity (folder).
+Pages hold cols * rows slots. Widget footprints are small=2x2, medium=4x2, large=4x4.
+For fixed positions, inspect grid and call place_at with 1-based page/row/column coordinates.
+Use move or arrange for sequential item order; on iOS 16, use these sequential-order edits.
+Moving an item clears its fixed position. USB reads omit phone-created gaps; apply uses the draft's positions.
+Preserve page 1 and Dock placement unless the user requests changes. optimize_by_usage preserves
+page-1 top-level placement when requested and optimizes folder contents throughout the draft,
+including page-1, Dock and holding-tray folders. To sort by color, call icon_colors first;
+use get_icons for icons needing visual review."""
 
 mcp = MCPServer("ios-homescreen-mcp", instructions=INSTRUCTIONS)
 
@@ -60,8 +64,10 @@ async def read_phone() -> dict[str, Any]:
 def show_layout() -> dict[str, Any]:
     """Return the loaded draft: Dock, pages, App Library and holding tray.
     Items include ids and names; folders include contents and widgets include sizes.
+    grid supplies page cols/rows and Dock/folder-page capacities for layout edits.
     Requires a loaded draft. Session setup creates and sets permissions on the local data directory."""
-    return session().require().summary()
+    lay = session().require()
+    return {**lay.summary(), "grid": lay.grid.to_dict()}
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False,
@@ -183,8 +189,9 @@ def file_into_folders(
 async def sort_by_color(
     keep_first_page: Annotated[bool, Field(description="Leave page 1 unchanged; defaults to true.")] = True,
 ) -> dict[str, Any]:
-    """Rainbow-sort loaded draft loose apps after folders/widgets, in one saved undo step.
-    Clears gaps on sorted pages; reads and locally caches source icons as needed.
+    """Combine eligible draft pages, rainbow-sort loose apps after folders/widgets and repack them.
+    Repacking clears gaps, moves folders/widgets across those pages and removes empty pages.
+    Saves one undo step; reads and locally caches source icons as needed.
     Return ok and validation problems."""
     colors = await session().icon_colors()
     return _edit(lambda lay: organize.by_color(lay, colors, keep_first_page))
@@ -196,8 +203,9 @@ def sort_alphabetically(
     keep_first_page: Annotated[bool, Field(description="Leave page 1 unchanged; defaults to true.")] = True,
     folders_first: Annotated[bool, Field(description="Place folders before loose apps after widgets; defaults to true.")] = True,
 ) -> dict[str, Any]:
-    """Sort loaded draft pages A-Z in one saved undo step, with widgets first.
-    Clears gaps on sorted pages; Dock and App Library stay unchanged.
+    """Combine eligible draft pages, sort items A-Z with widgets first and repack them.
+    Repacking clears gaps, moves folders/widgets across those pages and removes empty pages.
+    Saves one undo step; Dock and App Library stay unchanged.
     Return ok and validation problems."""
     return _edit(lambda lay: organize.alphabetical(lay, keep_first_page, folders_first))
 
@@ -228,12 +236,20 @@ def app_store_categories(
 def place_at(
     item_id: Annotated[str, Field(description="Item id from show_layout: app bundle id, folder:N or widget:N.")],
     page: Annotated[int, Field(description="1-based page number; last+1 creates a page.")],
-    row: Annotated[int, Field(description="1-based grid row, normally 1 through 6.")],
-    column: Annotated[int, Field(description="1-based grid column, normally 1 through 4.")],
+    row: Annotated[int, Field(description="1-based grid row, from 1 through show_layout.grid.rows.")],
+    column: Annotated[int, Field(description="1-based grid column, from 1 through show_layout.grid.cols.")],
 ) -> dict[str, Any]:
-    """Pin a loaded draft item at a page grid position, leaving gaps, in one saved undo step.
+    """Use show_layout.grid to pin a draft item at a page coordinate in one saved undo step.
+    Fixed-position placement leaves gaps. For sequential order, use move or arrange.
+    On iOS 16, use move or arrange for supported sequential-order edits.
     Other items flow around it; return ok and validation problems."""
-    return _edit(lambda lay: lay.pin(item_id, page, (row - 1) * 4 + (column - 1)))
+    def run(lay: Layout) -> None:
+        if not 1 <= row <= lay.grid.rows:
+            raise LayoutError(f"row must be 1-{lay.grid.rows}")
+        if not 1 <= column <= lay.grid.cols:
+            raise LayoutError(f"column must be 1-{lay.grid.cols}")
+        lay.pin(item_id, page, (row - 1) * lay.grid.cols + (column - 1))
+    return _edit(run)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True,
@@ -280,11 +296,12 @@ async def screen_time(
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True,
                                       idempotentHint=False, openWorldHint=True))
 async def optimize_by_usage(
-    keep_first_page: Annotated[bool, Field(description="Leave page 1 unchanged; defaults to false.")] = False,
+    keep_first_page: Annotated[bool, Field(description="Preserve page 1 top-level placement; folder contents are optimized throughout the draft. Defaults to false.")] = False,
 ) -> dict[str, Any]:
     """Reorder loaded draft apps/folders by estimated usage in one saved undo step.
     Uses cached usage, else reads device reports into local files, then tries synced macOS
-    Screen Time. Keeps widgets on their pages, Dock and App Library unchanged.
+    Screen Time. Seeds repacked pages with their existing widgets; preserves Dock item placement and App Library.
+    Sorts/refills every folder's contents, including page-1, Dock and holding-tray folders.
     Return ok and validation problems or an error."""
     s = session()
     if s.usage is None:
@@ -327,7 +344,8 @@ def page_op(
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True,
                                       idempotentHint=False, openWorldHint=False))
 def remove_empty() -> dict[str, Any]:
-    """Remove empty pages and folders from the loaded draft in one saved undo step.
+    """Remove empty Home Screen pages and empty folders on those pages in one saved undo step.
+    Trims empty child pages in page/Dock folders; retains Dock and holding-tray folder containers.
     Return ok and validation problems."""
     return _edit(lambda lay: lay.drop_empty())
 
