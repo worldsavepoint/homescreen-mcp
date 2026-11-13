@@ -130,5 +130,5 @@ This tool uses private device interfaces that may change with iOS updates. It sa
 
 <p align="center">
   <sub>README views</sub><br>
-  <a href="https://github.com/journey-ad/Moe-Counter"><img src="https://count.moeyy.cn/@worldsavepoint.homescreen?theme=asoul&amp;padding=7&amp;scale=0.7&amp;darkmode=auto" alt="Home Screen Organizer README views — Moe Counter" width="320"></a>
+  <a href="https://github.com/journey-ad/Moe-Counter"><img src="https://count.moeyy.cn/@worldsavepoint.homescreen?theme=gelbooru&amp;padding=7&amp;scale=0.7&amp;darkmode=auto" alt="Home Screen Organizer README views — Moe Counter" width="320"></a>
 </p>

@@ -130,5 +130,5 @@ Mac、macOS、iPhone、iPad 和 Screen Time 是 Apple Inc. 的商标。IOS 是 C
 
 <p align="center">
   <sub>README 访问计数</sub><br>
-  <a href="https://github.com/journey-ad/Moe-Counter"><img src="https://count.moeyy.cn/@worldsavepoint.homescreen?theme=asoul&amp;padding=7&amp;scale=0.7&amp;darkmode=auto" alt="Home Screen Organizer README 访问计数 — Moe Counter" width="320"></a>
+  <a href="https://github.com/journey-ad/Moe-Counter"><img src="https://count.moeyy.cn/@worldsavepoint.homescreen?theme=gelbooru&amp;padding=7&amp;scale=0.7&amp;darkmode=auto" alt="Home Screen Organizer README 访问计数 — Moe Counter" width="320"></a>
 </p>
