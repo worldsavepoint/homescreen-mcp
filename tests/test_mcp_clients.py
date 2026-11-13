@@ -117,7 +117,11 @@ if action == "get":
     if "--json" in args:
         print(json.dumps({"name": "ios-homescreen-mcp", "enabled": True, "transport": {"type": "stdio", **entry}}))
     else:
-        print("ios-homescreen-mcp:\\n  Scope: User config (available in all projects)\\n  Status: " + os.environ.get("TEST_CONNECTION", "✓ Connected") + "\\n  Type: stdio\\n  Command: " + entry["command"] + "\\n  Args: mcp\\n  Environment:\\n" + "\\n".join("    " + key + "=" + value for key, value in entry["env"].items()))
+        output = "ios-homescreen-mcp:\\n  Scope: User config (available in all projects)\\n  Status: " + os.environ.get("TEST_CONNECTION", "✓ Connected") + "\\n  Type: stdio\\n  Command: " + entry["command"] + "\\n  Args: mcp\\n  Environment:\\n" + "\\n".join("    " + key + "=" + value for key, value in entry["env"].items())
+        if os.environ.get("TEST_COLOR_OUTPUT"):
+            color, reset = chr(27) + "[36m", chr(27) + "[0m"
+            output = color + output.replace("\\n", reset + "\\n" + color) + reset
+        print(output)
 elif action == "remove":
     assert args == ["mcp", "remove", "--scope", "user", "ios-homescreen-mcp"]
     entries.pop("ios-homescreen-mcp", None)
@@ -233,6 +237,28 @@ def test_unrecognized_connection_status_does_not_claim_connected(native_mcp_bina
     assert result["connection"] == "disconnected"
     sandbox["TEST_CONNECTION"] = "Connected status unavailable"
     assert execute(native_mcp_binary, sandbox, "query", "claudeCode", client)["connection"] == "unknown"
+
+
+@pytest.mark.parametrize("status,connection", [
+    ("✔ Connected", "connected"),
+    ("✓ Connected", "connected"),
+    ("✘ Connection error", "disconnected"),
+    ("✘ Failed to connect", "disconnected"),
+    ("Not connected", "disconnected"),
+    ("Connected status unavailable", "unknown"),
+    ("Waiting for client", "unknown"),
+    ("Connection error status unavailable", "unknown"),
+])
+@pytest.mark.parametrize("color", [False, True])
+def test_documented_connection_labels_preserve_configuration_and_unknown_states(
+        native_mcp_binary, sandbox, tmp_path, status, connection, color):
+    client = fake_client(tmp_path)
+    execute(native_mcp_binary, sandbox, "register", "claudeCode", client, "/engine")
+    sandbox["TEST_CONNECTION"] = status
+    if color:
+        sandbox["TEST_COLOR_OUTPUT"] = "1"
+    result = execute(native_mcp_binary, sandbox, "query", "claudeCode", client)
+    assert result == {"code": "success", "configuration": "configured", "connection": connection, "mode": "readOnly"}
 
 
 def assert_child_stopped(sandbox):

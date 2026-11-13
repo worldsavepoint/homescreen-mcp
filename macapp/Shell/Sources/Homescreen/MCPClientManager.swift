@@ -162,15 +162,17 @@ struct MCPClientManager {
             return MCPClientQuery(client: client, code: .success, configuration: .configured,
                 connection: .unknown, mode: accessMode(env), scope: .user)
         }
-        let lines = result.stdout.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        let plainOutput = result.stdout.replacingOccurrences(of: "\u{1b}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
+        let lines = plainOutput.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
         guard lines.contains("\(MCPClientRegistration.serverID):"), lines.contains(where: { $0.hasPrefix("Command:") || $0.hasPrefix("URL:") }) else {
             return queryFailure(client, .invalidResponse)
         }
         let status = lines.first(where: { $0.hasPrefix("Status:") })?.dropFirst("Status:".count)
             .trimmingCharacters(in: .whitespaces).lowercased() ?? ""
         let connection: MCPConnectionState = status.contains("failed") || status.contains("disconnected") ||
-            status.contains("not connected") || status.contains("needs authentication") ? .disconnected :
-            (["connected", "✓ connected"].contains(status) ? .connected : .unknown)
+            status.contains("not connected") || status.contains("needs authentication") ||
+            ["connection error", "✘ connection error"].contains(status) ? .disconnected :
+            (["connected", "✓ connected", "✔ connected"].contains(status) ? .connected : .unknown)
         let scope = lines.first(where: { $0.hasPrefix("Scope:") })?.lowercased() ?? ""
         let env = Dictionary(lines.compactMap { line -> (String, String)? in
             let pair = line.split(separator: "=", maxSplits: 1).map(String.init)
