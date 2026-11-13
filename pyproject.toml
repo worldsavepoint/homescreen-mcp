@@ -1,5 +1,5 @@
 [project]
-name = "homescreen-mcp"
+name = "ios-homescreen-organizer"
 version = "1.1.1"
 description = "Arrange your iPhone Home Screen from your Mac: drag-and-drop app, CLI and MCP server. Keeps App Library apps in the App Library."
 readme = "README.md"
@@ -23,10 +23,12 @@ dev = ["pytest==9.2.0", "httpx==0.28.1"]
 build = ["pyinstaller==6.22.3", "setuptools==84.2.1", "wheel==0.48.0", "pip==26.2.2"]
 
 [project.urls]
-Homepage = "https://github.com/worldsavepoint/homescreen-mcp"
-Issues = "https://github.com/worldsavepoint/homescreen-mcp/issues"
+Homepage = "https://github.com/worldsavepoint/ios-homescreen-organizer"
+Issues = "https://github.com/worldsavepoint/ios-homescreen-organizer/issues"
 
 [project.scripts]
+ios-homescreen-organizer = "homescreen.cli:main"
+ios-homescreen-mcp = "homescreen.server:main"
 homescreen = "homescreen.cli:main"
 homescreen-mcp = "homescreen.server:main"
 

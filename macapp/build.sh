@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Build Homescreen.app and Homescreen-<version>.dmg into build/.
+# Build iOS Home Screen Organizer.app and ios-homescreen-organizer-<version>.dmg into build/.
 #   macapp/build.sh            full build
 # Requires Python 3.12 and Xcode command line tools. See macapp/BUILDING.md.
 set -euo pipefail
@@ -9,7 +9,7 @@ BUILD=$ROOT/build
 PYTHON=${HOMESCREEN_BUILD_PYTHON:-python3.12}
 VENV=$(mktemp -d "${TMPDIR:-/tmp}/homescreen-build.XXXXXXXX")
 trap 'rm -rf "$VENV"' EXIT
-APP=$BUILD/Homescreen.app
+APP="$BUILD/iOS Home Screen Organizer.app"
 
 "$PYTHON" -m venv "$VENV"
 "$VENV/bin/python" -m pip install --require-hashes --only-binary=:all: -r "$ROOT/requirements-build.lock"
@@ -25,12 +25,12 @@ echo "• engine"
 
 echo "• shell"
 (cd "$ROOT/macapp/Shell" && swift build -c release --arch arm64)
-SHELL_BIN=$(cd "$ROOT/macapp/Shell" && swift build -c release --arch arm64 --show-bin-path)/Homescreen
+SHELL_BIN=$(cd "$ROOT/macapp/Shell" && swift build -c release --arch arm64 --show-bin-path)/IOSHomeScreenOrganizer
 
 echo "• app bundle"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$SHELL_BIN" "$APP/Contents/MacOS/Homescreen"
+cp "$SHELL_BIN" "$APP/Contents/MacOS/iOSHomeScreenOrganizer"
 cp -R "$BUILD/dist/engine" "$APP/Contents/Resources/engine"
 "$VENV/bin/python" -c 'import importlib.metadata as m; print("\n".join(sorted(d.metadata["Name"] + "==" + d.version for d in m.distributions())))' \
   > "$APP/Contents/Resources/dependencies.txt"
@@ -42,15 +42,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Homescreen</string>
-  <key>CFBundleDisplayName</key><string>Homescreen</string>
-  <key>CFBundleIdentifier</key><string>io.github.kats1123.homescreen</string>
-  <key>CFBundleExecutable</key><string>Homescreen</string>
+  <key>CFBundleName</key><string>iOS Home Screen Organizer</string>
+  <key>CFBundleDisplayName</key><string>iOS Home Screen Organizer</string>
+  <key>CFBundleIdentifier</key><string>io.github.worldsavepoint.ios-homescreen-organizer</string>
+  <key>CFBundleExecutable</key><string>iOSHomeScreenOrganizer</string>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$BUNDLE_VERSION</string>
   <key>CFBundleVersion</key><string>$BUNDLE_VERSION</string>
-  <key>HomescreenReleaseVersion</key><string>$VERSION</string>
+  <key>IOSHomeScreenOrganizerReleaseVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -59,15 +61,21 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
+mkdir -p "$APP/Contents/Resources/zh-Hans.lproj"
+cat > "$APP/Contents/Resources/zh-Hans.lproj/InfoPlist.strings" <<'LOCALIZATION'
+"CFBundleName" = "iOS 桌面整理";
+"CFBundleDisplayName" = "iOS 桌面整理";
+LOCALIZATION
+
 echo "• ad-hoc signing"
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 
 echo "• dmg"
-DMG=$BUILD/Homescreen-$VERSION.dmg
+DMG=$BUILD/ios-homescreen-organizer-$VERSION.dmg
 STAGE=$BUILD/dmg
 rm -rf "$STAGE" "$DMG" && mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/" && ln -s /Applications "$STAGE/Applications"
-hdiutil create -quiet -volname "Homescreen $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+hdiutil create -quiet -volname "iOS Home Screen Organizer" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 rm -rf "$STAGE"
 echo "built $APP ($(du -sh "$APP" | cut -f1)) and $DMG ($(du -sh "$DMG" | cut -f1))"

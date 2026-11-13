@@ -1,4 +1,4 @@
-# Building the macOS app
+# Building iOS Home Screen Organizer
 
 The dependency lock targets CPython 3.12 on macOS arm64. Resolve and validate a
 platform-specific lock for another Python version or architecture. The lock pins
@@ -36,7 +36,7 @@ import importlib.metadata as m
 import os
 from pathlib import Path
 pins = sorted(d.metadata["Name"] + "==" + d.version for d in m.distributions()
-              if d.metadata["Name"] != "homescreen-mcp")
+              if d.metadata["Name"] != "ios-homescreen-organizer")
 Path(os.environ["LOCK_DIR"], "pins.txt").write_text("\n".join(pins) + "\n")
 PY
 "$LOCK_DIR/venv/bin/python" -m pip download --no-deps --only-binary=:all: \
@@ -86,14 +86,14 @@ shasum -a 256 --check SHA256SUMS.txt
 ```
 
 The package command checks the bundle version, preserves executable permissions in
-the ZIP, and produces `Homescreen-<version>-macos-arm64.dmg`,
-`Homescreen-<version>-macos-arm64.zip` and `SHA256SUMS.txt`.
+the ZIP, and produces `ios-homescreen-organizer-<version>-macos-arm64.dmg`,
+`ios-homescreen-organizer-<version>-macos-arm64.zip` and `SHA256SUMS.txt`.
 
 ## Tagged releases
 
 Pull requests and pushes to `main` run layout, draft, backup, editor and launcher
 checks, build the Mac app, verify its signature and engine startup, then upload
-installable archives as the `homescreen-macos-arm64` Actions artifact.
+installable archives as the `ios-homescreen-organizer-macos-arm64` Actions artifact.
 
 To publish a release after merging the contribution:
 
@@ -111,7 +111,7 @@ To publish a release after merging the contribution:
    Versions such as `1.2.0-beta.1` produce GitHub prereleases.
 
 The app's standard macOS version fields contain the numeric release core, such as
-`1.2.0`. `HomescreenReleaseVersion` retains the complete release version, including
+`1.2.0`. `IOSHomeScreenOrganizerReleaseVersion` retains the complete release version, including
 the prerelease suffix; archive filenames and Git tags use this complete version.
 
 CI uses macOS arm64, Python 3.12, hash-checked dependencies and commit-pinned

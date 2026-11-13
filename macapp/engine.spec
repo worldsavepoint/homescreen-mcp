@@ -1,4 +1,4 @@
-# PyInstaller spec for the engine inside Homescreen.app (onedir, so it starts fast).
+# PyInstaller spec for the engine inside iOS Home Screen Organizer.app (onedir, so it starts fast).
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 datas, binaries, hidden = [], [], []

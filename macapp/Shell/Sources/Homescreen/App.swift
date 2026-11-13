@@ -3,12 +3,12 @@ import SwiftUI
 import WebKit
 
 @main
-struct HomescreenApp: App {
+struct IOSHomeScreenOrganizerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var engine = Engine()
 
     var body: some Scene {
-        Window("Homescreen", id: "main") {
+        Window("iOS Home Screen Organizer", id: "main") {
             RootView()
                 .environmentObject(engine)
                 .frame(minWidth: 1000, minHeight: 680)
@@ -32,13 +32,16 @@ struct HomescreenApp: App {
                     NSWorkspace.shared.open(Engine.dataFolder)
                 }
                 Button("Copy MCP Setup Command") {
-                    let cmd = "claude mcp add homescreen -- \"\(Engine.executable.path)\" mcp"
+                    let cmd = "claude mcp add ios-homescreen-mcp -- \"\(Engine.executable.path)\" mcp"
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(cmd, forType: .string)
                 }
             }
             CommandGroup(replacing: .help) {
-                Button("Homescreen on GitHub") {
+                Button("iOS Home Screen Organizer on GitHub") {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/worldsavepoint/ios-homescreen-organizer")!)
+                }
+                Button("Original Homescreen by Jonathan Kats") {
                     NSWorkspace.shared.open(URL(string: "https://github.com/kats1123/homescreen-mcp")!)
                 }
             }
@@ -65,14 +68,14 @@ struct RootView: View {
             VStack(spacing: 14) {
                 AppMark().frame(width: 56, height: 56)
                 ProgressView().controlSize(.small)
-                Text("Starting Homescreen…").foregroundStyle(.secondary)
+                Text("Starting iOS Home Screen Organizer…").foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .ready(let url):
             WebView(url: url).ignoresSafeArea()
         case .failed(let message):
             VStack(alignment: .leading, spacing: 12) {
-                Text("Homescreen couldn't start").font(.title2.bold())
+                Text("iOS Home Screen Organizer couldn't start").font(.title2.bold())
                 ScrollView {
                     Text(message).font(.system(.footnote, design: .monospaced)).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)

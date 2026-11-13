@@ -1,29 +1,29 @@
 <div align="center">
 
-<h1>Homescreen</h1>
-<p><strong>Arrange your iPhone or iPad Home Screen from your Mac.</strong></p>
+<h1>iOS Home Screen Organizer</h1>
+<p><strong>Arrange your iPhone or iPad Home Screen from your Mac, with drag-and-drop editing and MCP.</strong></p>
 
 **Original project by Jonathan Kats · Fork of [kats1123/homescreen-mcp](https://github.com/kats1123/homescreen-mcp).**
 
-[![Release](https://img.shields.io/github/v/release/worldsavepoint/homescreen-mcp)](https://github.com/worldsavepoint/homescreen-mcp/releases)
-[![Build](https://github.com/worldsavepoint/homescreen-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/worldsavepoint/homescreen-mcp/actions/workflows/tests.yml)
+[![Release](https://img.shields.io/github/v/release/worldsavepoint/ios-homescreen-organizer)](https://github.com/worldsavepoint/ios-homescreen-organizer/releases)
+[![Build](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml/badge.svg)](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-14%2B-222222?logo=apple)](macapp/BUILDING.md)
 [![Source build](https://img.shields.io/badge/source_build-Python_3.12_%C2%B7_arm64-3776AB)](macapp/BUILDING.md)
 
 **English** · [简体中文](README.zh-CN.md)
 
-[Install](#install) · [Get started](#get-started) · [Compatibility](#compatibility) · [Optional MCP](#mcp) · [Report an issue](https://github.com/worldsavepoint/homescreen-mcp/issues)
+[Install](#install) · [Get started](#get-started) · [Compatibility](#compatibility) · [Optional MCP](#mcp) · [Report an issue](https://github.com/worldsavepoint/ios-homescreen-organizer/issues)
 
 </div>
 
-Drag and drop real app icons, arrange folders and widgets, sort by color or usage, and review a layout before applying it over USB. Homescreen includes a Mac app, a browser editor, a CLI and an optional MCP server for AI assistants. Free and open source; no account or jailbreak required.
+Drag and drop real app icons, arrange folders and widgets, sort by color or usage, and review a layout before applying it over USB. iOS Home Screen Organizer includes a Mac app, a browser editor, a CLI and an optional MCP server for AI assistants. Free and open source; no account or jailbreak required.
 
 This fork maintains changes to device sessions, backups, the local editor and the macOS launcher. The original app, interface and SpringBoard research are the work of **Jonathan Kats and upstream contributors**. This fork is independently maintained.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/app-dark.png">
-  <img alt="Homescreen editor with real app icons, widgets, App Library and app usage" src="docs/app-light.png">
+  <img alt="iOS Home Screen Organizer editor with real app icons, widgets, App Library and app usage" src="docs/app-light.png">
 </picture>
 
 <p align="center"><sub>Interface screenshots from the upstream Homescreen project by Jonathan Kats.</sub></p>
@@ -35,7 +35,7 @@ This fork maintains changes to device sessions, backups, the local editor and th
 - **Arrange visually:** drag real icons, folders, widgets and dock items across pages. Use multi-select, search, undo/redo and ⌥-drop to swap items.
 - **Organize in one click:** sort by color, A–Z, App Store category or app usage, with an estimate of page swipes saved.
 - **Keep a working area:** park items in the App Bank, add/move/delete pages, and edit folders with multiple pages.
-- **Manage the App Library:** move apps into or out of it. Homescreen infers its contents from installed apps and the visible layout.
+- **Manage the App Library:** move apps into or out of it. iOS Home Screen Organizer infers its contents from installed apps and the visible layout.
 - **Review and apply:** compare the draft, save a device-specific backup before a write, and read back the result. Exported widget settings are included in comparisons.
 - **Choose your interface:** Mac app, local browser editor, CLI or 30 MCP tools. Drafts and backups are kept separately for each device.
 
@@ -57,9 +57,9 @@ This fork maintains changes to device sessions, backups, the local editor and th
 
 ### Download the Mac app
 
-Open [Releases](https://github.com/worldsavepoint/homescreen-mcp/releases) and download `Homescreen-<version>-macos-arm64.dmg`. Open it and drag **Homescreen** into **Applications**. A ZIP archive is also provided.
+Open [Releases](https://github.com/worldsavepoint/ios-homescreen-organizer/releases) and download `ios-homescreen-organizer-<version>-macos-arm64.dmg`. Open it and drag **iOS Home Screen Organizer** into **Applications**. A ZIP archive is also provided.
 
-The app uses **ad-hoc signing**. If macOS requests approval, open **System Settings → Privacy & Security → Open Anyway**, then launch Homescreen again.
+The app uses **ad-hoc signing**. If macOS requests approval, open **System Settings → Privacy & Security → Open Anyway**, then launch iOS Home Screen Organizer again.
 
 To verify a download, place both release archives and `SHA256SUMS.txt` in the same directory and run:
 
@@ -67,15 +67,15 @@ To verify a download, place both release archives and `SHA256SUMS.txt` in the sa
 shasum -a 256 --check SHA256SUMS.txt
 ```
 
-PR builds are available under [Actions](https://github.com/worldsavepoint/homescreen-mcp/actions/workflows/tests.yml) → the completed run → **homescreen-macos-arm64**. Version tags publish the same archive formats to Releases.
+PR builds are available under [Actions](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml) → the completed run → **ios-homescreen-organizer-macos-arm64**. Version tags publish the same archive formats to Releases.
 
 ### Install from source
 
 Use an **Apple silicon Mac with macOS 14+ and Python 3.12**. Connect an iPhone or iPad over USB and trust the Mac on the device. The commands below use the dependency lock for **macOS arm64 / CPython 3.12**; other platforms need a separately resolved and tested lock.
 
 ```sh
-git clone https://github.com/worldsavepoint/homescreen-mcp.git
-cd homescreen-mcp
+git clone https://github.com/worldsavepoint/ios-homescreen-organizer.git
+cd ios-homescreen-organizer
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-build.lock
 .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
@@ -85,8 +85,10 @@ python3.12 -m venv .venv
 Start the browser editor in read-only mode:
 
 ```sh
-HOMESCREEN_READ_ONLY=1 .venv/bin/homescreen ui
+HOMESCREEN_READ_ONLY=1 .venv/bin/ios-homescreen-organizer ui
 ```
+
+The command-line editor is `ios-homescreen-organizer`; the MCP server is `ios-homescreen-mcp`. The `homescreen` and `homescreen-mcp` command aliases remain available.
 
 ### Build the Mac app
 
@@ -109,18 +111,18 @@ Create release archives with `python3.12 macapp/release.py package`. The output 
 3. Drag items, use a sorting action, or park items in the **App Bank** while arranging. Changes stay in the local draft until applied.
 4. Review the layout comparison. In a read-only session, keep exploring and editing the draft; Apply and Restore are disabled.
 
-For a normal session, start `.venv/bin/homescreen ui` without `HOMESCREEN_READ_ONLY=1`, or open the built Mac app. **Review & Apply** then writes the reviewed draft to the device after saving a backup. Device checks are listed in [compatibility](#compatibility).
+For a normal session, start `.venv/bin/ios-homescreen-organizer ui` without `HOMESCREEN_READ_ONLY=1`, or open the built Mac app. **Review & Apply** then writes the reviewed draft to the device after saving a backup. Device checks are listed in [compatibility](#compatibility).
 
-Before applying a layout, **unhide hidden Home Screen pages on the device**: long-press the Home Screen and tap the page dots. Recreate your desired gaps in Homescreen. See [USB layout details](#usb-details).
+Before applying a layout, **unhide hidden Home Screen pages on the device**: long-press the Home Screen and tap the page dots. Recreate your desired gaps in iOS Home Screen Organizer. See [USB layout details](#usb-details).
 
 ### Sort by app usage
 
 - **Device reports:** periodic iOS memory reports provide an estimate of app usage without setup. Apps with frequent or continuous residency receive less weight in the estimate.
-- **Screen Time:** enable *Settings → Screen Time → Share Across Devices* on both the device and Mac. Reading the synced history needs **Full Disk Access** for Homescreen, or for the Terminal running it, in *System Settings → Privacy & Security*.
+- **Screen Time:** enable *Settings → Screen Time → Share Across Devices* on both the device and Mac. Reading the synced history needs **Full Disk Access** for iOS Home Screen Organizer, or for the Terminal running it, in *System Settings → Privacy & Security*.
 
 ### CLI
 
-After installation, use `.venv/bin/homescreen --help` for commands:
+After installation, use `.venv/bin/ios-homescreen-organizer --help` for commands:
 
 ```text
 read · show · diff · preview · apply · backups · restore · diagnose · probe · ui
@@ -129,7 +131,7 @@ read · show · diff · preview · apply · backups · restore · diagnose · pr
 For a read compatibility report on one already trusted USB device:
 
 ```sh
-HOMESCREEN_READ_ONLY=1 .venv/bin/homescreen diagnose
+HOMESCREEN_READ_ONLY=1 .venv/bin/ios-homescreen-organizer diagnose
 ```
 
 This prints the reported software version and aggregate layout counts.
@@ -144,7 +146,7 @@ This prints the reported software version and aggregate layout counts.
 - **iPad:** grid, dock and folder capacities come from the device. MCP/CLI operations and the editor use those capacities; widget pages retain the shape supplied by iPadOS.
 - **Python:** package metadata permits Python 3.11+, while this fork's supplied build lock targets Python 3.12 on macOS arm64. Intel Macs require a separately resolved and tested lock.
 
-Homescreen infers App Library contents from installed apps and layout reads. Keep an archived device backup and recreate your desired gaps in the editor before applying a layout.
+iOS Home Screen Organizer infers App Library contents from installed apps and layout reads. Keep an archived device backup and recreate your desired gaps in the editor before applying a layout.
 
 <a id="mcp"></a>
 
@@ -153,29 +155,29 @@ Homescreen infers App Library contents from installed apps and layout reads. Kee
 MCP lets an assistant inspect, rearrange, sort and explain your layout. For Claude Code with the Mac app, choose **Device → Copy MCP Setup Command**. It points at the engine bundled in your app:
 
 ```sh
-claude mcp add homescreen -- /Applications/Homescreen.app/Contents/Resources/engine/engine mcp
+claude mcp add ios-homescreen-mcp -- "/Applications/iOS Home Screen Organizer.app/Contents/Resources/engine/engine" mcp
 ```
 
 For the Python installation, run this command from the repository root to use the executable in your virtual environment:
 
 ```sh
-claude mcp add homescreen -- "$PWD/.venv/bin/homescreen-mcp"
+claude mcp add ios-homescreen-mcp -- "$PWD/.venv/bin/ios-homescreen-mcp"
 ```
 
-For Claude Desktop's `claude_desktop_config.json`, replace `/path/to/homescreen-mcp` with your checkout's absolute path:
+For Claude Desktop's `claude_desktop_config.json`, replace `/path/to/ios-homescreen-organizer` with your checkout's absolute path:
 
 ```json
 {
   "mcpServers": {
-    "homescreen": {
-      "command": "/path/to/homescreen-mcp/.venv/bin/homescreen-mcp",
+    "ios-homescreen-mcp": {
+      "command": "/path/to/ios-homescreen-organizer/.venv/bin/ios-homescreen-mcp",
       "env": { "HOMESCREEN_READ_ONLY": "1" }
     }
   }
 }
 ```
 
-Try *“organize my apps by color”* or *“put my most-used apps on page 1.”* The assistant edits a draft. In a normal session, you apply it through the editor or `homescreen apply <token>`. Assistant-initiated writes require `HOMESCREEN_ALLOW_APPLY=1`; `HOMESCREEN_READ_ONLY=1` keeps Apply and Restore disabled.
+Try *“organize my apps by color”* or *“put my most-used apps on page 1.”* The assistant edits a draft. In a normal session, you apply it through the editor or `ios-homescreen-organizer apply <token>`. Assistant-initiated writes require `HOMESCREEN_ALLOW_APPLY=1`; `HOMESCREEN_READ_ONLY=1` keeps Apply and Restore disabled.
 
 <a id="usb-details"></a>
 
@@ -194,11 +196,11 @@ Jonathan Kats's upstream research describes SpringBoard's icon-state import path
 2. `setIconState` reaches `-[SBIconController importIconState:]`. `+[SBIconStateArchiver rootArchiveFromITunesRepresentation:]` converts that list into `buttonBar` and `iconLists`.
 3. Apps omitted from that list can be placed onto Home Screen pages. The dictionary import format uses `ignored` to retain App Library placement.
 
-Homescreen instead sends SpringBoard's dictionary form: `buttonBar`, `iconLists` and `ignored` for App Library items. It infers `ignored` from installed apps, including offloaded apps, minus apps on the Home Screen and hidden/system-only apps. App and folder data and unknown fields are retained as items move.
+iOS Home Screen Organizer instead sends SpringBoard's dictionary form: `buttonBar`, `iconLists` and `ignored` for App Library items. It infers `ignored` from installed apps, including offloaded apps, minus apps on the Home Screen and hidden/system-only apps. App and folder data and unknown fields are retained as items move.
 
-**Widgets:** configuration is associated with an element ID exported as `userSelectedElementIdentifier`. Homescreen sends it back as `uniqueIdentifier` and remembers IDs across reads. Readback compares exported widget settings and element identifiers.
+**Widgets:** configuration is associated with an element ID exported as `userSelectedElementIdentifier`. iOS Home Screen Organizer sends it back as `uniqueIdentifier` and remembers IDs across reads. Readback compares exported widget settings and element identifiers.
 
-**Web clips:** Homescreen remembers clips observed in layout reads per device and includes off-screen clips in `ignored`. If a new clip appears after a write, the result names it under `hidden_webclips`. Move the clip to the App Library and apply again.
+**Web clips:** iOS Home Screen Organizer remembers clips observed in layout reads per device and includes off-screen clips in `ignored`. If a new clip appears after a write, the result names it under `hidden_webclips`. Move the clip to the App Library and apply again.
 
 The upstream implementation omits Today View and page-ID keys where their existing device values should be retained. Its simulator harness is in [`tools/sbhelper/`](tools/sbhelper/README.md). See the [upstream project](https://github.com/kats1123/homescreen-mcp) for the original research.
 
@@ -209,7 +211,7 @@ The upstream implementation omits Today View and page-ID keys where their existi
 
 iOS stores pinned empty cells in `listMetadata` → `fixedLocations`, keyed by page ID. Include page IDs and gap metadata in a write to retain those empty cells across pages.
 
-- Homescreen remembers gaps created in its editor per device and sends their page IDs and pins with writes.
+- iOS Home Screen Organizer remembers gaps created in its editor per device and sends their page IDs and pins with writes.
 - Recreate desired gaps by dropping an app on the target empty spot in the editor.
 - Unhide Home Screen pages before applying a layout.
 
@@ -233,13 +235,13 @@ Explore the editor with a fixture:
 
 ```sh
 .venv/bin/python tests/fake_phone.py fake.plist --dict
-HOMESCREEN_FIXTURE=fake.plist .venv/bin/homescreen ui
+HOMESCREEN_FIXTURE=fake.plist .venv/bin/ios-homescreen-organizer ui
 ```
 
 Or use a booted simulator:
 
 ```sh
-HOMESCREEN_SIM=booted .venv/bin/homescreen ui
+HOMESCREEN_SIM=booted .venv/bin/ios-homescreen-organizer ui
 ```
 
 References: [macOS builds and dependency lock](macapp/BUILDING.md) · [local editor sessions and API](docs/LOCAL-EDITOR.md) · [compatibility checks](docs/COMPATIBILITY.md).
@@ -250,7 +252,7 @@ References: [macOS builds and dependency lock](macapp/BUILDING.md) · [local edi
 
 **Jonathan Kats** created Homescreen. Credit for the original Mac app, editor, screenshots and SpringBoard investigation belongs to the [upstream project](https://github.com/kats1123/homescreen-mcp) and its contributors. Thanks also to [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) for the USB device interface.
 
-- **This fork:** [source and changes](https://github.com/worldsavepoint/homescreen-mcp) · [issues and support](https://github.com/worldsavepoint/homescreen-mcp/issues).
+- **This fork:** [source and changes](https://github.com/worldsavepoint/ios-homescreen-organizer) · [issues and support](https://github.com/worldsavepoint/ios-homescreen-organizer/issues).
 - **Original project:** [upstream source](https://github.com/kats1123/homescreen-mcp) · [upstream issues and support](https://github.com/kats1123/homescreen-mcp/issues) · [upstream releases](https://github.com/kats1123/homescreen-mcp/releases).
 
 For issues with this fork, include the installation method, reproduction steps, expected result and a redacted error message.
@@ -261,4 +263,4 @@ For issues with this fork, include the installation method, reproduction steps, 
 
 [MIT](LICENSE). Copyright © 2026 Jonathan Kats. The original license and copyright notice are preserved.
 
-iPhone, iOS and Screen Time are Apple trademarks. Homescreen uses private device interfaces for layout operations.
+iPhone, iOS and Screen Time are Apple trademarks. iOS Home Screen Organizer uses private device interfaces for layout operations.

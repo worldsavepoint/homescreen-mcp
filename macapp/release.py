@@ -21,17 +21,17 @@ def project_version(tag=None):
 
 
 def package(build_dir, output_dir, version):
-    app = build_dir / "Homescreen.app"
+    app = build_dir / "iOS Home Screen Organizer.app"
     bundle = plistlib.loads((app / "Contents/Info.plist").read_bytes())
-    if (bundle.get("HomescreenReleaseVersion", bundle["CFBundleShortVersionString"]) != version
+    if (bundle.get("IOSHomeScreenOrganizerReleaseVersion", bundle["CFBundleShortVersionString"]) != version
             or bundle["CFBundleShortVersionString"] != version.split("-")[0]):
         raise ValueError("Build the app with the current project version; bundle version differs")
-    dmg = build_dir / f"Homescreen-{version}.dmg"
+    dmg = build_dir / f"ios-homescreen-organizer-{version}.dmg"
     if not dmg.is_file():
         raise ValueError(f"Build the disk image first: {dmg.name}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    disk_image = output_dir / f"Homescreen-{version}-macos-arm64.dmg"
-    archive = output_dir / f"Homescreen-{version}-macos-arm64.zip"
+    disk_image = output_dir / f"ios-homescreen-organizer-{version}-macos-arm64.dmg"
+    archive = output_dir / f"ios-homescreen-organizer-{version}-macos-arm64.zip"
     shutil.copyfile(dmg, disk_image)
     subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
                     str(app), str(archive)], check=True)

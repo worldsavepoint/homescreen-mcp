@@ -73,7 +73,7 @@ async def run(args: argparse.Namespace) -> int:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="homescreen", description="iPhone Home Screen layouts over USB")
+    p = argparse.ArgumentParser(prog="ios-homescreen-organizer", description="iPhone Home Screen layouts over USB")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("read", help="read the phone and start a fresh draft")
     sub.add_parser("show", help="print the draft")
@@ -87,7 +87,7 @@ def main() -> None:
     sub.add_parser("probe", help="dump raw icon state in every format version (read-only)")
     d = sub.add_parser("diagnose", help="read-only USB compatibility check; never pair or write layout")
     d.add_argument("--expected-version", help="stop before reading layout if iOS differs")
-    u = sub.add_parser("ui", help="open the Homescreen app in your browser")
+    u = sub.add_parser("ui", help="open iOS Home Screen Organizer in your browser")
     u.add_argument("--port", type=int, default=8765)
     u.add_argument("--no-browser", action="store_true")
     args = p.parse_args()

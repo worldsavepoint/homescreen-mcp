@@ -1,4 +1,4 @@
-"""The Homescreen app: a local web UI over the same draft, apply and backup engine.
+"""The iOS Home Screen Organizer app: a local web UI over the same draft, apply and backup engine.
 
 Listens on 127.0.0.1 only. Sensitive routes require a per-launch credential delivered
 out of band; browser sessions also enforce the exact local origin.
@@ -442,7 +442,7 @@ app.add_middleware(BaseHTTPMiddleware, dispatch=local_boundary)
 
 
 def _exit_with_parent(pid: int) -> None:
-    """Inside Homescreen.app: stop when the app is gone, even if it crashed."""
+    """Inside iOS Home Screen Organizer.app: stop when the app is gone, even if it crashed."""
     import os
     import time
 
@@ -465,7 +465,7 @@ def main(port: int = 8765, open_browser: bool = True) -> None:
     if os.environ.get("HOMESCREEN_PARENT_PID", "").isdigit():
         _exit_with_parent(int(os.environ["HOMESCREEN_PARENT_PID"]))
     url = f"http://127.0.0.1:{port}/"
-    print(f"Homescreen is running at {url}  (Ctrl-C to stop)")
+    print(f"iOS Home Screen Organizer is running at {url}  (Ctrl-C to stop)")
     if open_browser:
         threading.Timer(1.0, webbrowser.open, args=(url + "#token=" + quote(TOKEN, safe=""),)).start()
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
