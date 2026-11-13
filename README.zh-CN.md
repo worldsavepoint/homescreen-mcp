@@ -3,7 +3,7 @@
 
 <p align="center">
   <a href="https://github.com/worldsavepoint/ios-homescreen-organizer/releases"><img alt="发行版" src="https://img.shields.io/badge/download-Releases-blue"></a>
-  <a href="https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml"><img alt="构建状态" src="https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml/badge.svg"></a>
+  <a href="#compatibility"><img alt="支持 iOS 16 及以上版本" src="https://img.shields.io/badge/iOS-16%2B-007AFF"></a>
   <a href="LICENSE"><img alt="MIT 许可证" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <a href="macapp/BUILDING.md"><img alt="macOS 14 或更高版本" src="https://img.shields.io/badge/macOS-14%2B-222222"></a>
 </p>
