@@ -336,11 +336,11 @@ def test_read_and_restore_respect_session_lock(tmp_path, action):
     assert source.io == before
 
 
-def test_successful_readback_warns_about_non_exported_state(tmp_path):
+def test_successful_readback_describes_compared_fields(tmp_path):
     session, source = loaded(tmp_path)
     result = run(session.apply(session.require().token()))
     assert result["ok"]
-    assert any("cannot be verified" in warning for warning in result["warnings"])
+    assert result["warnings"] == ["Readback compares the layout fields returned by the selected source."]
 
 
 def test_widget_stack_payload_is_preserved_and_compared():

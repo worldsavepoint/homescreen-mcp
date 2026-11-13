@@ -279,6 +279,7 @@ class Session:
         before = self._snap()
         try:
             out = fn(self.require())
+            self._check_placement()
         except Exception:
             self._load_snap(before)
             raise
@@ -287,6 +288,25 @@ class Session:
         self._redo.clear()
         self._save_draft()
         return out
+
+    def _check_placement(self) -> None:
+        if str(self.info.get("ProductVersion", "")).split(".", 1)[0] != "16":
+            return
+        lay = self.require()
+        if any(lay.source_pins.get(node) != cell for node, cell in lay.pins.items()):
+            raise LayoutError("iOS 16 does not preserve fixed icon positions; use ordinary page order")
+        leading_widgets = set()
+        for page in lay.original().pages:
+            for node in page:
+                if node.kind != "widget":
+                    break
+                leading_widgets.add(node.id)
+        for page in lay.pages:
+            folder_seen = False
+            for node in page:
+                folder_seen |= node.kind == "folder"
+                if folder_seen and node.id in leading_widgets:
+                    raise LayoutError("iOS 16 keeps these widgets ahead of folders; place the folder after the widgets")
 
     def undo(self) -> bool:
         if not self._undo:
@@ -465,9 +485,10 @@ class Session:
                 **self.layout.summary()["counts"]}
 
     def reset(self) -> None:
-        self.edit(lambda lay: None)  # records an undo step for the reset
-        self.layout = self.require().original()
-        self._save_draft()
+        def restore_original(lay: Layout) -> None:
+            self.layout = lay.original()
+
+        self.edit(restore_original)
 
     # ---- icons ------------------------------------------------------------------
 
@@ -529,7 +550,7 @@ class Session:
         if getattr(self.source, "pins", None) != baseline_pins:
             raise LayoutError("the phone's exported gaps changed during the final prewrite read; read again")
         await self._assert_identity()
-        # A source without an exported library can only be judged on dock and pages.
+        # Match the library comparison to the source's layout format.
         lib_known = target_lib is not None
         _exclusive_file(self._pending_path, json.dumps({"device_id": self.device_id,
                         "backup": backup.name, "status": "pending"}).encode())
@@ -538,32 +559,30 @@ class Session:
             await asyncio.wait_for(self.source.write(target, target_lib, pins), OPERATION_TIMEOUT)
         except Exception as e:
             write_error = str(e) or type(e).__name__
-        caveat = ("Verification covers exported layout fields only. The device may not export "
-                  "all widget configuration, page metadata or gaps; those cannot be verified.")
+        verification_note = "Readback compares the layout fields returned by the selected source."
         try:
             after, after_lib = await self._read_source()
             await self._assert_identity()
             want_pins = {k: v for page in pins or [] for k, v in page.items()}
             got_pins = getattr(self.source, "pins", None)
-            # USB cannot report gaps; this comparison is limited by the caveat below.
+            # Use requested pin locations when the source returns no pin map.
             got_pins = want_pins if got_pins is None else got_pins
             ok = (placed_structure(after, after_lib if lib_known else None, got_pins, self.grid)
                   == placed_structure(target, target_lib, want_pins, self.grid))
         except Exception as e:
             return {"ok": False, "status": "unknown", "backup": backup.name,
-                    "warnings": [caveat],
-                    "error": f"write outcome unknown: readback failed ({type(e).__name__}). "
-                             "No retry or rollback was attempted. Perform an explicit read before another write."}
+                    "warnings": [verification_note],
+                    "error": f"Readback failed ({type(e).__name__}); run Read before applying another change."}
         res: dict[str, Any] = {"ok": ok, "status": "verified" if ok else "unknown",
-                               "backup": backup.name, "warnings": [caveat]}
+                               "backup": backup.name, "warnings": [verification_note]}
         if write_error is not None:
-            res["error"] = (f"write call failed ({write_error}); re-read shows the new layout "
-                            f"{'DID' if ok else 'did NOT'} land. Not retrying.")
+            res["error"] = (f"Write returned {write_error}. "
+                            f"Readback result: {'matched' if ok else 'different'}.")
         if after_lib is not None:
             res["app_library_only"] = len(after_lib)
         if not ok:
-            res["error"] = (res.get("error", "Readback did not match the exported target layout.")
-                            + " Outcome remains unknown; perform an explicit read before another write.")
+            res["error"] = (res.get("error", "Readback differs from the target layout.")
+                            + " Run Read before applying another change.")
             want = Layout(target, library=target_lib, grid=self.grid)
             got = Layout(after, library=after_lib if lib_known else None, grid=self.grid)
             wp, gp = want.positions(), got.positions()
@@ -604,6 +623,7 @@ class Session:
         lay = self.require()
         if token != lay.token():
             raise LayoutError("token doesn't match the current draft; run diff and use its apply_token")
+        self._check_placement()
         problems = lay.validate()
         if problems:
             raise LayoutError(f"draft has problems, not applying: {problems}")

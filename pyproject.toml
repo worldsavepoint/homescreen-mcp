@@ -38,4 +38,4 @@ build-backend = "setuptools.build_meta"
 packages = ["homescreen"]
 
 [tool.setuptools.package-data]
-homescreen = ["web/*"]
+homescreen = ["web/*", "simulator_icon.m"]

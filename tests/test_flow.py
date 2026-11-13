@@ -143,7 +143,7 @@ def test_lost_response_is_not_retried(phone, tmp_path):
     lay.move(lay.pages[0][1].id, "page:3", 0)
     s.edited()
     res = run(s.apply(lay.token()))
-    assert res["ok"] and "DID land" in res["error"]
+    assert res["ok"] and "Readback result: matched" in res["error"]
 
 
 def test_single_move_counts_once(phone):

@@ -3,7 +3,7 @@
 The editor listens on `127.0.0.1`. The launcher supplies `HOMESCREEN_UI_TOKEN`
 and opens the editor with a `#token=...` fragment. The browser consumes and
 removes that fragment, then establishes a session with the endpoint below.
-API credentials are transmitted in headers, rather than query parameters.
+API credentials are transmitted in request headers.
 
 ## Authenticate [since this fork]
 
@@ -28,8 +28,9 @@ The response contains:
 
 `proof` is HMAC-SHA256 over the challenge's UTF-8 bytes, using the health secret's
 UTF-8 bytes as the key. The launcher validates this response before opening the
-editor. For standalone CLI launches without a health secret, the endpoint uses
-`X-Token` authentication and returns `app` and `ready` without `proof`.
+editor. The default standalone CLI configuration uses `X-Token` authentication
+and returns `app` and `ready`. Setting `HOMESCREEN_HEALTH_SECRET` selects the
+challenge-response flow described above.
 The existing `/health` route remains an alias.
 
 ## Authentication and session errors

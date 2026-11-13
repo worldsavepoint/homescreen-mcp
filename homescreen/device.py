@@ -19,11 +19,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import platform
 import plistlib
 import re
 import subprocess
 import uuid
-from functools import wraps
+from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -352,6 +353,32 @@ def _run(*args: str) -> str:
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT).stdout
 
 
+@lru_cache(maxsize=1)
+def _simulator_icon_reader():
+    import tempfile
+
+    directory = tempfile.TemporaryDirectory(prefix="homescreen-sim-icons-")
+    executable = Path(directory.name) / "read-icon"
+    sdk = _run("xcrun", "--sdk", "iphonesimulator", "--show-sdk-path").strip()
+    subprocess.run(["xcrun", "clang", "-target", f"{platform.machine()}-apple-ios16.0-simulator",
+                    "-isysroot", sdk, "-fobjc-arc", "-framework", "UIKit",
+                    str(Path(__file__).with_name("simulator_icon.m")), "-o", str(executable)],
+                   check=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT)
+    subprocess.run(["codesign", "-s", "-", "-f", str(executable)], check=True,
+                   capture_output=True, timeout=SUBPROCESS_TIMEOUT)
+    return directory, executable
+
+
+def _simulator_icon_png(udid: str, bundle_id: str) -> bytes | None:
+    try:
+        directory, executable = _simulator_icon_reader()
+        result = subprocess.run(["xcrun", "simctl", "spawn", udid, str(executable), bundle_id],
+                                capture_output=True, check=True, timeout=SUBPROCESS_TIMEOUT)
+        return result.stdout if result.stdout.startswith(b"\x89PNG\r\n\x1a\n") else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 class SimSource:
     """A booted iOS Simulator. Reads and writes SpringBoard's IconState.plist, then restarts
     SpringBoard so it loads the new layout (it re-saves the file if it changes anything)."""
@@ -436,16 +463,37 @@ class SimSource:
             return None
         from urllib.parse import unquote, urlparse
         bundle = Path(unquote(urlparse(app["Bundle"]).path))
-        names = (app.get("CFBundleIcons", {}).get("CFBundlePrimaryIcon", {}).get("CFBundleIconFiles")
+        # Older simctl versions omit the icon declarations supplied by the bundle itself.
+        try:
+            info = plistlib.loads((bundle / "Info.plist").read_bytes())
+        except (OSError, ValueError):
+            info = {}
+        primary = info.get("CFBundleIcons", {}).get("CFBundlePrimaryIcon", {})
+        names = (primary.get("CFBundleIconFiles") or info.get("CFBundleIconFiles")
+                 or app.get("CFBundleIcons", {}).get("CFBundlePrimaryIcon", {}).get("CFBundleIconFiles")
                  or ["AppIcon60x60"])
+        if info.get("SBIconClass"):
+            png = await asyncio.to_thread(_simulator_icon_png, self.udid, bundle_id)
+            if png:
+                return png
         for name in names:
-            for suffix in ("@3x.png", "@2x.png", ".png"):
-                p = bundle / f"{name}{suffix}"
-                if p.exists():
+            if not isinstance(name, str):
+                continue
+            has_extension = name.lower().endswith(".png")
+            stem = name[:-4] if has_extension else name
+            for filename in (f"{stem}@3x.png", f"{stem}@2x.png", name if has_extension else f"{name}.png"):
+                p = bundle / filename
+                if p.is_file() and p.resolve().is_relative_to(bundle.resolve()):
                     return p.read_bytes()
         # many system apps don't list their icon files; take the biggest phone-size one
-        found = sorted((p for p in bundle.glob("*60x60@*.png") if "~ipad" not in p.name), key=lambda p: p.name)
-        return found[-1].read_bytes() if found else None
+        found = sorted((p for p in bundle.glob("*60x60@*.png")
+                        if "~ipad" not in p.name and p.is_file()
+                        and p.resolve().is_relative_to(bundle.resolve())), key=lambda p: p.name)
+        if found:
+            return found[-1].read_bytes()
+        if primary.get("CFBundleIconName") and (bundle / "Assets.car").exists():
+            return await asyncio.to_thread(_simulator_icon_png, self.udid, bundle_id)
+        return None
 
 
 # ---- fixture file ---------------------------------------------------------------------

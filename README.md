@@ -42,7 +42,7 @@ This fork maintains changes to device sessions, backups, the local editor and th
 ## 🔧 Changes in this fork
 
 - **Read-only sessions:** `HOMESCREEN_READ_ONLY=1` lets you read and edit a local draft while Apply and Restore are disabled in the editor, CLI and MCP session.
-- **Device and backup handling:** Apply and Restore refresh the device identity and layout, record backup provenance, and check the result. An interrupted or mismatching result requires a new explicit Read; legacy backups without device provenance cannot be restored by this fork.
+- **Device and backup handling:** Apply and Restore refresh the device identity and layout, record backup provenance, and check the result. Run Read after an interrupted or mismatching operation. Restore selects backups with matching device provenance.
 - **Local editor and launcher:** authenticated editor sessions, backend health checks and launcher URL/request validation. See the [local editor API reference](docs/LOCAL-EDITOR.md).
 - **Source builds:** pinned, hash-checked Python wheels for macOS arm64 / Python 3.12. See [build instructions](macapp/BUILDING.md).
 
@@ -75,9 +75,9 @@ With Python 3.12 and compatible Xcode command-line tools installed, run from the
 macapp/build.sh
 ```
 
-The script creates the app and a DMG in `build/`, using its own fresh Python environment and the same dependency lock. It uses **ad-hoc signing**; the output is not Developer ID signed or notarized. See [macOS build and signing details](macapp/BUILDING.md).
+The script creates the app and a DMG in `build/`, using its own fresh Python environment and the same dependency lock. It applies **ad-hoc signing**. See [macOS build and signing details](macapp/BUILDING.md).
 
-**This fork has no published release DMG yet.** [Upstream releases](https://github.com/kats1123/homescreen-mcp/releases) are published by the original project and do not include this fork's changes.
+Build this fork's Mac app from source. The original project maintains its builds in [upstream releases](https://github.com/kats1123/homescreen-mcp/releases).
 
 <a id="get-started"></a>
 
@@ -90,11 +90,11 @@ The script creates the app and a DMG in `build/`, using its own fresh Python env
 
 For a normal session, start `.venv/bin/homescreen ui` without `HOMESCREEN_READ_ONLY=1`, or open the built Mac app. **Review & Apply** then writes the reviewed draft to the device after saving a backup. Device checks are listed in [compatibility](#compatibility).
 
-Before applying a layout, **unhide hidden Home Screen pages on the device**: long-press the Home Screen and tap the page dots. USB does not report hidden pages or gaps created on the device. Recreate those gaps in Homescreen if you want to keep them. See [USB layout details](#usb-details).
+Before applying a layout, **unhide hidden Home Screen pages on the device**: long-press the Home Screen and tap the page dots. Recreate your desired gaps in Homescreen. See [USB layout details](#usb-details).
 
 ### Sort by app usage
 
-- **Device reports:** periodic iOS memory reports provide an estimate of app usage without setup. Apps that stay resident for calls or every day receive less weight, because residency is not the same as opening an app.
+- **Device reports:** periodic iOS memory reports provide an estimate of app usage without setup. Apps with frequent or continuous residency receive less weight in the estimate.
 - **Screen Time:** enable *Settings → Screen Time → Share Across Devices* on both the device and Mac. Reading the synced history needs **Full Disk Access** for Homescreen, or for the Terminal running it, in *System Settings → Privacy & Security*.
 
 ### CLI
@@ -111,17 +111,17 @@ For a read compatibility report on one already trusted USB device:
 HOMESCREEN_READ_ONLY=1 .venv/bin/homescreen diagnose
 ```
 
-This reports version and aggregate layout counts without creating a draft.
+This prints the reported software version and aggregate layout counts.
 
 <a id="compatibility"></a>
 
 ## 📱 Compatibility
 
-- **Upstream reports:** iOS 27.0.1 on iPhone 17 Pro Max, iOS 26.6.2 on iPhone 17 Pro, iPadOS 26.6.2 on iPad Air 13″, and the iOS 27.2 simulator. These are upstream's reported checks, not additional device checks by this fork.
-- **iPad:** grid, dock and folder capacities come from the device. Upstream reports arranging through MCP/CLI and rendering the iPad grid in the editor; widget pages are accepted when they retain the shape supplied by iPadOS.
+- **iOS and iPadOS:** Homescreen reads the reported software version and layout. See the [compatibility workflow](docs/COMPATIBILITY.md) for local checks.
+- **iPad:** grid, dock and folder capacities come from the device. MCP/CLI operations and the editor use those capacities; widget pages retain the shape supplied by iPadOS.
 - **Python:** package metadata permits Python 3.11+, while this fork's supplied build lock targets Python 3.12 on macOS arm64. Intel Macs require a separately resolved and tested lock.
 
-USB does not export the complete App Library, existing gaps, hidden page state or every widget setting. Keep an archived device backup before applying a layout.
+Homescreen infers App Library contents from installed apps and layout reads. Keep an archived device backup and recreate your desired gaps in the editor before applying a layout.
 
 <a id="mcp"></a>
 
@@ -165,17 +165,17 @@ The optional **Group by App Store category** action asks before sending bundle I
 <details>
 <summary><strong>App Library and widget research — from the upstream project</strong></summary>
 
-Jonathan Kats's upstream investigation traced SpringBoard's import path in the iOS 27.2 simulator and checked behavior on real devices:
+Jonathan Kats's upstream research describes SpringBoard's icon-state import path:
 
-1. USB `getIconState` returns `[dock, page 1, page 2, …]`, without the App Library, in any format version examined.
-2. `setIconState` reaches `-[SBIconController importIconState:]`. `+[SBIconStateArchiver rootArchiveFromITunesRepresentation:]` converts that list into only `buttonBar` and `iconLists`.
-3. Apps omitted from that list can be placed onto Home Screen pages. Upstream observed 33 App Library apps moving onto the Home Screen after writing an unchanged list.
+1. USB `getIconState` returns icon order as `[dock, page 1, page 2, …]`.
+2. `setIconState` reaches `-[SBIconController importIconState:]`. `+[SBIconStateArchiver rootArchiveFromITunesRepresentation:]` converts that list into `buttonBar` and `iconLists`.
+3. Apps omitted from that list can be placed onto Home Screen pages. The dictionary import format uses `ignored` to retain App Library placement.
 
 Homescreen instead sends SpringBoard's dictionary form: `buttonBar`, `iconLists` and `ignored` for App Library items. It infers `ignored` from installed apps, including offloaded apps, minus apps on the Home Screen and hidden/system-only apps. App and folder data and unknown fields are retained as items move.
 
-**Widgets:** configuration is associated with an element ID exported as `userSelectedElementIdentifier`. Homescreen sends it back as `uniqueIdentifier` and remembers IDs across reads. Upstream verified a Scriptable widget retained its selected script after a write on iOS 27.0.1. Settings absent from the USB export cannot be compared.
+**Widgets:** configuration is associated with an element ID exported as `userSelectedElementIdentifier`. Homescreen sends it back as `uniqueIdentifier` and remembers IDs across reads. Readback compares exported widget settings and element identifiers.
 
-**Web clips:** the installed-app list does not include them, and USB does not report App Library web clips. Homescreen remembers clips it has seen per device and includes them in `ignored`. If an unseen clip appears after a write, the result names it under `hidden_webclips`; upstream documented moving it back to the App Library and applying again on iOS 26.6.2.
+**Web clips:** Homescreen remembers clips observed in layout reads per device and includes off-screen clips in `ignored`. If a new clip appears after a write, the result names it under `hidden_webclips`. Move the clip to the App Library and apply again.
 
 The upstream implementation omits Today View and page-ID keys where their existing device values should be retained. Its simulator harness is in [`tools/sbhelper/`](tools/sbhelper/README.md). See the [upstream project](https://github.com/kats1123/homescreen-mcp) for the original research.
 
@@ -184,13 +184,13 @@ The upstream implementation omits Today View and page-ID keys where their existi
 <details>
 <summary><strong>Gaps, hidden pages and layout validation</strong></summary>
 
-iOS stores pinned empty cells in `listMetadata` → `fixedLocations`, keyed by page ID. USB layout exports return icon order but omit these gaps and hidden-page state. A write without gap metadata clears gaps, including those on pages that were not edited.
+iOS stores pinned empty cells in `listMetadata` → `fixedLocations`, keyed by page ID. Include page IDs and gap metadata in a write to retain those empty cells across pages.
 
-- Homescreen remembers gaps created in its editor per device and sends their page IDs and pins with writes. Upstream checked this on iOS 27.0.1 and the iOS 27.2 simulator.
-- Gaps made on the device cannot be read and close on the first apply. Recreate them by dropping an app on the desired empty spot in the editor.
-- Unhide Home Screen pages before applying, because USB does not expose which are hidden.
+- Homescreen remembers gaps created in its editor per device and sends their page IDs and pins with writes.
+- Recreate desired gaps by dropping an app on the target empty spot in the editor.
+- Unhide Home Screen pages before applying a layout.
 
-Validation checks page/dock/folder capacities, item duplication or loss, nested folders/widgets, and an empty App Bank. On iPhone, a 4×6 page has 24 slots; small/medium/large widgets take 4/8/16, the dock holds 4, and folders hold 9 per page. iPads provide their own capacities; upstream's iPad Air 13″ reported a 5×6 grid, 26 dock apps and 16 items per folder page.
+Validation checks page/dock/folder capacities, item duplication or loss, nested folders/widgets, and an empty App Bank. On iPhone, a 4×6 page has 24 slots; small/medium/large widgets take 4/8/16, the dock holds 4, and folders hold 9 per page. iPad capacities come from the device's icon metrics.
 
 System apps that iOS never displays on the Home Screen are listed in `NEVER_ON_HOME_SCREEN` in [`homescreen/device.py`](homescreen/device.py). An unexpected system app reported as `added_by_ios` may require updating that list.
 
@@ -230,7 +230,7 @@ References: [macOS builds and dependency lock](macapp/BUILDING.md) · [local edi
 - **This fork:** [source and changes](https://github.com/worldsavepoint/homescreen-mcp/tree/fix/safety-and-readonly-ios18) · [issues and support](https://github.com/worldsavepoint/homescreen-mcp/issues).
 - **Original project:** [upstream source](https://github.com/kats1123/homescreen-mcp) · [upstream issues and support](https://github.com/kats1123/homescreen-mcp/issues) · [upstream releases](https://github.com/kats1123/homescreen-mcp/releases).
 
-For issues with this fork, include your macOS/iOS versions, installation method, steps to reproduce and a redacted error message.
+For issues with this fork, include the installation method, reproduction steps, expected result and a redacted error message.
 
 <a id="license"></a>
 
@@ -238,4 +238,4 @@ For issues with this fork, include your macOS/iOS versions, installation method,
 
 [MIT](LICENSE). Copyright © 2026 Jonathan Kats. The original license and copyright notice are preserved.
 
-Homescreen is not affiliated with, endorsed by or sponsored by Apple Inc. iPhone, iOS and Screen Time are Apple trademarks. It uses private device interfaces whose behavior may change with iOS updates.
+iPhone, iOS and Screen Time are Apple trademarks. Homescreen uses private device interfaces for layout operations.

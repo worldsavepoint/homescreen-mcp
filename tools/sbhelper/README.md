@@ -1,40 +1,71 @@
 # Simulator SpringBoard harness
 
-Lets you feed any layout to the iOS Simulator's SpringBoard through the same call the
-USB `setIconState` request reaches on a phone: `[[SBApp defaultIconController] importIconState:]`
-(SpringBoard's `_SBXXSetIconState` handler; only its `com.apple.springboard.iconState.mutate`
-entitlement check is skipped).
+The harness feeds a layout to the simulator's `SBIconController importIconState:`
+method. `icon_controller` selects the available controller accessor.
 
-- `sbinject.m`: dylib loaded into SpringBoard; on the Darwin notification `homescreen.import`
-  it imports `$SBTEST_DIR/in.plist` and writes the result to `$SBTEST_DIR/out.txt`.
-- `post.c`: posts that notification from inside the simulator.
-- `sbhelper.m`: calls the MIG functions directly. It can't be used, because the simulator
-  refuses to launch binaries that claim the entitlement ("Security policy issue").
+- `sbinject.m` loads into SpringBoard for a test session. The `homescreen.import`
+  notification imports `$SBTEST_DIR/in.plist` and writes `$SBTEST_DIR/out.txt`.
+- `post.c` sends that notification from a process in the selected simulator.
+- `sbhelper.m` contains the MIG entry-point experiment. The notification harness
+  provides the active import workflow.
 
-Build (outside iCloud, e.g. a scratch dir), then load it:
-```bash
-SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
-xcrun --sdk iphonesimulator clang -target arm64-apple-ios27.0-simulator -isysroot "$SDK" -fobjc-arc -dynamiclib -framework Foundation -framework UIKit sbinject.m -o $DIR/sbinject.dylib
-xcrun --sdk iphonesimulator clang -target arm64-apple-ios27.0-simulator -isysroot "$SDK" post.c -o $DIR/post
-codesign -s - -f $DIR/sbinject.dylib $DIR/post
-xcrun simctl spawn booted launchctl setenv DYLD_INSERT_LIBRARIES $DIR/sbinject.dylib
-xcrun simctl spawn booted launchctl setenv SBTEST_DIR $DIR
-xcrun simctl spawn booted launchctl kill SIGKILL system/com.apple.SpringBoard
-# write $DIR/in.plist, then:
-xcrun simctl spawn booted $DIR/post
+## Build and run
+
+Choose a booted simulator and set `SIMULATOR_UDID` to its identifier. Create the
+harness directory outside the repository and save the initial layout:
+
+```sh
+SIMULATOR_UDID="<simulator-id>"
+HARNESS_DIR="$(mktemp -d)"
+SIMULATOR_STATE="$HOME/Library/Developer/CoreSimulator/Devices/$SIMULATOR_UDID/data/Library/SpringBoard/IconState.plist"
+cp "$SIMULATOR_STATE" "$HARNESS_DIR/before-IconState.plist"
+
+SDK_PATH="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+SIMULATOR_TARGET="$(uname -m)-apple-ios16.0-simulator"
+xcrun --sdk iphonesimulator clang -target "$SIMULATOR_TARGET" -isysroot "$SDK_PATH" \
+  -fobjc-arc -dynamiclib -framework Foundation -framework UIKit \
+  sbinject.m -o "$HARNESS_DIR/sbinject.dylib"
+xcrun --sdk iphonesimulator clang -target "$SIMULATOR_TARGET" -isysroot "$SDK_PATH" \
+  post.c -o "$HARNESS_DIR/post"
+codesign -s - -f "$HARNESS_DIR/sbinject.dylib" "$HARNESS_DIR/post"
+
+xcrun simctl spawn "$SIMULATOR_UDID" launchctl debug user/foreground/com.apple.SpringBoard \
+  --environment "DYLD_INSERT_LIBRARIES=$HARNESS_DIR/sbinject.dylib" "SBTEST_DIR=$HARNESS_DIR" --
+xcrun simctl spawn "$SIMULATOR_UDID" launchctl kill SIGKILL user/foreground/com.apple.SpringBoard
 ```
 
-Findings (iOS 27.2 simulator, 2026-10-31):
-- A list (`[dock, page, ...]`) imports as `{buttonBar, iconLists}` only, and every App Library
-  app it doesn't mention is put on a page. This is the bug a USB write hits.
-- A dict with `buttonBar`, `iconLists` and `ignored` keeps the App Library. Keys left out (`today`)
-  stay as they were. Apps must be bundle-id strings, or SpringBoard saves the dicts verbatim.
-- An app left out of both `iconLists` and `ignored` is still put on a page.
-- `importIconState:` returns NO for the string form even though it applies; verify by re-reading.
-- Gaps: a page's pinned cells live in `listMetadata[<page id>].fixedLocations` ({identifier: cell 0-23},
-  with `fixedLocationsGridColumns`/`Rows`). Importing them with our own `listUniqueIdentifiers` works;
-  importing without them clears every gap. None of SpringBoard's exports (`exportState:`,
-  `exportFlattenedState:includeMissingIcons:`, `exportPendingState:includeMissingIcons:`, i.e. the USB
-  getIconState paths) carry them. The `homescreen.exports` hook in `sbinject.m` dumps all three.
-- Widgets: a configured widget's settings hang off its element id; over USB that is
-  `userSelectedElementIdentifier`, and it must be written back as `uniqueIdentifier`.
+After the Home Screen appears, write the target layout to
+`$HARNESS_DIR/in.plist`, then send the import notification:
+
+```sh
+xcrun simctl spawn "$SIMULATOR_UDID" "$HARNESS_DIR/post"
+cat "$HARNESS_DIR/out.txt"
+```
+
+Compare the saved layout with the target. To finish the session, restore the
+initial snapshot and restart SpringBoard:
+
+```sh
+cp "$HARNESS_DIR/before-IconState.plist" "$SIMULATOR_STATE"
+xcrun simctl spawn "$SIMULATOR_UDID" launchctl kill SIGKILL user/foreground/com.apple.SpringBoard
+```
+
+The debug environment applies to one SpringBoard launch. Keep input layouts,
+responses and snapshots in the local harness directory.
+
+## Layout format
+
+- Use a dictionary containing `buttonBar`, `iconLists` and `ignored` to preserve
+  App Library placement. Represent apps as bundle identifier strings.
+- Include `listUniqueIdentifiers` and `listMetadata` to set fixed locations.
+  Each page's `fixedLocations` maps an identifier to a grid cell; the metadata
+  also contains `fixedLocationsGridColumns` and `fixedLocationsGridRows`.
+- Restore a widget's `userSelectedElementIdentifier` as `uniqueIdentifier` to
+  retain its configuration association.
+- Read back the layout after importing. The import response and saved layout
+  are both available for inspection.
+
+The `homescreen.export`, `homescreen.exports` and `homescreen.gap` notifications
+provide additional archive, model-export and fixed-location inspection tools.
+See the [upstream project](https://github.com/kats1123/homescreen-mcp) for the
+original SpringBoard research.

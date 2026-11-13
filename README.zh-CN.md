@@ -42,7 +42,7 @@
 ## 🔧 本 fork 的改进
 
 - **只读会话：** 设置 `HOMESCREEN_READ_ONLY=1` 后，可读取设备并编辑本地草稿；编辑器、CLI 和 MCP 会话中的 Apply 与 Restore 均禁用。
-- **设备与备份处理：** Apply 和 Restore 会刷新设备身份与布局、记录备份来源，并核对操作结果。操作中断或结果不符后，需要重新明确执行 Read；本 fork 不恢复缺少设备来源信息的旧备份。
+- **设备与备份处理：** Apply 和 Restore 会刷新设备身份与布局、记录备份来源，并核对操作结果。操作中断或结果不符后，重新执行 Read。Restore 选择设备来源信息匹配的备份。
 - **本地编辑器与启动器：** 编辑器会话认证、后端健康检查，以及启动器 URL/请求校验。见[本地编辑器 API 参考](docs/LOCAL-EDITOR.md)。
 - **源码构建：** 为 macOS arm64 / Python 3.12 固定 Python wheel 版本并校验哈希。见[构建说明](macapp/BUILDING.md)。
 
@@ -75,9 +75,9 @@ HOMESCREEN_READ_ONLY=1 .venv/bin/homescreen ui
 macapp/build.sh
 ```
 
-脚本使用全新的 Python 环境和同一依赖锁，在 `build/` 中生成 App 和 DMG。构建采用 **ad-hoc 签名**，产物没有 Developer ID 签名或 Apple 公证。详见 [macOS 构建与签名说明](macapp/BUILDING.md)。
+脚本使用全新的 Python 环境和同一依赖锁，在 `build/` 中生成 App 和 DMG，并应用 **ad-hoc 签名**。详见 [macOS 构建与签名说明](macapp/BUILDING.md)。
 
-**本 fork 尚未发布发行版 DMG。** [上游 Releases](https://github.com/kats1123/homescreen-mcp/releases) 由原项目发布，不包含本 fork 的改动。
+本 fork 的 Mac App 从源码构建。原项目在[上游 Releases](https://github.com/kats1123/homescreen-mcp/releases) 维护其发行包。
 
 <a id="get-started"></a>
 
@@ -90,11 +90,11 @@ macapp/build.sh
 
 需要正常会话时，不设置 `HOMESCREEN_READ_ONLY=1`，直接运行 `.venv/bin/homescreen ui`，或打开已构建的 Mac App。**Review & Apply** 会先保存备份，再将确认后的草稿写入设备。设备验证情况见[兼容性](#compatibility)。
 
-应用布局前，请先在设备上**取消隐藏主屏幕页面**：长按主屏幕，点击页面圆点。USB 不报告隐藏页面和在设备上创建的空位；如需保留这些空位，请在 Homescreen 中重新摆放。见 [USB 布局细节](#usb-details)。
+应用布局前，请先在设备上**取消隐藏主屏幕页面**：长按主屏幕，点击页面圆点。在 Homescreen 中重新建立需要的空位。见 [USB 布局细节](#usb-details)。
 
 ### 按应用使用情况排序
 
-- **设备报告：** iOS 定期生成的内存报告可用于估算应用使用情况，无需额外设置。为通话持续运行或每天常驻内存的 App 权重较低，因为驻留内存不等于主动打开。
+- **设备报告：** iOS 定期生成的内存报告可用于估算应用使用情况。估算会调低频繁或持续驻留内存的 App 权重。
 - **屏幕使用时间：** 在设备与 Mac 上开启*设置 → 屏幕使用时间 → 在设备之间共享*。读取同步历史需要在*系统设置 → 隐私与安全性*中，为 Homescreen 或运行它的终端授予**完全磁盘访问权限**。
 
 ### CLI
@@ -111,17 +111,17 @@ read · show · diff · preview · apply · backups · restore · diagnose · pr
 HOMESCREEN_READ_ONLY=1 .venv/bin/homescreen diagnose
 ```
 
-该命令报告版本与布局汇总数量，不创建草稿。
+该命令输出系统报告的软件版本与布局汇总数量。
 
 <a id="compatibility"></a>
 
 ## 📱 兼容性
 
-- **上游报告：** iPhone 17 Pro Max / iOS 27.0.1、iPhone 17 Pro / iOS 26.6.2、iPad Air 13″ / iPadOS 26.6.2，以及 iOS 27.2 模拟器。这些是上游公布的验证情况，并非本 fork 新增的设备验证。
-- **iPad：** 网格、程序坞和文件夹容量由设备提供。上游报告了 MCP/CLI 整理与编辑器绘制 iPad 网格的情况；小组件页面需保持 iPadOS 提供的结构。
+- **iOS 与 iPadOS：** Homescreen 读取系统报告的软件版本与布局。本地检查步骤见[兼容性工作流](docs/COMPATIBILITY.md)。
+- **iPad：** MCP/CLI 与编辑器采用设备提供的网格、程序坞和文件夹容量，小组件页面保留 iPadOS 提供的结构。
 - **Python：** 包元数据支持 Python 3.11+，本 fork 提供的构建依赖锁针对 macOS arm64 / Python 3.12。Intel Mac 需要单独解析并验证依赖锁。
 
-USB 不导出完整 App 资源库、已有空位、隐藏页面状态或所有小组件设置。应用布局前，请保留一份归档的设备备份。
+Homescreen 根据已安装应用和布局读取结果推算 App 资源库。应用布局前，保留一份归档的设备备份，并在编辑器中重新建立需要的空位。
 
 <a id="mcp"></a>
 
@@ -165,17 +165,17 @@ claude mcp add homescreen -- "$PWD/.venv/bin/homescreen-mcp"
 <details>
 <summary><strong>App 资源库与小组件研究——来自上游项目</strong></summary>
 
-Jonathan Kats 在上游研究中追踪了 iOS 27.2 模拟器的 SpringBoard 导入路径，并在真实设备上检查行为：
+Jonathan Kats 的上游研究描述了 SpringBoard 图标状态的导入路径：
 
-1. USB `getIconState` 返回 `[dock, page 1, page 2, …]`；研究检查的各格式版本均不包含 App 资源库。
-2. `setIconState` 进入 `-[SBIconController importIconState:]`；`+[SBIconStateArchiver rootArchiveFromITunesRepresentation:]` 仅将列表转换为 `buttonBar` 和 `iconLists`。
-3. 列表未提及的 App 可能被放到主屏幕页面。上游曾观察到写回未修改的列表后，33 个资源库 App 出现在主屏幕上。
+1. USB `getIconState` 按 `[dock, page 1, page 2, …]` 返回图标顺序。
+2. `setIconState` 进入 `-[SBIconController importIconState:]`；`+[SBIconStateArchiver rootArchiveFromITunesRepresentation:]` 将列表转换为 `buttonBar` 和 `iconLists`。
+3. 列表未提及的 App 可能被放到主屏幕页面。字典导入格式使用 `ignored` 保留 App 资源库中的项目位置。
 
 Homescreen 因此使用 SpringBoard 的字典形式：`buttonBar`、`iconLists`，以及存放资源库项目的 `ignored`。后者通过已安装应用（含已卸载但保留数据的 App）减去主屏幕应用、隐藏与仅供系统使用的应用推算。移动项目时保留 App、文件夹数据及未知字段。
 
-**小组件：** 配置关联到元素 ID，USB 以 `userSelectedElementIdentifier` 导出。Homescreen 将其作为 `uniqueIdentifier` 写回，并跨读取记住 ID。上游在 iOS 27.0.1 上验证了 Scriptable 小组件写入后仍保留所选脚本；USB 未导出的设置无法比较。
+**小组件：** 配置关联到元素 ID，USB 以 `userSelectedElementIdentifier` 导出。Homescreen 将其作为 `uniqueIdentifier` 写回，并跨读取记住 ID。回读核对导出的小组件设置和元素标识。
 
-**网页快捷方式：** 已安装应用列表不包含这类项目，USB 也不报告资源库中的网页快捷方式。Homescreen 按设备记住曾经读取的快捷方式，并将其放入 `ignored`。若写入后出现此前未知的快捷方式，结果会在 `hidden_webclips` 中列出；上游在 iOS 26.6.2 上记录了将其移回资源库后再次应用的处理方式。
+**网页快捷方式：** Homescreen 按设备记住从布局中读取的快捷方式，并将主屏幕外的快捷方式放入 `ignored`。若写入后出现新的快捷方式，结果会在 `hidden_webclips` 中列出。将其移回 App 资源库后，再次应用布局。
 
 上游实现会在需要保留设备现值时省略 Today View 和页面 ID 键。模拟器研究工具位于 [`tools/sbhelper/`](tools/sbhelper/README.md)，原始研究见[上游项目](https://github.com/kats1123/homescreen-mcp)。
 
@@ -184,13 +184,13 @@ Homescreen 因此使用 SpringBoard 的字典形式：`buttonBar`、`iconLists`�
 <details>
 <summary><strong>空位、隐藏页面与布局校验</strong></summary>
 
-iOS 在 `listMetadata` → `fixedLocations` 中按页面 ID 保存固定空位。USB 布局导出只提供图标顺序，不含这些空位或隐藏页面状态。写入时缺少空位元数据会清除空位，包括未编辑页面上的空位。
+iOS 在 `listMetadata` → `fixedLocations` 中按页面 ID 保存固定空位。写入时携带页面 ID 和空位元数据，以保留各页面的空位。
 
-- Homescreen 按设备记住编辑器中创建的空位，并在写入时发送页面 ID 与固定位置。上游在 iOS 27.0.1 和 iOS 27.2 模拟器上检查了这一行为。
-- 设备上创建的空位无法读取，首次应用后会收拢。可在编辑器中将 App 拖到目标空位置，重新建立布局。
-- 应用前取消隐藏主屏幕页面，因为 USB 不提供哪些页面被隐藏的信息。
+- Homescreen 按设备记住编辑器中创建的空位，并在写入时发送页面 ID 与固定位置。
+- 在编辑器中将 App 拖到目标空位置，重新建立需要的空位。
+- 应用布局前，取消隐藏主屏幕页面。
 
-布局校验涵盖页面/程序坞/文件夹容量、项目重复或丢失、文件夹中的嵌套文件夹或小组件，以及 App Bank 是否已清空。iPhone 的 4×6 页面有 24 格，小/中/大小组件占 4/8/16 格，程序坞容纳 4 个 App，文件夹每页容纳 9 项。iPad 使用设备提供的容量；上游的 iPad Air 13″ 报告了 5×6 网格、26 个程序坞 App 和每页 16 项的文件夹。
+布局校验涵盖页面/程序坞/文件夹容量、项目重复或丢失、文件夹中的嵌套文件夹或小组件，以及 App Bank 是否已清空。iPhone 的 4×6 页面有 24 格，小/中/大小组件占 4/8/16 格，程序坞容纳 4 个 App，文件夹每页容纳 9 项。iPad 的容量来自设备提供的图标布局参数。
 
 不会在主屏幕显示的系统应用列在 [`homescreen/device.py`](homescreen/device.py) 的 `NEVER_ON_HOME_SCREEN` 中。如果 `added_by_ios` 报告了意外的系统 App，可能需要更新该列表。
 
@@ -230,7 +230,7 @@ HOMESCREEN_SIM=booted .venv/bin/homescreen ui
 - **本 fork：** [源码与改动](https://github.com/worldsavepoint/homescreen-mcp/tree/fix/safety-and-readonly-ios18) · [问题反馈与支持](https://github.com/worldsavepoint/homescreen-mcp/issues)。
 - **原始项目：** [上游源码](https://github.com/kats1123/homescreen-mcp) · [上游问题反馈与支持](https://github.com/kats1123/homescreen-mcp/issues) · [上游发行版](https://github.com/kats1123/homescreen-mcp/releases)。
 
-本 fork 的问题请附 macOS/iOS 版本、安装方式、复现步骤和脱敏后的错误信息。
+本 fork 的问题请附安装方式、复现步骤、预期结果和脱敏后的错误信息。
 
 <a id="license"></a>
 
@@ -238,4 +238,4 @@ HOMESCREEN_SIM=booted .venv/bin/homescreen ui
 
 [MIT](LICENSE)。Copyright © 2026 Jonathan Kats。保留原始许可证与版权声明。
 
-Homescreen 与 Apple Inc. 无关联，也未获其认可或赞助。iPhone、iOS 和屏幕使用时间是 Apple 的商标。项目使用的私有设备接口行为可能随 iOS 更新而变化。
+iPhone、iOS 和屏幕使用时间是 Apple 的商标。Homescreen 使用私有设备接口执行布局操作。

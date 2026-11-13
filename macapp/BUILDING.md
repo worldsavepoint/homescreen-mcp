@@ -1,11 +1,11 @@
 # Building the macOS app
 
-The dependency lock targets CPython 3.12 on macOS arm64. Other Python versions,
-Intel Macs and other operating systems need a separately resolved and tested
-lock. The lock pins Python dependencies and verifies downloaded artifact hashes;
-it does not make the Swift toolchain, SDK, signing output or DMG byte reproducible.
+The dependency lock targets CPython 3.12 on macOS arm64. Resolve and validate a
+platform-specific lock for another Python version or architecture. The lock pins
+Python dependencies and verifies downloaded artifact hashes. Record the Xcode,
+SDK and signing configuration alongside each build.
 
-For development and offline device-free tests:
+For development and fixture checks:
 
 ```sh
 python3.12 -m venv .venv
@@ -16,9 +16,8 @@ python3.12 -m venv .venv
 ```
 
 `macapp/build.sh` creates a fresh temporary virtual environment for each build,
-installs only wheels from the hashed lock and the local source without dependency resolution
-or build isolation, and rebuilds the Python engine. Old build environments and
-`SKIP_ENGINE` are no longer used. The app bundle includes `dependencies.txt`
+installs wheels from the hashed lock, adds the local source with the resolved
+dependencies, and rebuilds the Python engine. The app bundle includes `dependencies.txt`
 (the installed package inventory) and a copy of `requirements-build.lock`.
 The build requires Python 3.12 and compatible Xcode command line tools.
 
@@ -64,17 +63,14 @@ PY
 
 Review all transitive version changes and verify a new clean installation with
 `--require-hashes`, `pip check` and the full test suite before committing the lock.
-Do not copy an old virtual environment into a release build.
+Use a fresh virtual environment for each release build.
 
-## Signing status
+## Signing and build outputs
 
-The build script uses **ad-hoc signing only** (`codesign --sign -`). Its output is
-**not Developer ID signed or notarized**. Ad-hoc signing does not establish a
-trusted publisher identity or satisfy Gatekeeper's notarization checks.
-Developer ID signing and Apple notarization require the publisher's valid
-certificate, Apple credentials and a separate release process. This repository
-does not claim those steps have occurred, and does not disable Gatekeeper.
+The build script applies **ad-hoc signing** (`codesign --sign -`) to the app.
+For Developer ID distribution, sign with the publisher's certificate and submit
+the release for Apple notarization using the publisher's Apple credentials.
 
-Compiling the Swift package or running the pure request/URL validation test
-harness does not launch the macOS app or contact a phone. A full `build.sh` run
-creates the app bundle and DMG; it does not install the app or launch it.
+The Swift package includes a request/URL validation harness. A full `build.sh` run
+creates the app bundle and DMG in `build/`. Install and launch the resulting app
+as a separate step.

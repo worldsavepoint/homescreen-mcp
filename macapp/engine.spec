@@ -5,7 +5,7 @@ datas, binaries, hidden = [], [], []
 for pkg in ("pymobiledevice3", "mcp", "uvicorn", "starlette", "sse_starlette"):
     d, b, h = collect_all(pkg)
     datas += d; binaries += b; hidden += h
-datas += collect_data_files("homescreen")  # web/
+datas += collect_data_files("homescreen")  # web assets and simulator icon reader source
 
 a = Analysis(["engine.py"], pathex=[".."], binaries=binaries, datas=datas, hiddenimports=hidden + [
     "homescreen.ui", "homescreen.server", "homescreen.cli", "homescreen.preview"],
