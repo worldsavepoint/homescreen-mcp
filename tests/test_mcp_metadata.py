@@ -1,4 +1,4 @@
-"""Discovery describes effects without opening a device or loading personal data."""
+"""Tool discovery describes effects and input contracts."""
 
 import asyncio
 
@@ -10,7 +10,7 @@ from homescreen import server
 @pytest.fixture
 def tools(monkeypatch):
     def forbidden_session():
-        pytest.fail("tool discovery must not create a device session")
+        pytest.fail("tool discovery attempted to create a device session")
 
     monkeypatch.setattr(server, "session", forbidden_session)
     return {tool.name: tool.model_dump(by_alias=True)
@@ -19,8 +19,8 @@ def tools(monkeypatch):
 
 @pytest.mark.parametrize("name,readonly,destructive,idempotent,openworld", [
     ("read_phone", False, True, False, True),
-    ("show_layout", True, False, True, False),
-    ("find_apps", True, False, True, False),
+    ("show_layout", False, False, True, False),
+    ("find_apps", False, False, True, False),
     ("icon_colors", False, False, True, True),
     ("get_icons", False, False, True, True),
     ("arrange", False, True, False, False),
@@ -43,7 +43,7 @@ def tools(monkeypatch):
     ("undo", False, True, False, False),
     ("redo", False, True, False, False),
     ("reset_draft", False, True, False, False),
-    ("diff", True, False, True, False),
+    ("diff", False, False, True, False),
     ("render_preview", False, True, True, True),
     ("apply", False, True, False, True),
     ("list_backups", False, False, True, False),

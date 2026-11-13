@@ -51,25 +51,26 @@ def _edit(fn: Callable[[Layout], Any]) -> dict[str, Any]:
 async def read_phone() -> dict[str, Any]:
     """Read the selected iPhone source and return device details and item counts.
     Replaces the saved draft, clears undo/redo, and saves/prunes local read snapshots.
-    Reads the device without changing its Home Screen."""
+    Requires the selected source to be available."""
     return await session().read()
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False,
                                       idempotentHint=True, openWorldHint=False))
 def show_layout() -> dict[str, Any]:
     """Return the loaded draft: Dock, pages, App Library and holding tray.
     Items include ids and names; folders include contents and widgets include sizes.
-    Call read_phone first if no draft is loaded."""
+    Requires a loaded draft. Session setup creates and sets permissions on the local data directory."""
     return session().require().summary()
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False,
                                       idempotentHint=True, openWorldHint=False))
 def find_apps(
     query: Annotated[str, Field(description="Substring to match against loaded draft item names or bundle ids.")],
 ) -> list[dict[str, Any]]:
-    """Search the loaded draft by name or bundle-id substring; return matching items and positions."""
+    """Search the loaded draft by name or bundle-id substring; return matching items and positions.
+    Session setup creates and sets permissions on the local data directory."""
     lay = session().require()
     pos = lay.positions()
     return [{**n.describe(), "position": pos.get(n.id, "not placed")} for n in lay.find(query)]
@@ -81,14 +82,14 @@ async def icon_colors(
     ids: Annotated[list[str] | None, Field(description="Item ids from show_layout; omitted or empty selects every app with a bundle id.")] = None,
 ) -> dict[str, Any]:
     """Return dominant icon family, hex, background and hue for loaded draft items.
-    Reads uncached icons from the selected source and saves them locally; does not edit the draft."""
+    Reads uncached icons from the selected source and saves them locally."""
     return await session().icon_colors(ids)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False,
                                       idempotentHint=True, openWorldHint=True))
 async def get_icons(
-    ids: Annotated[list[str], Field(description="Item ids from show_layout in display order; only the first 24 are read.")],
+    ids: Annotated[list[str], Field(description="Item ids from show_layout in display order; reads up to 24 items.")],
 ) -> list[str | Image]:
     """Return labels and available PNG images for the first 24 requested loaded draft items.
     Preserves request order; reads uncached icons from the selected source and saves them locally."""
@@ -113,7 +114,7 @@ def arrange(
 ) -> dict[str, Any]:
     """Replace the loaded draft's top-level layout in one saved undo step.
     Every top-level item and App Library app must appear exactly once.
-    Omitted dock/library stay unchanged. Return ok and validation problems; never writes the device."""
+    Omitted dock/library stay unchanged. Return ok and validation problems."""
     return _edit(lambda lay: lay.arrange(pages, dock, library))
 
 
@@ -127,7 +128,7 @@ def move(
 ) -> dict[str, Any]:
     """Move one loaded draft item and clear its fixed-position gaps, in one saved undo step.
     App Library removes an app from the Home Screen; empty the holding tray before apply.
-    Return ok and validation problems; never writes the device."""
+    Return ok and validation problems."""
     return _edit(lambda lay: lay.move(item_id, target, index, before))
 
 
@@ -140,7 +141,7 @@ def create_folder(
     index: Annotated[int | None, Field(description="0-based destination insertion index; omitted appends.")] = None,
 ) -> dict[str, Any]:
     """Create a folder from loaded draft items in the supplied order, in one saved undo step.
-    Return folder_id, ok and validation problems; never writes the device."""
+    Return folder_id, ok and validation problems."""
     return _edit(lambda lay: {"folder_id": lay.create_folder(name, item_ids, target, index)})
 
 
@@ -151,7 +152,7 @@ def rename_folder(
     name: Annotated[str, Field(description="Replacement folder display name.")],
 ) -> dict[str, Any]:
     """Rename a loaded draft folder in one saved undo step.
-    Return ok and validation problems; never writes the device."""
+    Return ok and validation problems."""
     return _edit(lambda lay: lay.rename_folder(folder_id, name))
 
 
@@ -161,7 +162,7 @@ def dissolve_folder(
     folder_id: Annotated[str, Field(description="Folder id from show_layout, such as folder:1.")],
 ) -> dict[str, Any]:
     """Remove a loaded draft folder and put its apps in its former position, in one saved undo step.
-    Return ok and validation problems; never writes the device."""
+    Return ok and validation problems."""
     return _edit(lambda lay: lay.dissolve_folder(folder_id))
 
 
@@ -173,7 +174,7 @@ def file_into_folders(
 ) -> dict[str, Any]:
     """File loose loaded draft apps into named folders in one saved undo step.
     Join an existing page folder with that name or create one for at least two eligible apps.
-    Return filed names/count, ok and validation problems; never writes the device."""
+    Return filed names/count, ok and validation problems."""
     return _edit(lambda lay: organize.into_folders(lay, groups, keep_first_page))
 
 
@@ -184,7 +185,7 @@ async def sort_by_color(
 ) -> dict[str, Any]:
     """Rainbow-sort loaded draft loose apps after folders/widgets, in one saved undo step.
     Clears gaps on sorted pages; reads and locally caches source icons as needed.
-    Return ok and validation problems; never writes the device."""
+    Return ok and validation problems."""
     colors = await session().icon_colors()
     return _edit(lambda lay: organize.by_color(lay, colors, keep_first_page))
 
@@ -197,7 +198,7 @@ def sort_alphabetically(
 ) -> dict[str, Any]:
     """Sort loaded draft pages A-Z in one saved undo step, with widgets first.
     Clears gaps on sorted pages; Dock and App Library stay unchanged.
-    Return ok and validation problems; never writes the device."""
+    Return ok and validation problems."""
     return _edit(lambda lay: organize.alphabetical(lay, keep_first_page, folders_first))
 
 
@@ -205,7 +206,7 @@ def sort_alphabetically(
                                       idempotentHint=False, openWorldHint=False))
 def sort_folder_contents() -> dict[str, Any]:
     """Sort apps A-Z inside each placed loaded draft folder, in one saved undo step.
-    Refills folder pages; return ok and validation problems. Never writes the device."""
+    Refills folder pages; return ok and validation problems."""
     return _edit(lambda lay: organize.sort_folder_contents(lay))
 
 
@@ -216,7 +217,7 @@ def app_store_categories(
 ) -> dict[str, str]:
     """Return App Store genres for loaded draft apps; Apple apps use Apple and misses use an empty string.
     Sends uncached bundle ids to Apple's public US lookup API and saves results locally.
-    Call only when the user agrees to this lookup; does not edit the draft."""
+    Requires user agreement to send bundle ids to Apple."""
     lay = session().require()
     ids = ids or [n.id for n in lay.nodes.values() if n.kind == "app"]
     return organize.fetch_categories(ids, DATA / "categories.json")
@@ -231,7 +232,7 @@ def place_at(
     column: Annotated[int, Field(description="1-based grid column, normally 1 through 4.")],
 ) -> dict[str, Any]:
     """Pin a loaded draft item at a page grid position, leaving gaps, in one saved undo step.
-    Other items flow around it; return ok and validation problems. Never writes the device."""
+    Other items flow around it; return ok and validation problems."""
     return _edit(lambda lay: lay.pin(item_id, page, (row - 1) * 4 + (column - 1)))
 
 
@@ -241,7 +242,7 @@ def close_gaps(
     item_ids: Annotated[list[str], Field(description="Item ids whose fixed-position pins should be removed.")],
 ) -> dict[str, Any]:
     """Remove fixed-position pins from loaded draft items in one saved undo step.
-    Items flow with the page again; return ok and validation problems. Never writes the device."""
+    Items flow with the page again; return ok and validation problems."""
     return _edit(lambda lay: [lay.unpin(i) for i in item_ids])
 
 
@@ -252,7 +253,7 @@ def swap(
     b: Annotated[str, Field(description="Second loaded draft item id from show_layout.")],
 ) -> dict[str, Any]:
     """Swap the positions and pins of two loaded draft items in one saved undo step.
-    Return ok and validation problems; never writes the device."""
+    Return ok and validation problems."""
     return _edit(lambda lay: lay.swap(a, b))
 
 
@@ -264,8 +265,7 @@ async def screen_time(
 ) -> dict[str, Any]:
     """Return estimated top-app usage, background apps and phone-versus-draft page swipes.
     Requires a loaded draft and replaces cached usage. Device mode reads memory reports and
-    installed apps, saving reports locally; mac mode reads synced macOS Screen Time files.
-    Does not edit the draft or write the device."""
+    installed apps, saving reports locally; mac mode reads synced macOS Screen Time files."""
     s = session()
     u = await s.load_device_usage() if source == "device" else s.load_usage(days)
     if not u.get("ok"):
@@ -285,7 +285,7 @@ async def optimize_by_usage(
     """Reorder loaded draft apps/folders by estimated usage in one saved undo step.
     Uses cached usage, else reads device reports into local files, then tries synced macOS
     Screen Time. Keeps widgets on their pages, Dock and App Library unchanged.
-    Return ok and validation problems or an error; never writes the device."""
+    Return ok and validation problems or an error."""
     s = session()
     if s.usage is None:
         try:
@@ -309,7 +309,7 @@ def page_op(
 ) -> dict[str, Any]:
     """Insert, move or delete a loaded draft page in one saved undo step.
     Delete sends its apps, including folder contents, to App Library; widgets prevent deletion.
-    Return ok and validation problems; never writes the device."""
+    Return ok and validation problems."""
     def run(lay: Layout) -> None:
         if op == "insert":
             lay.insert_page(page)
@@ -328,14 +328,14 @@ def page_op(
                                       idempotentHint=False, openWorldHint=False))
 def remove_empty() -> dict[str, Any]:
     """Remove empty pages and folders from the loaded draft in one saved undo step.
-    Return ok and validation problems; never writes the device."""
+    Return ok and validation problems."""
     return _edit(lambda lay: lay.drop_empty())
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True,
                                       idempotentHint=False, openWorldHint=False))
 def undo() -> dict[str, Any]:
-    """Undo one available draft edit and persist the result; never writes the device.
+    """Undo one available draft edit and persist the result.
     Return whether an edit was undone and the remaining undo/redo depths."""
     s = session()
     return {"ok": s.undo(), **s.history()}
@@ -344,7 +344,7 @@ def undo() -> dict[str, Any]:
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True,
                                       idempotentHint=False, openWorldHint=False))
 def redo() -> dict[str, Any]:
-    """Redo one available undone draft edit and persist the result; never writes the device.
+    """Redo one available undone draft edit and persist the result.
     Return whether an edit was redone and the remaining undo/redo depths."""
     s = session()
     return {"ok": s.redo(), **s.history()}
@@ -354,16 +354,17 @@ def redo() -> dict[str, Any]:
                                       idempotentHint=False, openWorldHint=False))
 def reset_draft() -> dict[str, Any]:
     """Replace the loaded draft with its last-read source layout in one saved undo step.
-    Return ok; discards draft changes but never writes the device."""
+    Discards draft changes and returns ok."""
     session().reset()
     return {"ok": True}
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False,
                                       idempotentHint=True, openWorldHint=False))
 def diff() -> dict[str, Any]:
     """Return loaded draft changes, validation problems and its current apply_token.
-    Compares with the last-read layout without contacting or changing the device."""
+    Compares with the last-read layout.
+    Session setup creates and sets permissions on the local data directory."""
     return session().require().diff()
 
 
@@ -371,7 +372,7 @@ def diff() -> dict[str, Any]:
                                       idempotentHint=True, openWorldHint=True))
 async def render_preview() -> dict[str, Any]:
     """Replace local preview.html with a draft-versus-last-read HTML preview; return its path.
-    Requires a loaded draft; reads and locally caches source icons as needed. Never writes the device."""
+    Requires a loaded draft; reads and locally caches source icons as needed."""
     path = await preview.render(session(), DATA / "preview.html")
     return {"path": str(path)}
 
@@ -381,10 +382,10 @@ async def render_preview() -> dict[str, Any]:
 async def apply(
     apply_token: Annotated[str, Field(description="Exact token from diff for the current draft; obtain a fresh token after edits.")],
 ) -> dict[str, Any]:
-    """Write the loaded draft to the iPhone only when explicitly requested by the user.
-    Requires HOMESCREEN_ALLOW_APPLY=1, a writable source and the latest diff token.
+    """Write the loaded draft to the iPhone.
+    Requires explicit user approval, HOMESCREEN_ALLOW_APPLY=1, a writable source and the latest diff token.
     Backs up first, checks identity and source changes, writes once and verifies; returns status.
-    Replaces the local draft and clears history after readback; never automatically retries."""
+    Replaces the local draft and clears history after readback."""
     if not ALLOW_APPLY:
         return {"ok": False, "error": "apply from the assistant is off. The user can apply in the app "
                 f"(`home-screen-organizer ui`), run `home-screen-organizer apply {apply_token}`, or set HOMESCREEN_ALLOW_APPLY=1."}
@@ -398,7 +399,7 @@ async def apply(
                                       idempotentHint=True, openWorldHint=False))
 def list_backups() -> list[str]:
     """Return saved backup filenames for this session's device, oldest first.
-    May create the local session/backup directory; does not contact or write the device."""
+    Creates the local session/backup directory as needed and sets session-directory permissions."""
     return session().backups()
 
 
@@ -407,8 +408,9 @@ def list_backups() -> list[str]:
 async def restore(
     backup: Annotated[str, Field(description="Exact filename returned by list_backups for the previously read device.")],
 ) -> dict[str, Any]:
-    """Write a named trusted backup to the iPhone only when explicitly requested by the user.
-    Requires HOMESCREEN_ALLOW_APPLY=1, a writable source and a previously read device identity.
+    """Write a named trusted backup to the iPhone.
+    Requires explicit user approval, HOMESCREEN_ALLOW_APPLY=1, a writable source
+    and a previously read device identity.
     Backs up first and verifies after writing; returns status, replaces the draft and clears history."""
     if not ALLOW_APPLY:
         return {"ok": False, "error": f"restore from the assistant is off. The user can run `home-screen-organizer restore {backup}`."}
