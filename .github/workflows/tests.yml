@@ -19,6 +19,8 @@ jobs:
     name: Layout, editor and macOS package
     runs-on: macos-15
     timeout-minutes: 35
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -27,16 +29,18 @@ jobs:
         with:
           python-version: "3.12"
       - name: Check build architecture and release version
+        id: version
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           test "$(uname -m)" = arm64
           if [ "$REF_TYPE" = tag ]; then
-            python macapp/release.py version --tag "$REF_NAME"
+            VERSION=$(python macapp/release.py version --tag "$REF_NAME")
           else
-            python macapp/release.py version
+            VERSION=$(python macapp/release.py version)
           fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Install locked development dependencies
         run: |
           python -m venv .venv
@@ -74,14 +78,20 @@ jobs:
           retention-days: 14
 
   release:
-    name: Publish tagged release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    name: Publish versioned release
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs: test
+    concurrency:
+      group: publish-${{ github.repository }}-${{ needs.test.outputs.version }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ios-homescreen-organizer-macos-arm64
@@ -90,24 +100,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          cd release
-          sha256sum --check SHA256SUMS.txt
-          cat > notes.md <<'NOTES'
-          Arrange Home Screen apps, folders, widgets and the App Library from your Mac.
-
-          - Layout support for iOS 16, 17, 18, 26 and 27; iOS 16 uses sequential icon placement.
-          - Per-device drafts and backups, readback comparison, local editor and CLI.
-          - Apple silicon Mac, macOS 14 or later; ad-hoc signed app.
-
-          Install: open the DMG and drag iOS Home Screen Organizer into Applications, or extract the ZIP. Open System Settings → Privacy & Security → Open Anyway when macOS requests approval.
-
-          Download SHA256SUMS.txt alongside an archive and run `shasum -a 256 --check SHA256SUMS.txt` with both archives in the same directory.
-
-          Original project by Jonathan Kats: https://github.com/kats1123/homescreen-mcp · MIT License.
-          NOTES
-          prerelease=()
-          if [[ "$RELEASE_TAG" == *-* ]]; then prerelease=(--prerelease); fi
-          gh release create "$RELEASE_TAG" --verify-tag --title "iOS Home Screen Organizer $RELEASE_TAG" \
-            --notes-file notes.md "${prerelease[@]}" ./*.dmg ./*.zip SHA256SUMS.txt
+          RELEASE_TAG: v${{ needs.test.outputs.version }}
+          RELEASE_TARGET: ${{ github.sha }}
+        run: bash macapp/publish_release.sh "$PWD/release" "$PWD/macapp/RELEASE_NOTES.md"

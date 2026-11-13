@@ -47,7 +47,7 @@
 - **只读会话：** 设置 `HOMESCREEN_READ_ONLY=1` 后，可读取设备并编辑本地草稿；编辑器、CLI 和 MCP 会话中的 Apply 与 Restore 均禁用。
 - **设备与备份处理：** Apply 和 Restore 会刷新设备身份与布局、记录备份来源，并核对操作结果。操作中断或结果不符后，重新执行 Read。Restore 选择设备来源信息匹配的备份。
 - **本地编辑器与启动器：** 编辑器会话认证、后端健康检查，以及启动器 URL/请求校验。见[本地编辑器 API 参考](docs/LOCAL-EDITOR.md)。
-- **旧版布局与分发：** iOS 16 位置调整提示、模拟器图标渲染，以及版本标签触发的 DMG/ZIP 发布和 SHA256 校验文件。
+- **旧版布局与分发：** iOS 16 位置调整提示、模拟器图标渲染，以及合并到 main 后自动触发的 DMG/ZIP 版本发布和 SHA256 校验文件。
 - **源码构建：** 为 macOS arm64 / Python 3.12 固定 Python wheel 版本并校验哈希。见[构建说明](macapp/BUILDING.md)。
 
 <a id="install"></a>
@@ -68,7 +68,7 @@
 shasum -a 256 --check SHA256SUMS.txt
 ```
 
-PR 构建产物位于 [Actions](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml) → 已完成的运行 → **ios-homescreen-organizer-macos-arm64**。版本标签会将同格式安装包发布到 Releases。
+PR 构建产物位于 [Actions](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml) → 已完成的运行 → **ios-homescreen-organizer-macos-arm64**。合并到 `main` 并构建成功后，会按新的项目版本号自动发布到 Releases。
 
 ### 从源码安装
 
@@ -101,7 +101,7 @@ macapp/build.sh
 
 脚本使用全新的 Python 环境和同一依赖锁，在 `build/` 中生成 App 和 DMG，并应用 **ad-hoc 签名**。详见 [macOS 构建与签名说明](macapp/BUILDING.md)。
 
-执行 `python3.12 macapp/release.py package` 可生成发行文件。`build/release/` 中包含 DMG、ZIP 与 `SHA256SUMS.txt`。发布步骤见[版本标签发布说明](macapp/BUILDING.md#tagged-releases)。
+执行 `python3.12 macapp/release.py package` 可生成发行文件。`build/release/` 中包含 DMG、ZIP 与 `SHA256SUMS.txt`。发布步骤见[自动发布说明](macapp/BUILDING.md#automatic-releases)。
 
 <a id="get-started"></a>
 

@@ -46,7 +46,7 @@ This fork maintains changes to device sessions, backups, the local editor and th
 - **Read-only sessions:** `HOMESCREEN_READ_ONLY=1` lets you read and edit a local draft while Apply and Restore are disabled in the editor, CLI and MCP session.
 - **Device and backup handling:** Apply and Restore refresh the device identity and layout, record backup provenance, and check the result. Run Read after an interrupted or mismatching operation. Restore selects backups with matching device provenance.
 - **Local editor and launcher:** authenticated editor sessions, backend health checks and launcher URL/request validation. See the [local editor API reference](docs/LOCAL-EDITOR.md).
-- **Legacy layouts and distribution:** iOS 16 placement guidance, simulator icon rendering, and tag-triggered DMG/ZIP releases with SHA256 checksums.
+- **Legacy layouts and distribution:** iOS 16 placement guidance, simulator icon rendering, and automatic versioned DMG/ZIP releases with SHA256 checksums.
 - **Source builds:** pinned, hash-checked Python wheels for macOS arm64 / Python 3.12. See [build instructions](macapp/BUILDING.md).
 
 <a id="install"></a>
@@ -67,7 +67,7 @@ To verify a download, place both release archives and `SHA256SUMS.txt` in the sa
 shasum -a 256 --check SHA256SUMS.txt
 ```
 
-PR builds are available under [Actions](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml) → the completed run → **ios-homescreen-organizer-macos-arm64**. Version tags publish the same archive formats to Releases.
+PR builds are available under [Actions](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml) → the completed run → **ios-homescreen-organizer-macos-arm64**. After a merge into `main`, a successful build publishes each new project version to Releases automatically.
 
 ### Install from source
 
@@ -100,7 +100,7 @@ macapp/build.sh
 
 The script creates the app and a DMG in `build/`, using its own fresh Python environment and the same dependency lock. It applies **ad-hoc signing**. See [macOS build and signing details](macapp/BUILDING.md).
 
-Create release archives with `python3.12 macapp/release.py package`. The output directory `build/release/` contains the DMG, ZIP and `SHA256SUMS.txt`. See [tagged release publishing](macapp/BUILDING.md#tagged-releases).
+Create release archives with `python3.12 macapp/release.py package`. The output directory `build/release/` contains the DMG, ZIP and `SHA256SUMS.txt`. See [automatic release publishing](macapp/BUILDING.md#automatic-releases).
 
 <a id="get-started"></a>
 

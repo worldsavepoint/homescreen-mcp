@@ -89,26 +89,25 @@ The package command checks the bundle version, preserves executable permissions 
 the ZIP, and produces `ios-homescreen-organizer-<version>-macos-arm64.dmg`,
 `ios-homescreen-organizer-<version>-macos-arm64.zip` and `SHA256SUMS.txt`.
 
-## Tagged releases
+## Automatic releases
 
 Pull requests and pushes to `main` run layout, draft, backup, editor and launcher
 checks, build the Mac app, verify its signature and engine startup, then upload
 installable archives as the `ios-homescreen-organizer-macos-arm64` Actions artifact.
 
-To publish a release after merging the contribution:
+To publish a new version:
 
-1. Set `project.version` in `pyproject.toml` to the release version and merge it.
-2. Check the matching tag locally, then push it:
+1. Set `project.version` in `pyproject.toml` to a new version, such as `1.1.1`.
+2. Merge the contribution into `main`.
+3. After validation and packaging succeed, CI creates the matching `v1.1.1` tag
+   at the built commit and publishes the DMG, ZIP and checksums to GitHub Releases.
 
-   ```sh
-   python3.12 macapp/release.py version --tag v1.1.1
-   git tag v1.1.1
-   git push origin v1.1.1
-   ```
+Each project version has one published release. Increment `project.version` for
+the next release; subsequent builds of an already published version retain that
+release. CI resumes asset uploads and publication for an existing draft.
 
-3. The tag workflow builds the app, verifies its archives, and publishes the DMG,
-   ZIP and checksums to GitHub Releases. Tags match the project version exactly.
-   Versions such as `1.2.0-beta.1` produce GitHub prereleases.
+Pushing a matching version tag also runs the build and publication workflow.
+Versions such as `1.2.0-beta.1` produce GitHub prereleases.
 
 The app's standard macOS version fields contain the numeric release core, such as
 `1.2.0`. `IOSHomeScreenOrganizerReleaseVersion` retains the complete release version, including
