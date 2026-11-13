@@ -72,7 +72,7 @@ function errorKey(message, code) {
   if (/ has no (known wire identifier|wire identifier for its pin); use ordinary page order$/.test(message)) return "error.pinIdentifier";
   if (message === "pinned backup has no saved grid dimensions; use a backup with grid provenance" ||
       message === "backup grid dimensions must be positive integers") return "error.backupGrid";
-  if (/^(backup pins must identify |backup pin is outside |backup pin footprint |invalid pin cell |pin identifiers do not match |pins do not fit the loaded grid:)/.test(message)) return "error.savedPosition";
+  if (/^(backup pins must identify |backup pin is outside |backup pin footprint |backup layout has problems, not restoring: |invalid pin cell |pin identifiers do not match |pins do not fit the loaded grid:)/.test(message)) return "error.savedPosition";
   if (/^(backup |no backup named)/.test(message)) return "error.backup";
   if (/^draft has problems/.test(message)) return "validation.unknown";
   if (/^(can't place |cells are |that spot is taken |page \d+ has no room )/.test(message) || /doesn't fit at row/.test(message)) return "error.position";

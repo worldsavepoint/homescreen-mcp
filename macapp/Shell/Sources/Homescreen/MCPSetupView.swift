@@ -21,10 +21,39 @@ final class MCPSetupModel: ObservableObject {
         self.enginePath = enginePath
     }
 
+    struct Feedback {
+        let primaryKey: String
+        var recoveryKey: String? = nil
+        var details: String? = nil
+    }
+
+    func feedback(for client: MCPClient) -> Feedback? {
+        if let result = registrations[client] {
+            return Feedback(primaryKey: result.code == .success ? "mcp.registered" : operationKey(result.code),
+                recoveryKey: result.recovery == .notNeeded ? nil : (result.recovery == .restored ? "mcp.restored" : "mcp.recoveryFailed"),
+                details: result.code == .success ? nil : "\(result.code.rawValue) · \(result.recovery.rawValue)")
+        }
+        guard let query = queries[client], query.code != .success && query.code != .notFound else { return nil }
+        return Feedback(primaryKey: operationKey(query.code), details: query.code.rawValue)
+    }
+
+    private func operationKey(_ code: MCPClientOperationCode) -> String {
+        switch code {
+        case .timedOut: return "mcp.timeout"
+        case .notFound: return "mcp.notInstalled"
+        case .notExecutable: return "mcp.notExecutable"
+        case .snapshotReadFailed: return "mcp.snapshotFailed"
+        case .recoveryFailed: return "mcp.recoveryFailed"
+        case .invalidResponse: return "mcp.invalidResponse"
+        default: return "mcp.operationFailed"
+        }
+    }
+
     func refresh(consent: LaunchConsent) async {
         guard consent.accepted, !busy else { return }
         busy = true
         defer { busy = false }
+        registrations.removeAll()
         for client in MCPClient.allCases {
             detections[client] = await manager.detect(client: client, executablePath: selectedPaths[client])
             queries[client] = await manager.query(client: client, executablePath: selectedPaths[client])
@@ -145,7 +174,7 @@ struct MCPSetupView: View {
     @ViewBuilder private func clientCard(_ client: MCPClient) -> some View {
         let detection = model.detections[client]
         let query = model.queries[client]
-        let result = model.registrations[client]
+        let feedback = model.feedback(for: client)
         let name = localization.t("mcp." + client.rawValue)
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
@@ -178,13 +207,10 @@ struct MCPSetupView: View {
                         if panel.runModal() == .OK, let url = panel.url { Task { await model.choose(url.path, for: client, consent: consent) } }
                     }.disabled(model.busy || !consent.accepted)
                 }
-                if let result {
-                    Text(localization.t(result.code == .success ? "mcp.registered" : operationKey(result.code), ["client": name]))
-                    if result.recovery != .notNeeded { Text(localization.t(result.recovery == .restored ? "mcp.restored" : "mcp.recoveryFailed")) }
-                    if result.code != .success { DiagnosticsView(details: "\(result.code.rawValue) · \(result.recovery.rawValue)") }
-                } else if let query, query.code != .success && query.code != .notFound {
-                    Text(localization.t(operationKey(query.code)))
-                    DiagnosticsView(details: query.code.rawValue)
+                if let feedback {
+                    Text(localization.t(feedback.primaryKey, ["client": name]))
+                    if let key = feedback.recoveryKey { Text(localization.t(key)) }
+                    if let details = feedback.details { DiagnosticsView(details: details) }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
         }
@@ -202,17 +228,6 @@ struct MCPSetupView: View {
         case .connected: return "mcp.connected"
         case .disconnected: return "mcp.disconnected"
         default: return "mcp.connectionUnknown"
-        }
-    }
-    private func operationKey(_ code: MCPClientOperationCode) -> String {
-        switch code {
-        case .timedOut: return "mcp.timeout"
-        case .notFound: return "mcp.notInstalled"
-        case .notExecutable: return "mcp.notExecutable"
-        case .snapshotReadFailed: return "mcp.snapshotFailed"
-        case .recoveryFailed: return "mcp.recoveryFailed"
-        case .invalidResponse: return "mcp.invalidResponse"
-        default: return "mcp.operationFailed"
         }
     }
 }

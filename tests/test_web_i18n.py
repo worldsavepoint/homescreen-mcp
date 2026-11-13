@@ -265,6 +265,7 @@ assert.ok($('#toast').querySelector('pre').textContent.includes("widgets can't g
     ("invalid pin cell for 'example' on the loaded grid", "error.savedPosition"),
     ("pin identifiers do not match the layout's page items", "error.savedPosition"),
     ("pins do not fit the loaded grid: example", "error.savedPosition"),
+    ("backup layout has problems, not restoring: ['page 1: no room for example.a24']", "error.savedPosition"),
 ])
 def test_pin_integrity_errors_have_localized_primary_messages(message, key):
     browser(f'''

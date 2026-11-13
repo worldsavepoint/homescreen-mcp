@@ -138,6 +138,90 @@ final class TemporaryPreferences: LanguagePreferences {
    let draft = try await web.evaluateJavaScript("window.draft.name") as? String
    assert(draft == "Kept draft")
    config.userContentController.removeScriptMessageHandler(forName:"screenOrganizer")
+  case "refresh":
+   let executable = CommandLine.arguments[3]
+   var queryFailure: MCPClientOperationCode?
+   var addFailure = false
+   var calledPaths: [String] = []
+   let manager = MCPClientManager(environment: [:], homeDirectory: directory, executableLocator: { _ in executable }, runner: { path, args, _, _ in
+    calledPaths.append(path)
+    if args[1] == "get" {
+     if let failure = queryFailure { return MCPCommandResult(exitStatus:1,failure:failure) }
+     let response: [String:Any] = ["name":"ios-homescreen-mcp","transport":["command":executable,"args":["mcp"],"env":["HOMESCREEN_READ_ONLY":"1"]]]
+     return MCPCommandResult(exitStatus:0,stdout:String(decoding:try! JSONSerialization.data(withJSONObject:response),as:UTF8.self))
+    }
+    return MCPCommandResult(exitStatus:addFailure ? 1 : 0)
+   })
+   let model = MCPSetupModel(manager:manager,enginePath:executable)
+   let c = LaunchConsent()
+   c.observeEnd(CGRect(x:0,y:20,width:20,height:2),viewport:CGSize(width:600,height:300)); c.setAgreed(true); assert(c.accept())
+   for failure in [MCPClientOperationCode.timedOut, .commandFailed] {
+    queryFailure = nil
+    await model.register(.codex,consent:c)
+    assert(model.registrations[.codex]?.code == .success)
+    assert(model.feedback(for:.codex)?.primaryKey == "mcp.registered")
+    queryFailure = failure
+    await model.refresh(consent:c)
+    assert(model.registrations[.codex] == nil, "Refresh must replace the old registration result")
+    assert(model.queries[.codex]?.code == failure)
+    assert(model.queries[.codex]?.configuration == .unknown && model.queries[.codex]?.connection == .unknown)
+    let feedback = model.feedback(for:.codex)!
+    assert(feedback.primaryKey == (failure == .timedOut ? "mcp.timeout" : "mcp.operationFailed"))
+    assert(feedback.details == failure.rawValue && feedback.recoveryKey == nil)
+    assert(l.t(feedback.primaryKey) != feedback.primaryKey)
+   }
+   queryFailure = nil
+   addFailure = true
+   await model.register(.codex,consent:c)
+   assert(model.registrations[.codex]?.code == .commandFailed)
+   assert(model.queries[.codex]?.code == .success)
+   assert(model.feedback(for:.codex)?.primaryKey == "mcp.operationFailed")
+   assert(model.feedback(for:.codex)?.details == "commandFailed · notNeeded")
+   await model.refresh(consent:c)
+   assert(model.registrations[.codex] == nil && model.queries[.codex]?.configuration == .configured)
+   assert(model.feedback(for:.codex) == nil)
+   addFailure = false
+   await model.register(.codex,consent:c)
+   queryFailure = .timedOut
+   let selected = executable + "-selected"
+   await model.choose(selected,for:.codex,consent:c)
+   assert(calledPaths.contains(selected))
+   assert(model.detections[.codex]?.executablePath == selected)
+   assert(model.registrations[.codex] == nil && model.queries[.codex]?.code == .timedOut)
+   assert(model.feedback(for:.codex)?.primaryKey == "mcp.timeout" && model.feedback(for:.codex)?.details == "timedOut")
+   queryFailure = nil
+   await model.refresh(consent:c)
+   assert(model.queries[.codex]?.configuration == .configured && model.queries[.codex]?.connection == .unknown)
+   assert(model.checkResult == nil)
+   assert(model.feedback(for:.codex) == nil)
+  case "recovery":
+   let executable = CommandLine.arguments[3]
+   for recoverySucceeds in [true, false] {
+    var snapshot: String? = #"{"command":"/original/engine","args":["mcp"],"env":{"HOMESCREEN_READ_ONLY":"1"}}"#
+    let manager = MCPClientManager(environment:[:],homeDirectory:directory,executableLocator:{ _ in executable },runner:{ _,args,_,_ in
+     switch args[1] {
+     case "get":
+      return snapshot == nil ? MCPCommandResult(exitStatus:1,stdout:"No server named ios-homescreen-mcp") :
+       MCPCommandResult(exitStatus:0,stdout:"ios-homescreen-mcp:\nScope: User\nCommand: /original/engine\nStatus: disconnected\nHOMESCREEN_READ_ONLY=1")
+     case "remove": snapshot = nil; return MCPCommandResult(exitStatus:0)
+     case "add-json":
+      if recoverySucceeds { snapshot = args.last }
+      return MCPCommandResult(exitStatus:recoverySucceeds ? 0 : 1)
+     default: return MCPCommandResult(exitStatus:1,failure:.timedOut)
+     }
+    },snapshotProvider:{ _,_ in snapshot })
+    let model = MCPSetupModel(manager:manager,enginePath:executable)
+    let c = LaunchConsent()
+    c.observeEnd(CGRect(x:0,y:20,width:20,height:2),viewport:CGSize(width:600,height:300)); c.setAgreed(true); assert(c.accept())
+    await model.register(.claudeCode,consent:c)
+    let feedback = model.feedback(for:.claudeCode)!
+    assert(feedback.primaryKey == (recoverySucceeds ? "mcp.timeout" : "mcp.recoveryFailed"))
+    assert(feedback.recoveryKey == (recoverySucceeds ? "mcp.restored" : "mcp.recoveryFailed"))
+    assert(feedback.details == (recoverySucceeds ? "timedOut · restored" : "recoveryFailed · failed"))
+    await model.refresh(consent:c)
+    assert(model.registrations[.claudeCode] == nil && model.feedback(for:.claudeCode) == nil)
+    assert(model.checkResult == nil)
+   }
   case "panel":
    let executable = CommandLine.arguments[3]
    let marker = CommandLine.arguments[4]
@@ -230,4 +314,14 @@ def test_child_start_order_and_serialized_panel(native_binary, catalogs, tmp_pat
     child.chmod(0o755)
     result = subprocess.run([str(native_binary), mode, str(catalogs), str(child), str(tmp_path / "started")],
                             capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("mode", ["refresh", "recovery"])
+def test_refresh_replaces_registration_results(native_binary, catalogs, tmp_path, mode):
+    executable = tmp_path / "synthetic-client"
+    executable.write_text("#!/bin/sh\nexit 99\n")
+    executable.chmod(0o755)
+    shutil.copy(executable, str(executable) + "-selected")
+    result = subprocess.run([str(native_binary), mode, str(catalogs), str(executable)], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
