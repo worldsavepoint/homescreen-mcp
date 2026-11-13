@@ -3,7 +3,7 @@
 
 <p align="center">
   <a href="https://github.com/worldsavepoint/ios-homescreen-organizer/releases"><img alt="发行版" src="https://img.shields.io/badge/download-Releases-blue"></a>
-  <a href="https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml"><img alt="构建状态" src="https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml/badge.svg"></a>
+  <a href="#compatibility"><img alt="支持 iOS 16 及以上版本" src="https://img.shields.io/badge/iOS-16%2B-007AFF"></a>
   <a href="LICENSE"><img alt="MIT 许可证" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <a href="macapp/BUILDING.md"><img alt="macOS 14 或更高版本" src="https://img.shields.io/badge/macOS-14%2B-222222"></a>
 </p>
@@ -130,5 +130,5 @@ Mac、macOS、iPhone、iPad 和 Screen Time 是 Apple Inc. 的商标。IOS 是 C
 
 <p align="center">
   <sub>README 访问计数</sub><br>
-  <a href="https://github.com/journey-ad/Moe-Counter"><img src="https://count.moeyy.cn/@worldsavepoint.homescreen?theme=asoul&amp;padding=7&amp;scale=0.7&amp;darkmode=auto" alt="Home Screen Organizer README 访问计数 — Moe Counter" width="320"></a>
+  <a href="https://github.com/journey-ad/Moe-Counter"><img src="https://count.moeyy.cn/@worldsavepoint.homescreen?theme=gelbooru&amp;padding=7&amp;scale=0.7&amp;darkmode=auto" alt="Home Screen Organizer README 访问计数 — Moe Counter" width="320"></a>
 </p>
