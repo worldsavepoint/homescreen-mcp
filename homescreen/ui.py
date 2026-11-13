@@ -89,6 +89,61 @@ def _read_only() -> bool:
     return os.environ.get("HOMESCREEN_READ_ONLY") == "1"
 
 
+def _locations(lay: Layout) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Attach presentation fields to the model's existing position strings."""
+    positions = lay.positions()
+    labels: dict[str, dict[str, Any]] = {}
+    items: dict[str, dict[str, Any]] = {}
+
+    def walk(nodes: list[Node], location: dict[str, Any]) -> None:
+        for index, node in enumerate(nodes, 1):
+            descriptor = {**location, "index": index}
+            items[node.id] = descriptor
+            labels[positions[node.id]] = descriptor
+            if node.kind == "folder":
+                for page, children in enumerate(node.children, 1):
+                    walk(children, {"kind": "folder", "name": node.name, "page": page})
+
+    walk(lay.dock, {"kind": "dock"})
+    for page, nodes in enumerate(lay.pages, 1):
+        walk(nodes, {"kind": "page", "page": page})
+    for kind, nodes in (("library", lay.library or []), ("bank", lay.bank)):
+        for node in nodes:
+            descriptor = {"kind": kind}
+            items[node.id] = descriptor
+            labels[positions[node.id]] = descriptor
+    return labels, items
+
+
+def _problem_details(lay: Layout, problems: list[str]) -> list[dict[str, Any]]:
+    """Match known diagnostics against raw layout names without parsing their text."""
+    candidates: dict[str, dict[str, Any]] = {}
+
+    def add(message: str, key: str, **params: Any) -> None:
+        candidates[message] = {"key": "validation." + key, "params": params}
+
+    add(f"the App Bank still holds {len(lay.bank)} item(s); place them or send them to the App Library",
+        "bank", count=len(lay.bank))
+    add(f"dock has {len(lay.dock)} items (max {lay.dock_slots})", "dock", count=len(lay.dock), capacity=lay.dock_slots)
+    for page, nodes in enumerate(lay.pages, 1):
+        add(f"page {page} is empty (iOS keeps it as a blank page; use remove_empty)", "emptyPage", page=page)
+        add(f"page {page} needs {sum(n.slots for n in nodes)} slots (max {lay.page_slots})", "pageCapacity",
+            page=page, count=sum(n.slots for n in nodes), capacity=lay.page_slots)
+        for node in nodes:
+            add(f"page {page}: no room for {node.name}", "noRoom", page=page, name=node.name)
+            if node.id in lay.pins:
+                row, column = divmod(lay.pins[node.id], lay.grid.cols)
+                add(f"page {page}: {node.name} can't be pinned at row {row + 1}, column {column + 1}",
+                    "pin", page=page, name=node.name, row=row + 1, column=column + 1)
+            if node.kind == "folder":
+                for folder_page, children in enumerate(node.children, 1):
+                    add(f"folder {node.name!r} page {folder_page} has {len(children)} items (max {lay.grid.folder})",
+                        "folderCapacity", name=node.name, page=folder_page, count=len(children), capacity=lay.grid.folder)
+                add(f"folder {node.name!r} contains a folder or widget", "folderContents", name=node.name)
+    return [candidates.get(message, {"key": "validation.unknown", "params": {}, "diagnostic": message})
+            for message in problems]
+
+
 def view() -> dict[str, Any]:
     s = session()
     if s.layout is None:
@@ -97,6 +152,11 @@ def view() -> dict[str, Any]:
     lay = s.layout
     d = lay.diff()
     moved = {k.rsplit("[", 1)[-1].rstrip("]") for k in d["moves"]}
+    old_labels, old_items = _locations(lay.original())
+    labels, items = _locations(lay)
+    move_details = {f"{lay.nodes[item].name} [{item}]": {
+        "id": item, "name": lay.nodes[item].name, "from": old_items[item], "to": items[item]}
+        for item in moved if item in old_items and item in items}
     return {
         "loaded": True,
         "read_only": _read_only(),
@@ -109,8 +169,11 @@ def view() -> dict[str, Any]:
         "bank": [_item(n, lay) for n in lay.bank],
         "usage": _usage_view(lay),
         "moved": sorted(moved),
-        "diff": {k: d[k] for k in ("items_moved", "to_app_library", "pages_before", "pages_after",
+        "diff": {**{k: d[k] for k in ("items_moved", "to_app_library", "pages_before", "pages_after",
                                    "problems", "apply_token", "gaps_changed")},
+                 "problem_details": _problem_details(lay, d["problems"])},
+        "location_labels": {**old_labels, **labels},
+        "move_details": move_details,
         "moves": d["moves"],
         "history": s.history(),
         "gaps": {"readable": s.gaps_readable, "count": len(lay.pins), "changed": d["gaps_changed"]},
