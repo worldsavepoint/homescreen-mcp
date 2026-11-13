@@ -170,6 +170,20 @@ def node_pins(lay: Layout, keyed: dict[str, int], by_memory: bool = False,
     return wanted
 
 
+def _node_structure(node: Node) -> Any:
+    if node.kind == "folder":
+        return [node.name, [[_node_structure(child) for child in page] for page in node.children]]
+    if node.kind == "widget":
+        return "widget:" + widget_configuration(node.raw)
+    return node.id
+
+
+def _pin_intents(lay: Layout) -> set[str]:
+    """Explicit anchors by page, coordinate and the same semantics used for layout comparison."""
+    return {json.dumps([index, divmod(lay.pins[node.id], lay.grid.cols), _node_structure(node)])
+            for index, page in enumerate(lay.pages) for node in page if node.id in lay.pins}
+
+
 def placed_structure(state: list[Any], library: list[Any] | None, keyed_pins: dict[str, int] | None,
                      grid: Grid | None = None, by_memory: bool = False) -> str:
     """Like model.structure, but each page lists its items in grid order (row by row) after
@@ -179,19 +193,12 @@ def placed_structure(state: list[Any], library: list[Any] | None, keyed_pins: di
     if keyed_pins is not None:
         node_pins(lay, keyed_pins, by_memory=by_memory, strict=True)
 
-    def semantic(node: Node) -> Any:
-        if node.kind == "folder":
-            return [node.name, [[semantic(child) for child in page] for page in node.children]]
-        if node.kind == "widget":
-            return "widget:" + widget_configuration(node.raw)
-        return node.id
-
     pages = []
     for page in lay.pages:
         pos, _ = lay.place(page)
         order = sorted(page, key=lambda n: (pos[n.id][0], pos[n.id][1]) if n.id in pos else (99, 0))
-        pages.append([[semantic(n), pos.get(n.id, (0, 0))[:2]] for n in order])
-    return json.dumps({"dock": [semantic(n) for n in lay.dock], "pages": pages,
+        pages.append([[_node_structure(n), pos.get(n.id, (0, 0))[:2]] for n in order])
+    return json.dumps({"dock": [_node_structure(n) for n in lay.dock], "pages": pages,
                        "library": None if library is None else sorted(n.id for n in lay.library or [])},
                       default=list)
 
@@ -638,12 +645,17 @@ class Session:
             await self._assert_identity()
             got_pins = getattr(self.source, "pins", None)
             unreported = got_pins is None
+            requested = Layout(target, library=target_lib, grid=self.grid)
+            node_pins(requested, want_pins, strict=True)
             if unreported:
                 # Retain requested gaps under the no-pin-map contract. Match folders by
                 # exported content without adding outgoing UUIDs to the returned state.
-                requested = Layout(target, library=target_lib, grid=self.grid)
-                node_pins(requested, want_pins, strict=True)
                 got_pins = memory_pins(requested)
+            else:
+                observed = Layout(after, library=after_lib, grid=self.grid)
+                node_pins(observed, got_pins, strict=True)
+                if not _pin_intents(requested) <= _pin_intents(observed):
+                    raise LayoutError("readback did not retain every requested fixed position")
             ok = (placed_structure(after, after_lib if lib_known else None, got_pins, self.grid,
                                    by_memory=unreported)
                   == placed_structure(target, target_lib, want_pins, self.grid))
