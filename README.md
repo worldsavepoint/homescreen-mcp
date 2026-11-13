@@ -1,5 +1,5 @@
 <h1 align="center">Home Screen Organizer</h1>
-<p align="center"><strong>Arrange your iPhone or iPad Home Screen from your Mac.</strong><br>macOS 14+ · Apple silicon &amp; Intel · iOS 16 / 17 / 18 / 26 / 27 layout modes</p>
+<p align="center"><strong>Arrange your iPhone or iPad Home Screen from your Mac.</strong><br>macOS 14+ · Apple silicon &amp; Intel · Supports iOS 16+</p>
 
 <p align="center">
   <a href="https://github.com/worldsavepoint/ios-homescreen-organizer/releases"><img alt="Releases" src="https://img.shields.io/badge/download-Releases-blue"></a>
@@ -120,4 +120,15 @@ The primary commands are `home-screen-organizer` and `home-screen-mcp`. Existing
 
 [Report a fork issue](https://github.com/worldsavepoint/ios-homescreen-organizer/issues) with installation method, reproduction steps and a redacted error. [Upstream source](https://github.com/kats1123/homescreen-mcp) · [upstream issues](https://github.com/kats1123/homescreen-mcp/issues) · [upstream releases](https://github.com/kats1123/homescreen-mcp/releases).
 
+## Disclaimer
+
+Home Screen Organizer is not affiliated with, endorsed by, or sponsored by Apple Inc.
+
 Mac, macOS, iPhone, iPad and Screen Time are trademarks of Apple Inc. IOS is a trademark or registered trademark of Cisco in the U.S. and other countries and is used by Apple under license.
+
+This tool uses private device interfaces that may change with iOS updates. It saves a Home Screen layout backup before applying or restoring a layout and attempts to verify the result by reading the layout back. Keep a separate, up-to-date full backup of your iPhone or iPad. Use the tool at your own risk; it is provided “AS IS” under the [MIT License](LICENSE).
+
+<p align="center">
+  <sub>README views</sub><br>
+  <a href="https://github.com/journey-ad/Moe-Counter"><img src="https://count.moeyy.cn/@worldsavepoint.homescreen?theme=asoul&amp;padding=7&amp;scale=0.7&amp;darkmode=auto" alt="Home Screen Organizer README views — Moe Counter" width="320"></a>
+</p>
