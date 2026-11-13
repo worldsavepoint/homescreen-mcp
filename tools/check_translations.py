@@ -4,6 +4,8 @@ import argparse
 import json
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 
 LOCALES = Path(__file__).resolve().parents[1] / "homescreen/web/locales"
@@ -21,6 +23,33 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
 
 
+def canonical_locales(languages):
+    values = set()
+    for item in languages:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("code"), str):
+            values.add(item["code"])
+        if isinstance(item.get("aliases"), list):
+            values.update(alias for alias in item["aliases"] if isinstance(alias, str))
+    node = shutil.which("node")
+    if node is None:
+        raise ValueError("Node.js is required for browser-compatible locale validation")
+    script = r'''
+const values = JSON.parse(require("fs").readFileSync(0, "utf8"));
+console.log(JSON.stringify(Object.fromEntries(values.map(value => {
+  try { return [value, Intl.getCanonicalLocales(value.replace(/_/g, "-"))[0] || null]; }
+  catch (_) { return [value, null]; }
+}))));
+'''
+    try:
+        result = subprocess.run([node, "-e", script], input=json.dumps(sorted(values)),
+                                capture_output=True, text=True, timeout=10, check=True)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("Node.js locale canonicalization failed") from error
+    return json.loads(result.stdout)
+
+
 def validate(folder):
     errors = []
     manifest = read_json(folder / "manifest.json")
@@ -29,6 +58,7 @@ def validate(folder):
     languages = manifest.get("languages")
     if not isinstance(languages, list) or not languages:
         return ["manifest languages must be a nonempty list"]
+    canonical = canonical_locales(languages)
     codes, aliases = set(), {}
     for item in languages:
         if not isinstance(item, dict):
@@ -40,6 +70,8 @@ def validate(folder):
             continue
         if code in codes:
             errors.append(f"duplicate language registration: {code}")
+        if canonical.get(code) != code:
+            errors.append(f"{code}: language code must use canonical form {canonical.get(code)}")
         codes.add(code)
         if not isinstance(item.get("name"), str) or not item["name"].strip():
             errors.append(f"{code}: language name must be a nonempty string")
@@ -48,12 +80,12 @@ def validate(folder):
             errors.append(f"{code}: aliases must be a nonempty list")
             continue
         for alias in [code, *values]:
-            if not isinstance(alias, str) or not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]+)*", alias):
+            if not isinstance(alias, str) or not canonical.get(alias):
                 errors.append(f"{code}: invalid language alias")
                 continue
-            normalized = alias.lower()
+            normalized = canonical[alias]
             if normalized in aliases and aliases[normalized] != code:
-                errors.append(f"{code}: alias {alias} already registered to {aliases[normalized]}")
+                errors.append(f"{code}: canonical alias {alias} ({normalized}) already registered to {aliases[normalized]}")
             aliases[normalized] = code
     if "en" not in codes:
         errors.append("English source catalog must be registered")
@@ -70,6 +102,11 @@ def validate(folder):
         if not isinstance(catalog, dict):
             errors.append(f"{code}: catalog must be an object")
             continue
+        expected_name = {"zh-Hans": "屏幕整理", "zh-Hant": "螢幕整理"}.get(code, "Screen Organizer")
+        if catalog.get("app.name") != expected_name:
+            errors.append(f"{code}: app.name display name must be {expected_name}")
+        if catalog.get("app.subtitle") != "for iOS":
+            errors.append(f"{code}: app.subtitle compatibility subtitle must be for iOS")
         for key in sorted(source.keys() - catalog.keys()):
             errors.append(f"{code}: missing key {key}")
         for key in sorted(catalog.keys() - source.keys()):

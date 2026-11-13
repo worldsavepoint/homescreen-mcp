@@ -8,13 +8,13 @@ Edit the matching locale JSON file. Keep every English message key and translate
 
 Preserve named placeholders such as `{name}` and `{count}` exactly. Their position can change to suit the language. Parameters supply app names, folder names, paths and other runtime data. Keep JSON values as plain text; the interface inserts text into controls and dialogs.
 
-Use **Screen Organizer** as the Latin-script brand, **屏幕整理** in Simplified Chinese and **螢幕整理** in Traditional Chinese. The compatibility subtitle is **for iOS**. Preserve command names, protocol fields, configuration keys, shortcuts and the upstream attribution. Translate the consent terms with the same meaning as the English source.
+Use **Screen Organizer** as the Latin-script brand, **屏幕整理** in Simplified Chinese and **螢幕整理** in Traditional Chinese. Keep the compatibility subtitle **for iOS** verbatim in every catalog. Preserve command names, protocol fields, configuration keys, shortcuts and the upstream attribution. Translate the consent terms with the same meaning as the English source.
 
 ## Add a language
 
-1. Add a `languages` entry in `manifest.json` with a canonical locale `code`, native-language `name` and `aliases`. Choose aliases that resolve regional requests to the new catalog.
+1. Add a `languages` entry in `manifest.json` with a canonical locale `code`, native-language `name` and `aliases`. Choose aliases that resolve regional requests to the new catalog. Legacy aliases such as `iw` belong to their canonical language (`he`). Each canonical alias identifies one catalog.
 2. Copy `en.json` to `<code>.json` and translate every value, preserving keys and placeholders.
-3. Run the catalog check from the repository root:
+3. Install Python 3.11 or later and Node.js, then run the catalog check from the repository root. The validator uses Node.js `Intl.getCanonicalLocales` to apply the browser’s locale matching rules.
 
    ```sh
    python tools/check_translations.py

@@ -146,8 +146,9 @@ def write_catalogs(folder, translation):
     (folder / "manifest.json").write_text(json.dumps({"default":"en", "languages":[
         {"code":"en","name":"English","aliases":["en"]},
         {"code":"de","name":"Deutsch","aliases":["de"]}]}))
-    (folder / "en.json").write_text(json.dumps({"greeting":"Hello {name}"}))
-    (folder / "de.json").write_text(json.dumps(translation))
+    identity = {"app.name":"Screen Organizer", "app.subtitle":"for iOS"}
+    (folder / "en.json").write_text(json.dumps({**identity, "greeting":"Hello {name}"}))
+    (folder / "de.json").write_text(json.dumps({**identity, **translation}))
 
 
 @pytest.mark.parametrize("translation,diagnostic", [
@@ -176,6 +177,62 @@ def test_validator_checks_registration_and_accepts_valid_catalogs(tmp_path):
     result = subprocess.run(command, capture_output=True, text=True)
     assert result.returncode == 1
     assert "unregistered" in result.stderr.lower()
+
+
+@pytest.mark.parametrize("key,value,diagnostic", [
+    ("app.subtitle", "für iOS", "subtitle"),
+    ("app.name", "Organizer", "display name"),
+])
+def test_validator_enforces_product_identity(tmp_path, key, value, diagnostic):
+    write_catalogs(tmp_path, {"greeting":"Hallo {name}", key:value})
+    result = subprocess.run([sys.executable, str(ROOT / "tools/check_translations.py"),
+                             "--locales", str(tmp_path)], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert diagnostic in result.stderr.lower()
+
+
+@pytest.mark.parametrize("registrations", [
+    [("he", ["he"]), ("iw", ["iw"])],
+    [("he", ["he"]), ("id", ["id", "iw"])],
+])
+def test_validator_rejects_canonical_registration_collisions(tmp_path, registrations):
+    write_catalogs(tmp_path, {"greeting":"Hallo {name}"})
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for code, aliases in registrations:
+        manifest["languages"].append({"code":code, "name":code, "aliases":aliases})
+        (tmp_path / f"{code}.json").write_text((tmp_path / "en.json").read_text())
+    manifest_path.write_text(json.dumps(manifest))
+    result = subprocess.run([sys.executable, str(ROOT / "tools/check_translations.py"),
+                             "--locales", str(tmp_path)], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "canonical" in result.stderr.lower()
+
+
+def test_canonical_legacy_aliases_select_distinct_registered_catalogs(tmp_path):
+    write_catalogs(tmp_path, {"greeting":"Hallo {name}"})
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for code, alias in [("he", "iw"), ("id", "in")]:
+        manifest["languages"].append({"code":code, "name":code, "aliases":[code, alias]})
+        (tmp_path / f"{code}.json").write_text((tmp_path / "en.json").read_text())
+    manifest_path.write_text(json.dumps(manifest))
+    result = subprocess.run([sys.executable, str(ROOT / "tools/check_translations.py"),
+                             "--locales", str(tmp_path)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    run_browser('''
+assert.equal(i18n.resolveLocale("iw-IL", []), "he");
+assert.equal(i18n.resolveLocale("in-ID", []), "id");
+await i18n.setLocale("he");
+assert.equal(i18n.locale, "he");
+assert.equal(i18n.t("hello", {name:"X"}), "Hebrew X");
+await i18n.setLocale("id");
+assert.equal(i18n.locale, "id");
+assert.equal(i18n.t("hello", {name:"X"}), "Indonesian X");
+''', '''manifest.languages.push(
+ {code:"he",name:"Hebrew",aliases:["he","iw"]},
+ {code:"id",name:"Indonesian",aliases:["id","in"]});
+catalogs.he = {hello:"Hebrew {name}"}; catalogs.id = {hello:"Indonesian {name}"};''')
 
 
 def test_translation_command_accepts_shipped_catalogs():
