@@ -18,8 +18,10 @@
   }
   function updateConsent() {
     const text = $("#consent-text");
-    if (!languagePending && text.scrollTop + text.clientHeight >= text.scrollHeight - 2) reachedEnd = true;
-    $("#consent-continue").disabled = declined || languagePending || !reachedEnd || !$("#consent-agree").checked;
+    const height = text.clientHeight, extent = text.scrollHeight;
+    const rendered = !$("#consent-dialog").hidden && height > 0 && extent > 0;
+    if (rendered && !languagePending && text.scrollTop + height >= extent - 2) reachedEnd = true;
+    $("#consent-continue").disabled = declined || languagePending || !rendered || !reachedEnd || !$("#consent-agree").checked;
   }
   function resetConsent() {
     reachedEnd = false;

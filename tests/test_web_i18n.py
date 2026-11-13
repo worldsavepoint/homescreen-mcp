@@ -42,9 +42,12 @@ class Element {
  constructor(tag, attrs={}) {this.tagName=tag;this.attrs={...attrs};this.children=[];this.events={};this.style={setProperty(){}};
  this.dataset={}; for(const [k,v] of Object.entries(attrs))if(k.startsWith('data-'))this.dataset[k.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]=v;
  this.hidden='hidden' in attrs;this.disabled='disabled' in attrs;this.checked='checked' in attrs;this.value=attrs.value||'';this._text='';
- this.scrollHeight=1000;this.clientHeight=200;this.scrollTop=0;
+ this._scrollHeight=1000;this._clientHeight=200;this.scrollTop=0;
  const classes = new Set((attrs.class||'').split(' '));this.classList={add:(...xs)=>xs.forEach(x=>classes.add(x)),remove:(...xs)=>xs.forEach(x=>classes.delete(x)),contains:x=>classes.has(x),toggle:(x,b)=>{b??=!classes.has(x);b?classes.add(x):classes.delete(x);}};
  }
+ get layoutHidden(){for(let n=this;n;n=n.parent)if(n.hidden)return true;return false;}
+ get scrollHeight(){return this.layoutHidden?0:this._scrollHeight;}set scrollHeight(v){this._scrollHeight=v;}
+ get clientHeight(){return this.layoutHidden?0:this._clientHeight;}set clientHeight(v){this._clientHeight=v;}
  set className(v){this.attrs.class=v;}get className(){return this.attrs.class||'';}
  set textContent(v){this._text=String(v);this.children=[];}get textContent(){return this._text+this.children.map(n=>n.textContent).join('');}
  get id(){return this.attrs.id||'';}set id(v){this.attrs.id=v;}
@@ -413,4 +416,63 @@ context.fetch=(path,options)=>{
 await tick();await tick();assert.deepEqual(unhandled,[],'bootstrap failure is handled while catalogs and consent wait');
 assert.equal(context.location.hash,'');assert.deepEqual(calls.slice(0,3),['/static/locales/manifest.json','fragment-cleared','/v1/authenticate']);
 context.releaseCatalog();
+''')
+
+
+def test_initial_hidden_terms_require_reading_the_visible_scroll_end():
+    browser('''
+const text=$('#consent-text');assert.equal($('#consent-dialog').hidden,false);assert.equal(text.scrollTop,0);
+assert.ok(text.scrollHeight>text.clientHeight);
+$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});
+assert.equal($('#consent-continue').disabled,true,'checkbox alone cannot accept initially hidden overflowing terms');
+$('#consent-continue').onclick();await tick();assert.equal(context.ScreenOrganizerOnboarding.accepted,false);
+assert.equal(calls.filter(p=>p.startsWith('/api/')).length,0);
+text.scrollTop=400;text.dispatchEvent({type:'scroll'});assert.equal($('#consent-continue').disabled,true);
+text.scrollTop=800;text.dispatchEvent({type:'scroll'});$('#consent-continue').click();await tick();await tick();
+assert.ok(calls.includes('/api/devices'));
+''', setup='''
+const terms=nodes.find(n=>n.id==='consent-text');assert.equal(terms.clientHeight,0);assert.equal(terms.scrollHeight,0);
+''')
+
+
+def test_long_translated_terms_require_the_new_visible_scroll_end():
+    browser('''
+const text=$('#consent-text');text.scrollTop=800;text.dispatchEvent({type:'scroll'});
+$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});assert.equal($('#consent-continue').disabled,false);
+const originalFetch=context.fetch;
+context.fetch=async path=>{
+ if(String(path).endsWith('/fr.json')){text.scrollHeight=1800;return {ok:true,json:async()=>({...harnessInput.catalogs['fr.json'],'consent.backups':harnessInput.catalogs['fr.json']['consent.backups'].repeat(5)})};}
+ return originalFetch(path);
+};
+const select=$('#consent-language-select');select.value='fr';await select.onchange({target:select});await tick();
+assert.equal(text.scrollTop,0);assert.equal($('#consent-agree').checked,false);assert.equal(text.scrollHeight,1800);
+$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});
+assert.equal($('#consent-continue').disabled,true);$('#consent-continue').onclick();assert.equal(context.ScreenOrganizerOnboarding.accepted,false);
+text.scrollTop=800;text.dispatchEvent({type:'scroll'});assert.equal($('#consent-continue').disabled,true,'the old text end does not complete longer terms');
+assert.equal(calls.filter(p=>p.startsWith('/api/')).length,0);
+text.scrollTop=1600;text.dispatchEvent({type:'scroll'});$('#consent-continue').click();await tick();await tick();assert.ok(calls.includes('/api/devices'));
+''')
+
+
+def test_zero_layout_terms_stay_blocked_until_they_are_rendered_and_read():
+    browser('''
+const text=$('#consent-text');assert.equal($('#consent-dialog').hidden,false);
+$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});
+assert.equal($('#consent-continue').disabled,true,'zero layout cannot complete reading');
+$('#consent-continue').onclick();assert.equal(context.ScreenOrganizerOnboarding.accepted,false);
+text.clientHeight=200;text.scrollHeight=1000;$('#consent-agree').dispatchEvent({type:'change'});
+assert.equal($('#consent-continue').disabled,true);
+text.scrollTop=800;text.dispatchEvent({type:'scroll'});assert.equal($('#consent-continue').disabled,false);
+''', setup='''
+const text=nodes.find(n=>n.id==='consent-text');text.clientHeight=0;text.scrollHeight=0;
+''')
+
+
+def test_fully_visible_terms_allow_agreement_without_extra_scrolling():
+    browser('''
+const text=$('#consent-text');assert.equal(text.clientHeight,200);assert.equal(text.scrollHeight,200);assert.equal(text.scrollTop,0);
+$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});
+assert.equal($('#consent-continue').disabled,false);$('#consent-continue').click();await tick();await tick();assert.ok(calls.includes('/api/devices'));
+''', setup='''
+const text=nodes.find(n=>n.id==='consent-text');text.scrollHeight=200;
 ''')
