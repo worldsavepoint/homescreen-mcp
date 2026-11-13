@@ -12,12 +12,14 @@ SCRIPT = ROOT / "macapp/publish_release.sh"
 TARGET = "a" * 40
 
 
-def publish(tmp_path, state="", tag_target="", corrupt=False, tag="v1.1.1", api_error=False):
+def publish(tmp_path, state="", tag_target="", corrupt=False, tag="v1.1.1", api_error=False, omit_intel=False):
     assets = tmp_path / "release"
     assets.mkdir()
     version = tag.removeprefix("v")
-    names = [f"ios-homescreen-organizer-{version}-macos-arm64.dmg",
-             f"ios-homescreen-organizer-{version}-macos-arm64.zip"]
+    names = [f"ios-homescreen-organizer-{version}-macos-{arch}.{extension}"
+             for arch in ("arm64", "x86_64") for extension in ("dmg", "zip")]
+    if omit_intel:
+        names = [name for name in names if "x86_64" not in name]
     for name in names:
         (assets / name).write_bytes(b"release fixture")
     (assets / "SHA256SUMS.txt").write_text("".join(
@@ -63,8 +65,10 @@ def test_new_release_targets_built_commit(tmp_path):
     creation = next(args for args in calls if args[:2] == ["release", "create"])
     assert creation[2] == "v1.1.1"
     assert creation[creation.index("--target") + 1] == TARGET
-    assert creation[-3:] == ["./ios-homescreen-organizer-1.1.1-macos-arm64.dmg",
-                            "./ios-homescreen-organizer-1.1.1-macos-arm64.zip", "SHA256SUMS.txt"]
+    assert creation[-5:] == ["./ios-homescreen-organizer-1.1.1-macos-arm64.dmg",
+                            "./ios-homescreen-organizer-1.1.1-macos-arm64.zip",
+                            "./ios-homescreen-organizer-1.1.1-macos-x86_64.dmg",
+                            "./ios-homescreen-organizer-1.1.1-macos-x86_64.zip", "SHA256SUMS.txt"]
 
 
 def test_published_version_is_retained(tmp_path):
@@ -107,3 +111,9 @@ def test_release_lookup_failure_stops_publication(tmp_path):
     result, calls = publish(tmp_path, api_error=True)
     assert result.returncode != 0
     assert all(args[0] == "api" for args in calls)
+
+
+def test_both_architectures_are_required_for_publication(tmp_path):
+    result, calls = publish(tmp_path, omit_intel=True)
+    assert result.returncode != 0
+    assert calls == []

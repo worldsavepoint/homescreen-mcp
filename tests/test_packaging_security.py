@@ -99,6 +99,9 @@ def test_build_recreates_environment_and_requires_locked_hashes(tmp_path):
     (build_venv / "stale-package").write_text("must not survive")
     (build_venv / "bin/pyinstaller").touch(mode=0o755)
     log = tmp_path / "commands"
+    uname = fake_bin / "uname"
+    uname.write_text("#!/bin/sh\nprintf 'arm64\\n'\n")
+    uname.chmod(0o755)
     fake_python = fake_bin / "python3.12"
     fake_python.write_text('''#!/bin/zsh
 if [[ "$1" != "-m" || "$2" != "venv" ]]; then exit 80; fi
@@ -113,7 +116,7 @@ chmod +x "$3/bin/python"
     fake_python.chmod(0o755)
     result = subprocess.run(["zsh", str(ROOT / "macapp/build.sh")], capture_output=True, text=True,
                             env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
-                                 "HOMESCREEN_BUILD_VENV": str(build_venv), "COMMAND_LOG": str(log)})
+                                 "HOMESCREEN_BUILD_VENV": str(build_venv), "HOMESCREEN_BUILD_ARCH": "arm64", "COMMAND_LOG": str(log)})
     assert result.returncode == 79, result.stdout + result.stderr
     install = log.read_text()
     assert "--require-hashes" in install

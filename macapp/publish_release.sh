@@ -7,7 +7,9 @@ assets_dir=${1:?Supply the release assets directory}
 notes_file=$(cd "$(dirname "${2:?Supply the release notes file}")" && pwd)/$(basename "$2")
 cd "$assets_dir"
 assets=("./ios-homescreen-organizer-${RELEASE_TAG#v}-macos-arm64.dmg"
-        "./ios-homescreen-organizer-${RELEASE_TAG#v}-macos-arm64.zip" "SHA256SUMS.txt")
+        "./ios-homescreen-organizer-${RELEASE_TAG#v}-macos-arm64.zip"
+        "./ios-homescreen-organizer-${RELEASE_TAG#v}-macos-x86_64.dmg"
+        "./ios-homescreen-organizer-${RELEASE_TAG#v}-macos-x86_64.zip" "SHA256SUMS.txt")
 for asset in "${assets[@]}"; do test -f "$asset"; done
 shasum -a 256 --check SHA256SUMS.txt
 

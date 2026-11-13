@@ -32,7 +32,7 @@ def test_tag_mismatch_stops_packaging(tag):
     assert "tag" in result.stderr.lower()
 
 
-def make_build(tmp_path, version=VERSION):
+def make_build(tmp_path, version=VERSION, arch="arm64"):
     build = tmp_path / "build with spaces"
     app = build / "iOS Home Screen Organizer.app"
     executable = app / "Contents/MacOS/iOSHomeScreenOrganizer"
@@ -43,19 +43,21 @@ def make_build(tmp_path, version=VERSION):
         "CFBundleShortVersionString": version.split("-")[0],
         "CFBundleVersion": version.split("-")[0],
         "IOSHomeScreenOrganizerReleaseVersion": version,
+        "IOSHomeScreenOrganizerArchitecture": arch,
     }))
     (build / f"ios-homescreen-organizer-{version}.dmg").write_bytes(b"fixture disk image\n")
     return build
 
 
-def test_release_archives_and_manifest(tmp_path):
-    build = make_build(tmp_path)
+@pytest.mark.parametrize("arch", ["arm64", "x86_64"])
+def test_release_archives_and_manifest(tmp_path, arch):
+    build = make_build(tmp_path, arch=arch)
     output = tmp_path / "release assets"
     result = release("package", "--build-dir", build, "--output-dir", output,
-                     "--tag", f"v{VERSION}")
+                     "--tag", f"v{VERSION}", "--arch", arch)
     assert result.returncode == 0, result.stderr
-    dmg = f"ios-homescreen-organizer-{VERSION}-macos-arm64.dmg"
-    archive = f"ios-homescreen-organizer-{VERSION}-macos-arm64.zip"
+    dmg = f"ios-homescreen-organizer-{VERSION}-macos-{arch}.dmg"
+    archive = f"ios-homescreen-organizer-{VERSION}-macos-{arch}.zip"
     assert sorted(p.name for p in output.iterdir()) == sorted([dmg, archive, "SHA256SUMS.txt"])
     assert (output / dmg).read_bytes() == b"fixture disk image\n"
     with zipfile.ZipFile(output / archive) as zipped:
@@ -73,7 +75,7 @@ def test_release_archives_and_manifest(tmp_path):
 def test_bundle_version_mismatch_stops_packaging(tmp_path):
     build = make_build(tmp_path, version="0.0.0")
     output = tmp_path / "release"
-    result = release("package", "--build-dir", build, "--output-dir", output)
+    result = release("package", "--build-dir", build, "--output-dir", output, "--arch", "arm64")
     assert result.returncode != 0
     assert "bundle version" in result.stderr.lower()
     assert not output.exists()
@@ -89,8 +91,63 @@ def test_prerelease_keeps_tag_version_with_numeric_bundle_version(tmp_path):
     (project / "pyproject.toml").write_text('[project]\nversion = "1.2.0-beta.1"\n')
     output = tmp_path / "prerelease"
     result = subprocess.run([sys.executable, str(script), "package", "--build-dir", str(build),
-                             "--output-dir", str(output), "--tag", "v1.2.0-beta.1"],
+                             "--output-dir", str(output), "--tag", "v1.2.0-beta.1", "--arch", "arm64"],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert (output / "ios-homescreen-organizer-1.2.0-beta.1-macos-arm64.dmg").read_bytes() == b"fixture disk image\n"
     assert (output / "ios-homescreen-organizer-1.2.0-beta.1-macos-arm64.zip").is_file()
+
+
+def test_architecture_label_matches_bundle(tmp_path):
+    build = make_build(tmp_path, arch="arm64")
+    result = release("package", "--build-dir", build, "--output-dir", tmp_path / "release",
+                     "--arch", "x86_64")
+    assert result.returncode != 0
+    assert "architecture" in result.stderr.lower()
+
+
+def artifact_set(tmp_path):
+    incoming = tmp_path / "incoming"
+    for arch in ("arm64", "x86_64"):
+        folder = incoming / f"ios-homescreen-organizer-macos-{arch}"
+        folder.mkdir(parents=True)
+        lines = []
+        for extension in ("dmg", "zip"):
+            name = f"ios-homescreen-organizer-{VERSION}-macos-{arch}.{extension}"
+            data = f"{arch} {extension}".encode()
+            (folder / name).write_bytes(data)
+            lines.append(f"{hashlib.sha256(data).hexdigest()}  {name}\n")
+        (folder / "SHA256SUMS.txt").write_text("".join(lines))
+    return incoming
+
+
+def test_collect_combines_verified_architectures(tmp_path):
+    incoming = artifact_set(tmp_path)
+    output = tmp_path / "release"
+    result = release("collect", "--input-dir", incoming, "--output-dir", output)
+    assert result.returncode == 0, result.stderr
+    assert len(list(output.iterdir())) == 5
+    lines = (output / "SHA256SUMS.txt").read_text().splitlines()
+    assert len(lines) == 4
+    for line in lines:
+        digest, name = line.split("  ")
+        assert hashlib.sha256((output / name).read_bytes()).hexdigest() == digest
+
+
+def test_collect_requires_both_architectures(tmp_path):
+    incoming = artifact_set(tmp_path)
+    (incoming / "ios-homescreen-organizer-macos-x86_64/SHA256SUMS.txt").unlink()
+    output = tmp_path / "release"
+    result = release("collect", "--input-dir", incoming, "--output-dir", output)
+    assert result.returncode != 0
+    assert not output.exists()
+
+
+def test_collect_checks_each_archive_before_copying(tmp_path):
+    incoming = artifact_set(tmp_path)
+    archive = next((incoming / "ios-homescreen-organizer-macos-x86_64").glob("*.zip"))
+    archive.write_bytes(b"changed archive")
+    output = tmp_path / "release"
+    result = release("collect", "--input-dir", incoming, "--output-dir", output)
+    assert result.returncode != 0
+    assert not output.exists()

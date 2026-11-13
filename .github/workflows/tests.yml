@@ -16,9 +16,20 @@ concurrency:
 
 jobs:
   test:
-    name: Layout, editor and macOS package
-    runs-on: macos-15
-    timeout-minutes: 35
+    name: Layout, editor and macOS package (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      BUILD_ARCH: ${{ matrix.arch }}
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -34,7 +45,7 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          test "$(uname -m)" = arm64
+          test "$(uname -m)" = "$BUILD_ARCH"
           if [ "$REF_TYPE" = tag ]; then
             VERSION=$(python macapp/release.py version --tag "$REF_NAME")
           else
@@ -43,37 +54,75 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Install locked development dependencies
         run: |
+          LOCK="$PWD/requirements-build.lock"
+          WHEEL_LINKS=()
+          if [ "$BUILD_ARCH" = x86_64 ]; then
+            bash macapp/prepare_intel.sh python "$PWD/build/dependencies/x86_64"
+            LOCK="$PWD/build/dependencies/x86_64/requirements-build.lock"
+            WHEEL_LINKS=(--find-links "$PWD/build/dependencies/x86_64/wheels")
+          fi
           python -m venv .venv
-          .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-build.lock
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: "${WHEEL_LINKS[@]}" -r "$LOCK"
           .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
           .venv/bin/python -m pip check
           .venv/bin/ios-homescreen-organizer --help
+          .venv/bin/python - <<'PYTHON'
+          from cryptography.hazmat.primitives import hashes
+          digest = hashes.Hash(hashes.SHA256())
+          digest.update(b"abc")
+          assert digest.finalize().hex() == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+          PYTHON
       - name: Validate layouts, draft edits, backups and editor routes
         run: .venv/bin/python -m pytest -q tests
       - name: Build and verify the Mac app
         env:
           HOMESCREEN_BUILD_PYTHON: python
+          HOMESCREEN_BUILD_ARCH: ${{ matrix.arch }}
         run: |
           macapp/build.sh
-          APP="$PWD/build/iOS Home Screen Organizer.app"
+          APP="$PWD/build/$BUILD_ARCH/iOS Home Screen Organizer.app"
           "$APP/Contents/Resources/engine/engine" --help
           test -f "$APP/Contents/Resources/engine/_internal/homescreen/web/index.html"
           test -f "$APP/Contents/Resources/engine/_internal/homescreen/simulator_icon.m"
           cmp LICENSE "$APP/Contents/Resources/LICENSE"
+          lipo "$APP/Contents/MacOS/iOSHomeScreenOrganizer" -verify_arch "$BUILD_ARCH"
+          lipo "$APP/Contents/Resources/engine/engine" -verify_arch "$BUILD_ARCH"
           codesign --verify --deep --strict "$APP"
-          hdiutil verify build/ios-homescreen-organizer-*.dmg
+          hdiutil verify build/"$BUILD_ARCH"/ios-homescreen-organizer-*.dmg
+      - name: Check packaged MCP initialization and tools
+        run: |
+          .venv/bin/python - <<'PYTHON'
+          import asyncio
+          import os
+          from pathlib import Path
+          from mcp import ClientSession
+          from mcp.client.stdio import StdioServerParameters, stdio_client
+          async def check():
+              engine = Path("build", os.environ["BUILD_ARCH"], "iOS Home Screen Organizer.app/Contents/Resources/engine/engine").resolve()
+              parameters = StdioServerParameters(command=str(engine), args=["mcp"], env={
+                  **os.environ, "HOMESCREEN_READ_ONLY": "1",
+                  "HOMESCREEN_DATA": str(Path(os.environ["RUNNER_TEMP"], "mcp-check")),
+              })
+              async with stdio_client(parameters) as (read, write):
+                  async with ClientSession(read, write) as session:
+                      info = await session.initialize()
+                      assert info.server_info.name == "ios-homescreen-mcp"
+                      tools = await session.list_tools()
+                      assert {"read_phone", "show_layout", "move", "diff"} <= {t.name for t in tools.tools}
+          asyncio.run(check())
+          PYTHON
       - name: Assemble release archives and checksums
         run: |
-          python macapp/release.py package
-          ditto -x -k build/release/ios-homescreen-organizer-*-macos-arm64.zip "$RUNNER_TEMP/ios-homescreen-organizer-archive"
+          python macapp/release.py package --arch "$BUILD_ARCH"
+          ditto -x -k build/release/"$BUILD_ARCH"/ios-homescreen-organizer-*-macos-"$BUILD_ARCH".zip "$RUNNER_TEMP/ios-homescreen-organizer-archive"
           codesign --verify --deep --strict "$RUNNER_TEMP/ios-homescreen-organizer-archive/iOS Home Screen Organizer.app"
-          cd build/release
+          cd build/release/"$BUILD_ARCH"
           shasum -a 256 --check SHA256SUMS.txt
       - name: Upload installable archives
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ios-homescreen-organizer-macos-arm64
-          path: build/release/*
+          name: ios-homescreen-organizer-macos-${{ matrix.arch }}
+          path: build/release/${{ matrix.arch }}/*
           if-no-files-found: error
           retention-days: 14
 
@@ -94,12 +143,15 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: ios-homescreen-organizer-macos-arm64
-          path: release
+          pattern: ios-homescreen-organizer-macos-*
+          path: artifacts
+          merge-multiple: false
       - name: Verify assets and publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: v${{ needs.test.outputs.version }}
           RELEASE_TARGET: ${{ github.sha }}
-        run: bash macapp/publish_release.sh "$PWD/release" "$PWD/macapp/RELEASE_NOTES.md"
+        run: |
+          python3 macapp/release.py collect --tag "$RELEASE_TAG" --input-dir "$PWD/artifacts" --output-dir "$PWD/release"
+          bash macapp/publish_release.sh "$PWD/release" "$PWD/macapp/RELEASE_NOTES.md"

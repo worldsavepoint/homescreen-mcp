@@ -9,7 +9,7 @@
 [![Build](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml/badge.svg)](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-14%2B-222222?logo=apple)](macapp/BUILDING.md)
-[![Source build](https://img.shields.io/badge/source_build-Python_3.12_%C2%B7_arm64-3776AB)](macapp/BUILDING.md)
+[![Source build](https://img.shields.io/badge/source_build-Python_3.12_%C2%B7_arm64_%26_x86__64-3776AB)](macapp/BUILDING.md)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -47,37 +47,61 @@ This fork maintains changes to device sessions, backups, the local editor and th
 - **Device and backup handling:** Apply and Restore refresh the device identity and layout, record backup provenance, and check the result. Run Read after an interrupted or mismatching operation. Restore selects backups with matching device provenance.
 - **Local editor and launcher:** authenticated editor sessions, backend health checks and launcher URL/request validation. See the [local editor API reference](docs/LOCAL-EDITOR.md).
 - **Legacy layouts and distribution:** iOS 16 placement guidance, simulator icon rendering, and automatic versioned DMG/ZIP releases with SHA256 checksums.
-- **Source builds:** pinned, hash-checked Python wheels for macOS arm64 / Python 3.12. See [build instructions](macapp/BUILDING.md).
+- **Source builds:** pinned, hash-checked dependencies for Python 3.12 on Apple silicon and Intel Macs. See [build instructions](macapp/BUILDING.md).
 
 <a id="install"></a>
 
 ## 📦 Install
 
-**Apple silicon Mac · macOS 14 or later · iOS 16 / 17 / 18 / 26 / 27**
+**Apple silicon or Intel Mac · macOS 14 or later · iOS 16 / 17 / 18 / 26 / 27**
 
 ### Download the Mac app
 
-Open [Releases](https://github.com/worldsavepoint/ios-homescreen-organizer/releases) and download `ios-homescreen-organizer-<version>-macos-arm64.dmg`. Open it and drag **iOS Home Screen Organizer** into **Applications**. A ZIP archive is also provided.
+Open [Releases](https://github.com/worldsavepoint/ios-homescreen-organizer/releases) and choose the download for your Mac. In **Apple menu → About This Mac**, check **Chip** or **Processor**:
+
+- **Apple silicon** (Apple M-series chip): download `ios-homescreen-organizer-<version>-macos-arm64.dmg`.
+- **Intel** processor: download `ios-homescreen-organizer-<version>-macos-x86_64.dmg`.
+
+Open the DMG and drag **iOS Home Screen Organizer** into **Applications**. Each architecture also has a ZIP archive. The downloads include the Python engine and dependencies; they require macOS 14 or later and the matching CPU architecture.
 
 The app uses **ad-hoc signing**. If macOS requests approval, open **System Settings → Privacy & Security → Open Anyway**, then launch iOS Home Screen Organizer again.
 
-To verify a download, place both release archives and `SHA256SUMS.txt` in the same directory and run:
+`SHA256SUMS.txt` contains the hashes for all four release archives. Save it in the same directory as your chosen DMG or ZIP, then verify the download:
 
 ```sh
-shasum -a 256 --check SHA256SUMS.txt
+shasum -a 256 --check --ignore-missing SHA256SUMS.txt
 ```
 
-PR builds are available under [Actions](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml) → the completed run → **ios-homescreen-organizer-macos-arm64**. After a merge into `main`, a successful build publishes each new project version to Releases automatically.
+PR builds are available under [Actions](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml) → the completed run → **ios-homescreen-organizer-macos-arm64** or **ios-homescreen-organizer-macos-x86_64**. After a merge into `main`, successful builds for both architectures publish each new project version to Releases automatically.
 
 ### Install from source
 
-Use an **Apple silicon Mac with macOS 14+ and Python 3.12**. Connect an iPhone or iPad over USB and trust the Mac on the device. The commands below use the dependency lock for **macOS arm64 / CPython 3.12**; other platforms need a separately resolved and tested lock.
+Use an **Apple silicon or Intel Mac with macOS 14+ and native Python 3.12**. Connect an iPhone or iPad over USB and trust the Mac on the device. Clone the repository and create a virtual environment:
 
 ```sh
 git clone https://github.com/worldsavepoint/ios-homescreen-organizer.git
 cd ios-homescreen-organizer
 python3.12 -m venv .venv
+```
+
+On **Apple silicon**, install the committed dependency lock:
+
+```sh
 .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-build.lock
+```
+
+On **Intel**, install the [source build prerequisites](macapp/BUILDING.md#intel-dependencies), then prepare and install the hashed Intel dependencies:
+
+```sh
+bash macapp/prepare_intel.sh python3.12 "$PWD/build/dependencies/x86_64"
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: \
+  --find-links "$PWD/build/dependencies/x86_64/wheels" \
+  -r "$PWD/build/dependencies/x86_64/requirements-build.lock"
+```
+
+On either architecture, install the project:
+
+```sh
 .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
 .venv/bin/python -m pip check
 ```
@@ -92,15 +116,15 @@ The command-line editor is `ios-homescreen-organizer`; the MCP server is `ios-ho
 
 ### Build the Mac app
 
-With Python 3.12 and compatible Xcode command-line tools installed, run from the repository root:
+With Python 3.12 and the [source build prerequisites](macapp/BUILDING.md) installed, run from the repository root on the target Mac:
 
 ```sh
 macapp/build.sh
 ```
 
-The script creates the app and a DMG in `build/`, using its own fresh Python environment and the same dependency lock. It applies **ad-hoc signing**. See [macOS build and signing details](macapp/BUILDING.md).
+The script selects the native host architecture (`arm64` or `x86_64`) and creates `build/<arch>/iOS Home Screen Organizer.app` and `build/<arch>/ios-homescreen-organizer-<version>.dmg`. It uses a fresh Python environment, prepares Intel dependencies when needed, and applies **ad-hoc signing**. See [macOS build and signing details](macapp/BUILDING.md).
 
-Create release archives with `python3.12 macapp/release.py package`. The output directory `build/release/` contains the DMG, ZIP and `SHA256SUMS.txt`. See [automatic release publishing](macapp/BUILDING.md#automatic-releases).
+Create release archives with `python3.12 macapp/release.py package --arch "$(uname -m)"`. The output directory `build/release/<arch>/` contains the architecture-specific DMG, ZIP and `SHA256SUMS.txt`. Published releases combine both architectures into one shared checksum manifest. See [automatic release publishing](macapp/BUILDING.md#automatic-releases).
 
 <a id="get-started"></a>
 
@@ -144,7 +168,8 @@ This prints the reported software version and aggregate layout counts.
 - **iOS 17, 18, 26 and 27:** app and folder organization, Dock, App Library, widget preservation and fixed-position layout editing.
 - **Simulator development:** icon metadata and asset-catalog rendering are supported across these version families. See [layout modes and compatibility checks](docs/COMPATIBILITY.md).
 - **iPad:** grid, dock and folder capacities come from the device. MCP/CLI operations and the editor use those capacities; widget pages retain the shape supplied by iPadOS.
-- **Python:** package metadata permits Python 3.11+, while this fork's supplied build lock targets Python 3.12 on macOS arm64. Intel Macs require a separately resolved and tested lock.
+- **macOS:** native Apple silicon (`arm64`) and Intel (`x86_64`) apps for macOS 14 or later.
+- **Python:** package metadata permits Python 3.11+; the documented source and release builds use Python 3.12 with architecture-specific, hash-checked dependencies.
 
 iOS Home Screen Organizer infers App Library contents from installed apps and layout reads. Keep an archived device backup and recreate your desired gaps in the editor before applying a layout.
 

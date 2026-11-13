@@ -10,7 +10,7 @@
 [![Build](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml/badge.svg)](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml)
 [![MIT 许可证](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-14%2B-222222?logo=apple)](macapp/BUILDING.md)
-[![源码构建](https://img.shields.io/badge/source_build-Python_3.12_%C2%B7_arm64-3776AB)](macapp/BUILDING.md)
+[![源码构建](https://img.shields.io/badge/source_build-Python_3.12_%C2%B7_arm64_%26_x86__64-3776AB)](macapp/BUILDING.md)
 
 [English](README.md) · **简体中文**
 
@@ -48,37 +48,61 @@
 - **设备与备份处理：** Apply 和 Restore 会刷新设备身份与布局、记录备份来源，并核对操作结果。操作中断或结果不符后，重新执行 Read。Restore 选择设备来源信息匹配的备份。
 - **本地编辑器与启动器：** 编辑器会话认证、后端健康检查，以及启动器 URL/请求校验。见[本地编辑器 API 参考](docs/LOCAL-EDITOR.md)。
 - **旧版布局与分发：** iOS 16 位置调整提示、模拟器图标渲染，以及合并到 main 后自动触发的 DMG/ZIP 版本发布和 SHA256 校验文件。
-- **源码构建：** 为 macOS arm64 / Python 3.12 固定 Python wheel 版本并校验哈希。见[构建说明](macapp/BUILDING.md)。
+- **源码构建：** 为 Apple 芯片和 Intel Mac 上的 Python 3.12 固定依赖版本并校验哈希。见[构建说明](macapp/BUILDING.md)。
 
 <a id="install"></a>
 
 ## 📦 安装
 
-**Apple 芯片 Mac · macOS 14 及以上 · iOS 16 / 17 / 18 / 26 / 27**
+**Apple 芯片或 Intel Mac · macOS 14 及以上 · iOS 16 / 17 / 18 / 26 / 27**
 
 ### 下载 Mac App
 
-打开 [Releases](https://github.com/worldsavepoint/ios-homescreen-organizer/releases)，下载 `ios-homescreen-organizer-<version>-macos-arm64.dmg`，打开后将 **iOS Home Screen Organizer** 拖入 **Applications（应用程序）**。发行版同时提供 ZIP 压缩包。
+打开 [Releases](https://github.com/worldsavepoint/ios-homescreen-organizer/releases)，根据 Mac 的处理器选择下载。在 **Apple 菜单 → 关于本机**中查看**芯片**或**处理器**：
+
+- **Apple 芯片**（Apple M 系列）：下载 `ios-homescreen-organizer-<version>-macos-arm64.dmg`。
+- **Intel 处理器**：下载 `ios-homescreen-organizer-<version>-macos-x86_64.dmg`。
+
+打开 DMG，将 **iOS Home Screen Organizer（iOS 桌面整理）**拖入 **Applications（应用程序）**。两种架构均提供 ZIP 压缩包。发行包内置 Python 引擎和依赖，需要 macOS 14 及以上，并与 Mac 的 CPU 架构匹配。
 
 应用使用 **ad-hoc 签名**。macOS 提示确认时，前往**系统设置 → 隐私与安全性 → 仍要打开**，再启动 iOS Home Screen Organizer。
 
-校验下载文件时，将两种发行包与 `SHA256SUMS.txt` 放在同一目录，运行：
+`SHA256SUMS.txt` 包含全部四个发行文件的哈希。将它与所选的 DMG 或 ZIP 放在同一目录，再校验下载文件：
 
 ```sh
-shasum -a 256 --check SHA256SUMS.txt
+shasum -a 256 --check --ignore-missing SHA256SUMS.txt
 ```
 
-PR 构建产物位于 [Actions](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml) → 已完成的运行 → **ios-homescreen-organizer-macos-arm64**。合并到 `main` 并构建成功后，会按新的项目版本号自动发布到 Releases。
+PR 构建产物位于 [Actions](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml) → 已完成的运行 → **ios-homescreen-organizer-macos-arm64** 或 **ios-homescreen-organizer-macos-x86_64**。合并到 `main` 且两种架构均构建成功后，会按新的项目版本号自动发布到 Releases。
 
 ### 从源码安装
 
-需要 **Apple 芯片 Mac、macOS 14+ 和 Python 3.12**。通过 USB 连接 iPhone 或 iPad，并在设备上信任这台 Mac。以下命令使用适用于 **macOS arm64 / CPython 3.12** 的依赖锁；其他平台需要单独解析并验证依赖锁。
+需要 **Apple 芯片或 Intel Mac、macOS 14+ 和对应架构的原生 Python 3.12**。通过 USB 连接 iPhone 或 iPad，并在设备上信任这台 Mac。先克隆仓库并创建虚拟环境：
 
 ```sh
 git clone https://github.com/worldsavepoint/ios-homescreen-organizer.git
 cd ios-homescreen-organizer
 python3.12 -m venv .venv
+```
+
+**Apple 芯片 Mac** 使用仓库内的依赖锁：
+
+```sh
 .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-build.lock
+```
+
+**Intel Mac** 先安装[源码构建工具](macapp/BUILDING.md#intel-dependencies)，再准备并安装带哈希校验的 Intel 依赖：
+
+```sh
+bash macapp/prepare_intel.sh python3.12 "$PWD/build/dependencies/x86_64"
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: \
+  --find-links "$PWD/build/dependencies/x86_64/wheels" \
+  -r "$PWD/build/dependencies/x86_64/requirements-build.lock"
+```
+
+两种架构随后均执行：
+
+```sh
 .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
 .venv/bin/python -m pip check
 ```
@@ -93,15 +117,15 @@ HOMESCREEN_READ_ONLY=1 .venv/bin/ios-homescreen-organizer ui
 
 ### 构建 Mac App
 
-安装 Python 3.12 与兼容的 Xcode 命令行工具后，在仓库根目录执行：
+安装 Python 3.12 与[源码构建工具](macapp/BUILDING.md)后，在目标 Mac 的仓库根目录执行：
 
 ```sh
 macapp/build.sh
 ```
 
-脚本使用全新的 Python 环境和同一依赖锁，在 `build/` 中生成 App 和 DMG，并应用 **ad-hoc 签名**。详见 [macOS 构建与签名说明](macapp/BUILDING.md)。
+脚本自动选择主机的原生架构（`arm64` 或 `x86_64`），生成 `build/<arch>/iOS Home Screen Organizer.app` 和 `build/<arch>/ios-homescreen-organizer-<version>.dmg`。构建使用全新的 Python 环境，按需准备 Intel 依赖，并应用 **ad-hoc 签名**。详见 [macOS 构建与签名说明](macapp/BUILDING.md)。
 
-执行 `python3.12 macapp/release.py package` 可生成发行文件。`build/release/` 中包含 DMG、ZIP 与 `SHA256SUMS.txt`。发布步骤见[自动发布说明](macapp/BUILDING.md#automatic-releases)。
+执行 `python3.12 macapp/release.py package --arch "$(uname -m)"` 可生成发行文件。`build/release/<arch>/` 中包含对应架构的 DMG、ZIP 与 `SHA256SUMS.txt`。正式发布时，两种架构合并使用一份校验清单。发布步骤见[自动发布说明](macapp/BUILDING.md#automatic-releases)。
 
 <a id="get-started"></a>
 
@@ -145,7 +169,8 @@ HOMESCREEN_READ_ONLY=1 .venv/bin/ios-homescreen-organizer diagnose
 - **iOS 17、18、26、27：** 支持 App 与文件夹整理、程序坞、App 资源库、小组件保留和固定位置布局编辑。
 - **模拟器开发：** 覆盖这些版本系列的图标元数据读取与资源目录图标渲染。见[布局模式与兼容性检查](docs/COMPATIBILITY.md)。
 - **iPad：** MCP/CLI 与编辑器采用设备提供的网格、程序坞和文件夹容量，小组件页面保留 iPadOS 提供的结构。
-- **Python：** 包元数据支持 Python 3.11+，本 fork 提供的构建依赖锁针对 macOS arm64 / Python 3.12。Intel Mac 需要单独解析并验证依赖锁。
+- **macOS：** 提供适用于 macOS 14 及以上的 Apple 芯片（`arm64`）和 Intel（`x86_64`）原生 App。
+- **Python：** 包元数据支持 Python 3.11+；文档中的源码与发行构建使用 Python 3.12，以及对应架构的哈希校验依赖。
 
 iOS Home Screen Organizer 根据已安装应用和布局读取结果推算 App 资源库。应用布局前，保留一份归档的设备备份，并在编辑器中重新建立需要的空位。
 
