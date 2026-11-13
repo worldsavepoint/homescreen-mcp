@@ -1,5 +1,7 @@
 # Building Home Screen Organizer
 
+[README](../README.md) · [中文 README](../README.zh-CN.md) · [MCP client setup](../docs/MCP.md) · [Protocol and data sources](../docs/HOW-IT-WORKS.md)
+
 Build native apps for **Apple silicon (`arm64`)** and **Intel (`x86_64`)** on
 **macOS 14 or later**, using **CPython 3.12** and Xcode command line tools. Run
 commands from the repository root on a Mac matching the target architecture.
@@ -9,11 +11,14 @@ The distributed DMG and ZIP include the engine and dependencies. Choose the
 archive matching the Mac's CPU; the source build tools below prepare development
 and release builds.
 
-## Development dependencies
+## Source installation
 
-Create a Python environment:
+Clone the repository and create a Python environment. The checkout directory keeps
+the repository name:
 
 ```sh
+git clone https://github.com/worldsavepoint/ios-homescreen-organizer.git
+cd ios-homescreen-organizer
 python3.12 -m venv .venv
 ```
 
@@ -38,6 +43,30 @@ Install the project and run development checks on either architecture:
 .venv/bin/python -m pip check
 .venv/bin/python -m pytest -q tests
 ```
+
+### Run from source
+
+Start the browser editor with device writes disabled:
+
+```sh
+HOMESCREEN_READ_ONLY=1 .venv/bin/home-screen-organizer ui
+```
+
+Run `.venv/bin/home-screen-organizer --help` for `read`, `show`, `diff`, `preview`,
+`apply`, `backups`, `restore`, `diagnose`, `probe` and `ui`. For a normal app/CLI
+session, omit `HOMESCREEN_READ_ONLY=1`; review the draft before writing. Prepare
+[hidden pages and gaps](../docs/HOW-IT-WORKS.md#layout-writes) before Apply.
+
+The primary executables are `home-screen-organizer` and `home-screen-mcp`.
+`ios-homescreen-organizer`, `ios-homescreen-mcp`, `homescreen` and `homescreen-mcp`
+remain available. The package’s Python module stays `homescreen`; the MCP server
+ID and data directory stay `ios-homescreen-mcp` and `homescreen-mcp` respectively.
+For client settings, see the [English](../docs/MCP.md) or
+[Chinese MCP guide](../docs/MCP.zh-CN.md). For fixtures and simulator development,
+see [development sources](../docs/HOW-IT-WORKS.md#development-sources).
+
+Package metadata permits Python 3.11+, while the documented source and release
+builds use Python 3.12 with architecture-specific, hash-checked dependencies.
 
 ## Intel dependencies
 
@@ -167,6 +196,9 @@ creates one shared `SHA256SUMS.txt` for the published release. The assembly job
 then adds the standalone MCPB and Registry metadata to that manifest.
 
 ## Standalone MCP bundle
+
+For end-user installation and per-client stdio configuration, see the
+[MCP setup guide](../docs/MCP.md#standalone-mcpb).
 
 The standalone `home-screen-organizer-<version>-macos.mcpb` contains both native
 engines, their bundled dependencies, the MIT license and per-architecture license

@@ -1,5 +1,7 @@
 # Compatibility checks
 
+[README](../README.md) · [中文 README](../README.zh-CN.md) · [Layout writes and research](HOW-IT-WORKS.md#layout-writes) · [MCP setup](MCP.md)
+
 ## Supported iOS layout modes
 
 - **iOS 16:** sequential app placement, folders, Dock and App Library organization.
@@ -11,6 +13,8 @@
 
 The simulator adapter supports application-bundle icon metadata and standalone
 UIKit rendering of asset-catalog and dynamic icons across these version families.
+
+Before Apply, [unhide Home Screen pages and recreate desired gaps](HOW-IT-WORKS.md#layout-writes).
 
 ## Local checks
 
