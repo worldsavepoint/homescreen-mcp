@@ -23,19 +23,19 @@ def project_version(tag=None):
 
 
 def package(build_dir, output_dir, version, arch):
-    app = build_dir / "iOS Home Screen Organizer.app"
+    app = build_dir / "Home Screen Organizer.app"
     bundle = plistlib.loads((app / "Contents/Info.plist").read_bytes())
-    if (bundle.get("IOSHomeScreenOrganizerReleaseVersion", bundle["CFBundleShortVersionString"]) != version
+    if (bundle.get("HomeScreenOrganizerReleaseVersion", bundle["CFBundleShortVersionString"]) != version
             or bundle["CFBundleShortVersionString"] != version.split("-")[0]):
         raise ValueError("Build the app with the current project version; bundle version differs")
-    if bundle.get("IOSHomeScreenOrganizerArchitecture") != arch:
+    if bundle.get("HomeScreenOrganizerArchitecture") != arch:
         raise ValueError("Build the app for the selected architecture")
-    dmg = build_dir / f"ios-homescreen-organizer-{version}.dmg"
+    dmg = build_dir / f"home-screen-organizer-{version}.dmg"
     if not dmg.is_file():
         raise ValueError(f"Build the disk image first: {dmg.name}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    disk_image = output_dir / f"ios-homescreen-organizer-{version}-macos-{arch}.dmg"
-    archive = output_dir / f"ios-homescreen-organizer-{version}-macos-{arch}.zip"
+    disk_image = output_dir / f"home-screen-organizer-{version}-macos-{arch}.dmg"
+    archive = output_dir / f"home-screen-organizer-{version}-macos-{arch}.zip"
     shutil.copyfile(dmg, disk_image)
     subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
                     str(app), str(archive)], check=True)
@@ -50,8 +50,8 @@ def package(build_dir, output_dir, version, arch):
 def collect(input_dir, output_dir, version):
     verified = []
     for arch in ARCHITECTURES:
-        folder = input_dir / f"ios-homescreen-organizer-macos-{arch}"
-        expected = {f"ios-homescreen-organizer-{version}-macos-{arch}.{extension}"
+        folder = input_dir / f"home-screen-organizer-macos-{arch}"
+        expected = {f"home-screen-organizer-{version}-macos-{arch}.{extension}"
                     for extension in ("dmg", "zip")}
         seen = set()
         for line in (folder / "SHA256SUMS.txt").read_text().splitlines():

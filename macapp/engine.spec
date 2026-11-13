@@ -1,4 +1,4 @@
-# PyInstaller spec for the engine inside iOS Home Screen Organizer.app (onedir, so it starts fast).
+# PyInstaller spec for the engine inside Home Screen Organizer.app (onedir, so it starts fast).
 import os
 import platform
 

@@ -16,7 +16,7 @@ def publish(tmp_path, state="", tag_target="", corrupt=False, tag="v1.1.1", api_
     assets = tmp_path / "release"
     assets.mkdir()
     version = tag.removeprefix("v")
-    names = [f"ios-homescreen-organizer-{version}-macos-{arch}.{extension}"
+    names = [f"home-screen-organizer-{version}-macos-{arch}.{extension}"
              for arch in ("arm64", "x86_64") for extension in ("dmg", "zip")]
     if omit_intel:
         names = [name for name in names if "x86_64" not in name]
@@ -65,10 +65,10 @@ def test_new_release_targets_built_commit(tmp_path):
     creation = next(args for args in calls if args[:2] == ["release", "create"])
     assert creation[2] == "v1.1.1"
     assert creation[creation.index("--target") + 1] == TARGET
-    assert creation[-5:] == ["./ios-homescreen-organizer-1.1.1-macos-arm64.dmg",
-                            "./ios-homescreen-organizer-1.1.1-macos-arm64.zip",
-                            "./ios-homescreen-organizer-1.1.1-macos-x86_64.dmg",
-                            "./ios-homescreen-organizer-1.1.1-macos-x86_64.zip", "SHA256SUMS.txt"]
+    assert creation[-5:] == ["./home-screen-organizer-1.1.1-macos-arm64.dmg",
+                            "./home-screen-organizer-1.1.1-macos-arm64.zip",
+                            "./home-screen-organizer-1.1.1-macos-x86_64.dmg",
+                            "./home-screen-organizer-1.1.1-macos-x86_64.zip", "SHA256SUMS.txt"]
 
 
 def test_published_version_is_retained(tmp_path):

@@ -1,4 +1,4 @@
-// iOS Home Screen Organizer app. Every change goes through /api/op on the server, which edits the draft as
+// Home Screen Organizer app. Every change goes through /api/op on the server, which edits the draft as
 // one undoable step and returns the new view; nothing reaches the phone until Apply.
 "use strict";
 
@@ -11,7 +11,7 @@ const authentication = (async () => {
   const response = await fetch("/v1/authenticate", {
     method: "POST", headers: { "X-Token": token }, credentials: "same-origin",
   });
-  if (!response.ok) throw new Error("Could not authenticate. Reopen iOS Home Screen Organizer from its launcher.");
+  if (!response.ok) throw new Error("Could not authenticate. Reopen Home Screen Organizer from its launcher.");
 })();
 
 const $ = (s) => document.querySelector(s);
@@ -718,7 +718,7 @@ function showResult(r) {
 }
 
 // iOS keeps web clips that are off the Home Screen but never reports them over USB; when a
-// write frees a spot, it puts one there. iOS Home Screen Organizer remembers them from now on.
+// write frees a spot, it puts one there. Home Screen Organizer remembers them from now on.
 async function showHiddenClips(r, ids) {
   const body = el("div");
   body.appendChild(el("p", null, `Everything else landed as planned. The ${D()} also had ${ids.length === 1 ? "a web clip" : `${ids.length} web clips`} `
@@ -726,7 +726,7 @@ async function showHiddenClips(r, ids) {
   const ul = el("ul", "moves");
   for (const n of r.hidden_webclips) ul.appendChild(el("li", null, n));
   body.appendChild(ul);
-  body.appendChild(el("p", null, "iOS Home Screen Organizer knows about them now. Send them back to the App Library, or leave them on the Home Screen and arrange them like any app."));
+  body.appendChild(el("p", null, "Home Screen Organizer knows about them now. Send them back to the App Library, or leave them on the Home Screen and arrange them like any app."));
   const act = await modal({ title: "Hidden web clips showed up", body, actions: [
     { label: "Keep them here", value: () => "keep" },
     { label: "Send to App Library", primary: true, value: () => "library" },
@@ -815,7 +815,7 @@ $("#help").onclick = () => {
   for (const [k, v] of tips) { const li = el("li"); li.append(el("b", null, k), el("span", "to", v)); ul.appendChild(li); }
   body.appendChild(ul);
   body.appendChild(el("p", null, "Nothing changes on the device until you apply. Apps in the App Library stay there."));
-  modal({ title: "How iOS Home Screen Organizer works", body, actions: [{ label: "Got it", primary: true, value: () => null }] });
+  modal({ title: "How Home Screen Organizer works", body, actions: [{ label: "Got it", primary: true, value: () => null }] });
 };
 $("#read-empty").onclick = readDevice;
 $("#undo").onclick = () => op("undo");

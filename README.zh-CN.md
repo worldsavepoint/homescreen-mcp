@@ -1,7 +1,7 @@
 <div align="center">
 
-<h1>iOS 桌面整理</h1>
-<p>iOS Home Screen Organizer</p>
+<h1>主屏幕整理</h1>
+<p>Home Screen Organizer</p>
 <p><strong>在 Mac 上整理 iPhone 或 iPad 的主屏幕，支持拖拽编辑与 MCP 助手操作。</strong></p>
 
 **原作：Jonathan Kats · 本仓库为 [kats1123/homescreen-mcp](https://github.com/kats1123/homescreen-mcp) 的独立维护 fork。**
@@ -18,13 +18,13 @@
 
 </div>
 
-拖动真实 App 图标，整理文件夹和小组件，按颜色或使用情况排序，预览布局后通过 USB 应用到设备。iOS Home Screen Organizer 提供 Mac App、浏览器编辑器、CLI，以及供 AI 助手使用的可选 MCP 服务。免费开源，无需账户或越狱。
+拖动真实 App 图标，整理文件夹和小组件，按颜色或使用情况排序，预览布局后通过 USB 应用到设备。Home Screen Organizer 提供 Mac App、浏览器编辑器、CLI，以及供 AI 助手使用的可选 MCP 服务。免费开源，无需账户或越狱。
 
 本 fork 维护设备会话、备份、本地编辑器和 macOS 启动器的改进。原始应用、界面与 SpringBoard 研究由 **Jonathan Kats 及上游贡献者**完成。本 fork 独立维护。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/app-dark.png">
-  <img alt="iOS Home Screen Organizer 编辑器：真实 App 图标、小组件、App 资源库和应用使用情况" src="docs/app-light.png">
+  <img alt="Home Screen Organizer 编辑器：真实 App 图标、小组件、App 资源库和应用使用情况" src="docs/app-light.png">
 </picture>
 
 <p align="center"><sub>界面截图来自 Jonathan Kats 的上游 Homescreen 项目。</sub></p>
@@ -60,12 +60,12 @@
 
 打开 [Releases](https://github.com/worldsavepoint/ios-homescreen-organizer/releases)，根据 Mac 的处理器选择下载。在 **Apple 菜单 → 关于本机**中查看**芯片**或**处理器**：
 
-- **Apple 芯片**（Apple M 系列）：下载 `ios-homescreen-organizer-<version>-macos-arm64.dmg`。
-- **Intel 处理器**：下载 `ios-homescreen-organizer-<version>-macos-x86_64.dmg`。
+- **Apple 芯片**（Apple M 系列）：下载 `home-screen-organizer-<version>-macos-arm64.dmg`。
+- **Intel 处理器**：下载 `home-screen-organizer-<version>-macos-x86_64.dmg`。
 
-打开 DMG，将 **iOS Home Screen Organizer（iOS 桌面整理）**拖入 **Applications（应用程序）**。两种架构均提供 ZIP 压缩包。发行包内置 Python 引擎和依赖，需要 macOS 14 及以上，并与 Mac 的 CPU 架构匹配。
+打开 DMG，将 **Home Screen Organizer（主屏幕整理）**拖入 **Applications（应用程序）**。两种架构均提供 ZIP 压缩包。发行包内置 Python 引擎和依赖，需要 macOS 14 及以上，并与 Mac 的 CPU 架构匹配。
 
-应用使用 **ad-hoc 签名**。macOS 提示确认时，前往**系统设置 → 隐私与安全性 → 仍要打开**，再启动 iOS Home Screen Organizer。
+应用使用 **ad-hoc 签名**。macOS 提示确认时，前往**系统设置 → 隐私与安全性 → 仍要打开**，再启动 Home Screen Organizer。
 
 `SHA256SUMS.txt` 包含全部四个发行文件的哈希。将它与所选的 DMG 或 ZIP 放在同一目录，再校验下载文件：
 
@@ -73,7 +73,7 @@
 shasum -a 256 --check --ignore-missing SHA256SUMS.txt
 ```
 
-PR 构建产物位于 [Actions](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml) → 已完成的运行 → **ios-homescreen-organizer-macos-arm64** 或 **ios-homescreen-organizer-macos-x86_64**。合并到 `main` 且两种架构均构建成功后，会按新的项目版本号自动发布到 Releases。
+PR 构建产物位于 [Actions](https://github.com/worldsavepoint/ios-homescreen-organizer/actions/workflows/tests.yml) → 已完成的运行 → **home-screen-organizer-macos-arm64** 或 **home-screen-organizer-macos-x86_64**。合并到 `main` 且两种架构均构建成功后，会按新的项目版本号自动发布到 Releases。
 
 ### 从源码安装
 
@@ -110,10 +110,10 @@ bash macapp/prepare_intel.sh python3.12 "$PWD/build/dependencies/x86_64"
 以只读模式启动浏览器编辑器：
 
 ```sh
-HOMESCREEN_READ_ONLY=1 .venv/bin/ios-homescreen-organizer ui
+HOMESCREEN_READ_ONLY=1 .venv/bin/home-screen-organizer ui
 ```
 
-命令行编辑器使用 `ios-homescreen-organizer`，MCP 服务使用 `ios-homescreen-mcp`，同时提供 `homescreen` 与 `homescreen-mcp` 兼容入口。
+命令行编辑器使用 `home-screen-organizer`，MCP 服务使用 `home-screen-mcp`，同时保留 `ios-homescreen-organizer`、`ios-homescreen-mcp`、`homescreen` 与 `homescreen-mcp` 兼容入口。
 
 ### 构建 Mac App
 
@@ -123,7 +123,7 @@ HOMESCREEN_READ_ONLY=1 .venv/bin/ios-homescreen-organizer ui
 macapp/build.sh
 ```
 
-脚本自动选择主机的原生架构（`arm64` 或 `x86_64`），生成 `build/<arch>/iOS Home Screen Organizer.app` 和 `build/<arch>/ios-homescreen-organizer-<version>.dmg`。构建使用全新的 Python 环境，按需准备 Intel 依赖，并应用 **ad-hoc 签名**。详见 [macOS 构建与签名说明](macapp/BUILDING.md)。
+脚本自动选择主机的原生架构（`arm64` 或 `x86_64`），生成 `build/<arch>/Home Screen Organizer.app` 和 `build/<arch>/home-screen-organizer-<version>.dmg`。构建使用全新的 Python 环境，按需准备 Intel 依赖，并应用 **ad-hoc 签名**。详见 [macOS 构建与签名说明](macapp/BUILDING.md)。
 
 执行 `python3.12 macapp/release.py package --arch "$(uname -m)"` 可生成发行文件。`build/release/<arch>/` 中包含对应架构的 DMG、ZIP 与 `SHA256SUMS.txt`。正式发布时，两种架构合并使用一份校验清单。发布步骤见[自动发布说明](macapp/BUILDING.md#automatic-releases)。
 
@@ -136,18 +136,18 @@ macapp/build.sh
 3. 拖动项目、使用排序操作，或将项目暂放在 **App Bank**。应用前，改动保留在本地草稿中。
 4. 查看布局差异。只读会话中可以继续浏览和编辑草稿，Apply 与 Restore 均禁用。
 
-需要正常会话时，不设置 `HOMESCREEN_READ_ONLY=1`，直接运行 `.venv/bin/ios-homescreen-organizer ui`，或打开已构建的 Mac App。**Review & Apply** 会先保存备份，再将确认后的草稿写入设备。设备验证情况见[兼容性](#compatibility)。
+需要正常会话时，不设置 `HOMESCREEN_READ_ONLY=1`，直接运行 `.venv/bin/home-screen-organizer ui`，或打开已构建的 Mac App。**Review & Apply** 会先保存备份，再将确认后的草稿写入设备。设备验证情况见[兼容性](#compatibility)。
 
-应用布局前，请先在设备上**取消隐藏主屏幕页面**：长按主屏幕，点击页面圆点。在 iOS Home Screen Organizer 中重新建立需要的空位。见 [USB 布局细节](#usb-details)。
+应用布局前，请先在设备上**取消隐藏主屏幕页面**：长按主屏幕，点击页面圆点。在 Home Screen Organizer 中重新建立需要的空位。见 [USB 布局细节](#usb-details)。
 
 ### 按应用使用情况排序
 
 - **设备报告：** iOS 定期生成的内存报告可用于估算应用使用情况。估算会调低频繁或持续驻留内存的 App 权重。
-- **屏幕使用时间：** 在设备与 Mac 上开启*设置 → 屏幕使用时间 → 在设备之间共享*。读取同步历史需要在*系统设置 → 隐私与安全性*中，为 iOS Home Screen Organizer 或运行它的终端授予**完全磁盘访问权限**。
+- **屏幕使用时间：** 在设备与 Mac 上开启*设置 → 屏幕使用时间 → 在设备之间共享*。读取同步历史需要在*系统设置 → 隐私与安全性*中，为 Home Screen Organizer 或运行它的终端授予**完全磁盘访问权限**。
 
 ### CLI
 
-安装后，使用 `.venv/bin/ios-homescreen-organizer --help` 查看命令：
+安装后，使用 `.venv/bin/home-screen-organizer --help` 查看命令：
 
 ```text
 read · show · diff · preview · apply · backups · restore · diagnose · probe · ui
@@ -156,7 +156,7 @@ read · show · diff · preview · apply · backups · restore · diagnose · pr
 对一台已信任的 USB 设备生成读取兼容性报告：
 
 ```sh
-HOMESCREEN_READ_ONLY=1 .venv/bin/ios-homescreen-organizer diagnose
+HOMESCREEN_READ_ONLY=1 .venv/bin/home-screen-organizer diagnose
 ```
 
 该命令输出系统报告的软件版本与布局汇总数量。
@@ -172,16 +172,16 @@ HOMESCREEN_READ_ONLY=1 .venv/bin/ios-homescreen-organizer diagnose
 - **macOS：** 提供适用于 macOS 14 及以上的 Apple 芯片（`arm64`）和 Intel（`x86_64`）原生 App。
 - **Python：** 包元数据支持 Python 3.11+；文档中的源码与发行构建使用 Python 3.12，以及对应架构的哈希校验依赖。
 
-iOS Home Screen Organizer 根据已安装应用和布局读取结果推算 App 资源库。应用布局前，保留一份归档的设备备份，并在编辑器中重新建立需要的空位。
+Home Screen Organizer 根据已安装应用和布局读取结果推算 App 资源库。应用布局前，保留一份归档的设备备份，并在编辑器中重新建立需要的空位。
 
 <a id="mcp"></a>
 
 ## 🔌 可选：使用 AI 助手
 
-MCP 可让助手查看、整理、排序并解释布局。Mac App 配合 Claude Code 时，选择 **Device → Copy MCP Setup Command**，命令指向 App 内置引擎：
+MCP 可让助手查看、整理、排序并解释布局。在 Mac App 中选择 **Device → MCP**，可复制启动命令、Cursor / Claude JSON、Codex TOML 或 VS Code JSON。各格式均指向 App 内置引擎，并设置 `HOMESCREEN_READ_ONLY=1`：
 
 ```sh
-claude mcp add ios-homescreen-mcp -- "/Applications/iOS Home Screen Organizer.app/Contents/Resources/engine/engine" mcp
+HOMESCREEN_READ_ONLY=1 '/Applications/Home Screen Organizer.app/Contents/Resources/engine/engine' mcp
 ```
 
 使用 Python 安装时，在仓库根目录运行以下命令，使用虚拟环境中的可执行文件：
@@ -203,7 +203,7 @@ claude mcp add ios-homescreen-mcp -- "$PWD/.venv/bin/ios-homescreen-mcp"
 }
 ```
 
-可以尝试：“按颜色整理我的 App”或“把最常用的 App 放到第一页”。助手修改的是草稿。正常会话中，可通过编辑器或 `ios-homescreen-organizer apply <token>` 应用草稿。让助手直接发起写入需要设置 `HOMESCREEN_ALLOW_APPLY=1`；设置 `HOMESCREEN_READ_ONLY=1` 时，Apply 与 Restore 始终禁用。
+可以尝试：“按颜色整理我的 App”或“把最常用的 App 放到第一页”。助手修改的是草稿。正常会话中，可通过编辑器或 `home-screen-organizer apply <token>` 应用草稿。让助手直接发起写入需要设置 `HOMESCREEN_ALLOW_APPLY=1`；设置 `HOMESCREEN_READ_ONLY=1` 时，Apply 与 Restore 始终禁用。
 
 <a id="usb-details"></a>
 
@@ -222,11 +222,11 @@ Jonathan Kats 的上游研究描述了 SpringBoard 图标状态的导入路径�
 2. `setIconState` 进入 `-[SBIconController importIconState:]`；`+[SBIconStateArchiver rootArchiveFromITunesRepresentation:]` 将列表转换为 `buttonBar` 和 `iconLists`。
 3. 列表未提及的 App 可能被放到主屏幕页面。字典导入格式使用 `ignored` 保留 App 资源库中的项目位置。
 
-iOS Home Screen Organizer 因此使用 SpringBoard 的字典形式：`buttonBar`、`iconLists`，以及存放资源库项目的 `ignored`。后者通过已安装应用（含已卸载但保留数据的 App）减去主屏幕应用、隐藏与仅供系统使用的应用推算。移动项目时保留 App、文件夹数据及未知字段。
+Home Screen Organizer 因此使用 SpringBoard 的字典形式：`buttonBar`、`iconLists`，以及存放资源库项目的 `ignored`。后者通过已安装应用（含已卸载但保留数据的 App）减去主屏幕应用、隐藏与仅供系统使用的应用推算。移动项目时保留 App、文件夹数据及未知字段。
 
-**小组件：** 配置关联到元素 ID，USB 以 `userSelectedElementIdentifier` 导出。iOS Home Screen Organizer 将其作为 `uniqueIdentifier` 写回，并跨读取记住 ID。回读核对导出的小组件设置和元素标识。
+**小组件：** 配置关联到元素 ID，USB 以 `userSelectedElementIdentifier` 导出。Home Screen Organizer 将其作为 `uniqueIdentifier` 写回，并跨读取记住 ID。回读核对导出的小组件设置和元素标识。
 
-**网页快捷方式：** iOS Home Screen Organizer 按设备记住从布局中读取的快捷方式，并将主屏幕外的快捷方式放入 `ignored`。若写入后出现新的快捷方式，结果会在 `hidden_webclips` 中列出。将其移回 App 资源库后，再次应用布局。
+**网页快捷方式：** Home Screen Organizer 按设备记住从布局中读取的快捷方式，并将主屏幕外的快捷方式放入 `ignored`。若写入后出现新的快捷方式，结果会在 `hidden_webclips` 中列出。将其移回 App 资源库后，再次应用布局。
 
 上游实现会在需要保留设备现值时省略 Today View 和页面 ID 键。模拟器研究工具位于 [`tools/sbhelper/`](tools/sbhelper/README.md)，原始研究见[上游项目](https://github.com/kats1123/homescreen-mcp)。
 
@@ -237,7 +237,7 @@ iOS Home Screen Organizer 因此使用 SpringBoard 的字典形式：`buttonBar`
 
 iOS 在 `listMetadata` → `fixedLocations` 中按页面 ID 保存固定空位。写入时携带页面 ID 和空位元数据，以保留各页面的空位。
 
-- iOS Home Screen Organizer 按设备记住编辑器中创建的空位，并在写入时发送页面 ID 与固定位置。
+- Home Screen Organizer 按设备记住编辑器中创建的空位，并在写入时发送页面 ID 与固定位置。
 - 在编辑器中将 App 拖到目标空位置，重新建立需要的空位。
 - 应用布局前，取消隐藏主屏幕页面。
 
@@ -261,13 +261,13 @@ iOS 在 `listMetadata` → `fixedLocations` 中按页面 ID 保存固定空位�
 
 ```sh
 .venv/bin/python tests/fake_phone.py fake.plist --dict
-HOMESCREEN_FIXTURE=fake.plist .venv/bin/ios-homescreen-organizer ui
+HOMESCREEN_FIXTURE=fake.plist .venv/bin/home-screen-organizer ui
 ```
 
 或使用已启动的模拟器：
 
 ```sh
-HOMESCREEN_SIM=booted .venv/bin/ios-homescreen-organizer ui
+HOMESCREEN_SIM=booted .venv/bin/home-screen-organizer ui
 ```
 
 参考：[macOS 构建与依赖锁](macapp/BUILDING.md) · [本地编辑器会话与 API](docs/LOCAL-EDITOR.md) · [兼容性检查](docs/COMPATIBILITY.md)。
@@ -289,4 +289,4 @@ HOMESCREEN_SIM=booted .venv/bin/ios-homescreen-organizer ui
 
 [MIT](LICENSE)。Copyright © 2026 Jonathan Kats。保留原始许可证与版权声明。
 
-iPhone、iOS 和屏幕使用时间是 Apple 的商标。iOS Home Screen Organizer 使用私有设备接口执行布局操作。
+iPhone、iOS 和屏幕使用时间是 Apple 的商标。Home Screen Organizer 使用私有设备接口执行布局操作。

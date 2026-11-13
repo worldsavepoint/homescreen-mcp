@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Build iOS Home Screen Organizer.app and ios-homescreen-organizer-<version>.dmg into build/.
+# Build Home Screen Organizer.app and home-screen-organizer-<version>.dmg into build/.
 #   macapp/build.sh            full build
 # Requires Python 3.12 and Xcode command line tools. See macapp/BUILDING.md.
 set -euo pipefail
@@ -20,7 +20,7 @@ BUILD=$ROOT/build/$ARCH
 PYTHON=${HOMESCREEN_BUILD_PYTHON:-python3.12}
 VENV=$(mktemp -d "${TMPDIR:-/tmp}/homescreen-build.XXXXXXXX")
 trap 'rm -rf "$VENV"' EXIT
-APP="$BUILD/iOS Home Screen Organizer.app"
+APP="$BUILD/Home Screen Organizer.app"
 
 LOCK="$ROOT/requirements-build.lock"
 WHEEL_LINKS=()
@@ -47,12 +47,12 @@ echo "• engine"
 
 echo "• shell"
 (cd "$ROOT/macapp/Shell" && swift build -c release --arch "$ARCH")
-SHELL_BIN=$(cd "$ROOT/macapp/Shell" && swift build -c release --arch "$ARCH" --show-bin-path)/IOSHomeScreenOrganizer
+SHELL_BIN=$(cd "$ROOT/macapp/Shell" && swift build -c release --arch "$ARCH" --show-bin-path)/HomeScreenOrganizer
 
 echo "• app bundle"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$SHELL_BIN" "$APP/Contents/MacOS/iOSHomeScreenOrganizer"
+cp "$SHELL_BIN" "$APP/Contents/MacOS/HomeScreenOrganizer"
 cp -R "$BUILD/dist/engine" "$APP/Contents/Resources/engine"
 "$VENV/bin/python" -c 'import importlib.metadata as m; print("\n".join(sorted(d.metadata["Name"] + "==" + d.version for d in m.distributions())))' \
   > "$APP/Contents/Resources/dependencies.txt"
@@ -68,18 +68,18 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>iOS Home Screen Organizer</string>
-  <key>CFBundleDisplayName</key><string>iOS Home Screen Organizer</string>
+  <key>CFBundleName</key><string>Home Screen Organizer</string>
+  <key>CFBundleDisplayName</key><string>Home Screen Organizer</string>
   <key>CFBundleIdentifier</key><string>io.github.worldsavepoint.ios-homescreen-organizer</string>
-  <key>CFBundleExecutable</key><string>iOSHomeScreenOrganizer</string>
+  <key>CFBundleExecutable</key><string>HomeScreenOrganizer</string>
   <key>CFBundleDevelopmentRegion</key><string>en</string>
   <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$BUNDLE_VERSION</string>
   <key>CFBundleVersion</key><string>$BUNDLE_VERSION</string>
-  <key>IOSHomeScreenOrganizerReleaseVersion</key><string>$VERSION</string>
-  <key>IOSHomeScreenOrganizerArchitecture</key><string>$ARCH</string>
+  <key>HomeScreenOrganizerReleaseVersion</key><string>$VERSION</string>
+  <key>HomeScreenOrganizerArchitecture</key><string>$ARCH</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -90,8 +90,8 @@ PLIST
 
 mkdir -p "$APP/Contents/Resources/zh-Hans.lproj"
 cat > "$APP/Contents/Resources/zh-Hans.lproj/InfoPlist.strings" <<'LOCALIZATION'
-"CFBundleName" = "iOS 桌面整理";
-"CFBundleDisplayName" = "iOS 桌面整理";
+"CFBundleName" = "主屏幕整理";
+"CFBundleDisplayName" = "主屏幕整理";
 LOCALIZATION
 
 echo "• ad-hoc signing"
@@ -99,10 +99,10 @@ codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 
 echo "• dmg"
-DMG=$BUILD/ios-homescreen-organizer-$VERSION.dmg
+DMG=$BUILD/home-screen-organizer-$VERSION.dmg
 STAGE=$BUILD/dmg
 rm -rf "$STAGE" "$DMG" && mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/" && ln -s /Applications "$STAGE/Applications"
-hdiutil create -quiet -volname "iOS Home Screen Organizer" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+hdiutil create -quiet -volname "Home Screen Organizer" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 rm -rf "$STAGE"
 echo "built $APP ($(du -sh "$APP" | cut -f1)) and $DMG ($(du -sh "$DMG" | cut -f1))"

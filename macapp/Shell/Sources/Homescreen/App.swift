@@ -3,12 +3,12 @@ import SwiftUI
 import WebKit
 
 @main
-struct IOSHomeScreenOrganizerApp: App {
+struct HomeScreenOrganizerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var engine = Engine()
 
     var body: some Scene {
-        Window("iOS Home Screen Organizer", id: "main") {
+        Window("Home Screen Organizer", id: "main") {
             RootView()
                 .environmentObject(engine)
                 .frame(minWidth: 1000, minHeight: 680)
@@ -31,14 +31,16 @@ struct IOSHomeScreenOrganizerApp: App {
                     try? FileManager.default.createDirectory(at: Engine.dataFolder, withIntermediateDirectories: true)
                     NSWorkspace.shared.open(Engine.dataFolder)
                 }
-                Button("Copy MCP Setup Command") {
-                    let cmd = "claude mcp add ios-homescreen-mcp -- \"\(Engine.executable.path)\" mcp"
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(cmd, forType: .string)
+                Menu("MCP") {
+                    let setup = MCPSetup(executablePath: Engine.executable.path)
+                    Button("Copy Launch Command") { copy(setup.launchCommand) }
+                    Button("Copy Cursor / Claude JSON") { copy(setup.cursorClaudeJSON) }
+                    Button("Copy Codex TOML") { copy(setup.codexTOML) }
+                    Button("Copy VS Code JSON") { copy(setup.vscodeJSON) }
                 }
             }
             CommandGroup(replacing: .help) {
-                Button("iOS Home Screen Organizer on GitHub") {
+                Button("Home Screen Organizer on GitHub") {
                     NSWorkspace.shared.open(URL(string: "https://github.com/worldsavepoint/ios-homescreen-organizer")!)
                 }
                 Button("Original Homescreen by Jonathan Kats") {
@@ -46,6 +48,11 @@ struct IOSHomeScreenOrganizerApp: App {
                 }
             }
         }
+    }
+
+    private func copy(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
     }
 }
 
@@ -68,14 +75,14 @@ struct RootView: View {
             VStack(spacing: 14) {
                 AppMark().frame(width: 56, height: 56)
                 ProgressView().controlSize(.small)
-                Text("Starting iOS Home Screen Organizer…").foregroundStyle(.secondary)
+                Text("Starting Home Screen Organizer…").foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .ready(let url):
             WebView(url: url).ignoresSafeArea()
         case .failed(let message):
             VStack(alignment: .leading, spacing: 12) {
-                Text("iOS Home Screen Organizer couldn't start").font(.title2.bold())
+                Text("Home Screen Organizer couldn't start").font(.title2.bold())
                 ScrollView {
                     Text(message).font(.system(.footnote, design: .monospaced)).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)

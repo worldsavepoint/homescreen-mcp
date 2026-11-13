@@ -1,5 +1,5 @@
 [project]
-name = "ios-homescreen-organizer"
+name = "home-screen-organizer"
 version = "1.2.0"
 description = "Arrange your iPhone Home Screen from your Mac: drag-and-drop app, CLI and MCP server. Keeps App Library apps in the App Library."
 readme = "README.md"
@@ -27,6 +27,8 @@ Homepage = "https://github.com/worldsavepoint/ios-homescreen-organizer"
 Issues = "https://github.com/worldsavepoint/ios-homescreen-organizer/issues"
 
 [project.scripts]
+home-screen-organizer = "homescreen.cli:main"
+home-screen-mcp = "homescreen.server:main"
 ios-homescreen-organizer = "homescreen.cli:main"
 ios-homescreen-mcp = "homescreen.server:main"
 homescreen = "homescreen.cli:main"

@@ -1,4 +1,4 @@
-# Building iOS Home Screen Organizer
+# Building Home Screen Organizer
 
 Build native apps for **Apple silicon (`arm64`)** and **Intel (`x86_64`)** on
 **macOS 14 or later**, using **CPython 3.12** and Xcode command line tools. Run
@@ -102,7 +102,7 @@ import importlib.metadata as m
 import os
 from pathlib import Path
 pins = sorted(d.metadata["Name"] + "==" + d.version for d in m.distributions()
-              if d.metadata["Name"] != "ios-homescreen-organizer")
+              if d.metadata["Name"] != "home-screen-organizer")
 Path(os.environ["LOCK_DIR"], "pins.txt").write_text("\n".join(pins) + "\n")
 PY
 "$LOCK_DIR/venv/bin/python" -m pip download --no-deps --only-binary=:all: \
@@ -140,8 +140,8 @@ For Developer ID distribution, sign with the publisher's certificate and submit
 the release for Apple notarization using the publisher's Apple credentials.
 
 The Swift package includes a request/URL validation harness. A full `build.sh` run
-creates `build/<arch>/iOS Home Screen Organizer.app` and
-`build/<arch>/ios-homescreen-organizer-<version>.dmg`, where `<arch>` is `arm64`
+creates `build/<arch>/Home Screen Organizer.app` and
+`build/<arch>/home-screen-organizer-<version>.dmg`, where `<arch>` is `arm64`
 or `x86_64`. Install and launch the resulting app as a separate step.
 
 ## Release archives
@@ -157,8 +157,8 @@ shasum -a 256 --check SHA256SUMS.txt
 The package command checks the bundle version and architecture, preserves executable
 permissions in the ZIP, and produces the following in `build/release/<arch>/`:
 
-- `ios-homescreen-organizer-<version>-macos-<arch>.dmg`
-- `ios-homescreen-organizer-<version>-macos-<arch>.zip`
+- `home-screen-organizer-<version>-macos-<arch>.dmg`
+- `home-screen-organizer-<version>-macos-<arch>.zip`
 - `SHA256SUMS.txt` for that architecture's two archives.
 
 Use `--arch arm64` or `--arch x86_64` to select a completed native build explicitly.
@@ -176,8 +176,8 @@ Each job checks the layout, draft, backup, editor and launcher modules, builds t
 Mac app, starts the packaged engine, completes a packaged MCP initialization and
 tool-list handshake, verifies Mach-O architectures and signatures, and checks
 archive checksums. The installable Actions artifacts are
-`ios-homescreen-organizer-macos-arm64` and
-`ios-homescreen-organizer-macos-x86_64`.
+`home-screen-organizer-macos-arm64` and
+`home-screen-organizer-macos-x86_64`.
 
 To publish a new version:
 
@@ -198,7 +198,7 @@ Pushing a matching version tag also runs the build and publication workflow.
 Versions such as `1.2.0-beta.1` produce GitHub prereleases.
 
 The app's standard macOS version fields contain the numeric release core, such as
-`1.2.0`. `IOSHomeScreenOrganizerReleaseVersion` retains the complete release version, including
+`1.2.0`. `HomeScreenOrganizerReleaseVersion` retains the complete release version, including
 the prerelease suffix; archive filenames and Git tags use this complete version.
 
 CI uses native macOS arm64 and x86_64 runners, Python 3.12, hash-checked

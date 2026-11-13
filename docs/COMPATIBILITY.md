@@ -25,7 +25,7 @@ For a connected, already trusted USB device, the diagnostic command reads its
 reported software information and exported Home Screen structure:
 
 ```sh
-HOMESCREEN_READ_ONLY=1 .venv/bin/ios-homescreen-organizer diagnose
+HOMESCREEN_READ_ONLY=1 .venv/bin/home-screen-organizer diagnose
 ```
 
 The optional `--expected-version VERSION` argument selects the expected software

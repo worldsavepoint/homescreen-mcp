@@ -5,7 +5,7 @@ Arrange Home Screen apps, folders, widgets and the App Library from your Mac.
 - Per-device drafts and backups, readback comparison, local editor, CLI and MCP server.
 - macOS 14 or later; ad-hoc signed app with the Python engine and dependencies included.
 
-Choose your download in Apple menu → About This Mac: an Apple M-series chip uses `macos-arm64`; an Intel processor uses `macos-x86_64`. Open the matching DMG and drag iOS Home Screen Organizer into Applications, or extract the matching ZIP. Open System Settings → Privacy & Security → Open Anyway when macOS requests approval.
+Choose your download in Apple menu → About This Mac: an Apple M-series chip uses `macos-arm64`; an Intel processor uses `macos-x86_64`. Open the matching DMG and drag Home Screen Organizer into Applications, or extract the matching ZIP. Open System Settings → Privacy & Security → Open Anyway when macOS requests approval.
 
 `SHA256SUMS.txt` contains hashes for both DMGs and both ZIPs. Save it in the same directory as your chosen DMG or ZIP, then run `shasum -a 256 --check --ignore-missing SHA256SUMS.txt`.
 

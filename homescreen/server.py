@@ -277,7 +277,7 @@ async def apply(apply_token: str) -> dict[str, Any]:
     draft. Needs the apply_token from the latest diff. Backs up first and verifies after."""
     if not ALLOW_APPLY:
         return {"ok": False, "error": "apply from the assistant is off. The user can apply in the app "
-                f"(`ios-homescreen-organizer ui`), run `ios-homescreen-organizer apply {apply_token}`, or set HOMESCREEN_ALLOW_APPLY=1."}
+                f"(`home-screen-organizer ui`), run `home-screen-organizer apply {apply_token}`, or set HOMESCREEN_ALLOW_APPLY=1."}
     try:
         return await session().apply(apply_token)
     except LayoutError as e:
@@ -294,7 +294,7 @@ def list_backups() -> list[str]:
 async def restore(backup: str) -> dict[str, Any]:
     """Write a backup to the iPhone. Only when the user explicitly asked. Same gate as apply."""
     if not ALLOW_APPLY:
-        return {"ok": False, "error": f"restore from the assistant is off. The user can run `ios-homescreen-organizer restore {backup}`."}
+        return {"ok": False, "error": f"restore from the assistant is off. The user can run `home-screen-organizer restore {backup}`."}
     try:
         return await session().restore(backup)
     except LayoutError as e:

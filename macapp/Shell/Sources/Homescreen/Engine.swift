@@ -103,7 +103,7 @@ final class Engine: ObservableObject {
                     return
                 }
                 stop()
-                state = .failed("The local server failed authentication. Restart iOS Home Screen Organizer to try again.")
+                state = .failed("The local server failed authentication. Restart Home Screen Organizer to try again.")
                 return
             }
             try? await Task.sleep(nanoseconds: 200_000_000)
