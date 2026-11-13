@@ -1,6 +1,7 @@
 Arrange Home Screen apps, folders, widgets and the App Library from your Mac.
 
 - Version 1.2.1 carries the loaded grid dimensions through fixed-position placement, Apply and Restore.
+- Apply and Restore verify folder positions and Dock folder contents. Widget pins require a known wire identifier; backups retain grid dimensions so Restore maps saved coordinates or reports positions that cannot fit.
 - HTML previews display draft and last-read rows, columns, fixed positions and widget spans.
 - MCP discovery describes tool effects, inputs and layout workflows, including same-page pin preservation during Arrange.
 - Native Intel support alongside Apple silicon, with separate DMG and ZIP downloads for each architecture.

@@ -6,7 +6,7 @@ import plistlib
 
 import pytest
 
-from homescreen.device import FileSource, PhoneSource, model_to_disk, to_root_archive
+from homescreen.device import FileSource, PhoneSource, disk_pins, model_to_disk, to_root_archive
 from homescreen.model import Grid
 from homescreen.session import Session
 from fake_phone import app
@@ -29,6 +29,11 @@ class ArchiveSource(PhoneSource):
 
     async def read_raw(self, format_version):
         return copy.deepcopy(self.raw)
+
+    async def read(self):
+        result = await super().read()
+        self.pins = disk_pins(self.raw) if isinstance(self.raw, dict) else None
+        return result
 
     async def installed_apps(self):
         return {}
