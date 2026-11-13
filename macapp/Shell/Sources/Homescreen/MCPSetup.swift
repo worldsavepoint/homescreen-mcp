@@ -29,7 +29,8 @@ struct MCPSetup {
     var vscodeJSON: String {
         var configuration = server
         configuration["type"] = "stdio"
-        return json(["servers": ["ios-homescreen-mcp": configuration]])
+        configuration["tools"] = ["*"]
+        return json(["mcpServers": ["ios-homescreen-mcp": configuration]])
     }
 
     private var server: [String: Any] {

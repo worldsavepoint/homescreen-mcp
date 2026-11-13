@@ -55,7 +55,7 @@ def test_client_formats_preserve_engine_and_read_only_environment(setup_binary, 
     assert json.loads(output["json"]) == {"mcpServers": {"ios-homescreen-mcp": expected}}
     assert tomllib.loads(output["toml"]) == {"mcp_servers": {"ios-homescreen-mcp": expected}}
     assert json.loads(output["vscode"]) == {
-        "servers": {"ios-homescreen-mcp": {"type": "stdio", **expected}}
+        "mcpServers": {"ios-homescreen-mcp": {"type": "stdio", "tools": ["*"], **expected}}
     }
 
 

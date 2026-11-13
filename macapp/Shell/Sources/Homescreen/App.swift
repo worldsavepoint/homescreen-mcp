@@ -36,7 +36,7 @@ struct HomeScreenOrganizerApp: App {
                     Button("Copy Launch Command") { copy(setup.launchCommand) }
                     Button("Copy Cursor / Claude JSON") { copy(setup.cursorClaudeJSON) }
                     Button("Copy Codex TOML") { copy(setup.codexTOML) }
-                    Button("Copy VS Code JSON") { copy(setup.vscodeJSON) }
+                    Button("Copy VS Code / Copilot JSON") { copy(setup.vscodeJSON) }
                 }
             }
             CommandGroup(replacing: .help) {
