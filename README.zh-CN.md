@@ -1,5 +1,5 @@
 <h1 align="center">主屏幕整理</h1>
-<p align="center"><strong>Home Screen Organizer · 在 Mac 上整理 iPhone 或 iPad 的主屏幕。</strong><br>macOS 14+ · Apple silicon 与 Intel · iOS 16 / 17 / 18 / 26 / 27 布局模式</p>
+<p align="center"><strong>Home Screen Organizer · 在 Mac 上整理 iPhone 或 iPad 的主屏幕。</strong><br>macOS 14+ · Apple silicon 与 Intel · 支持 iOS 16+</p>
 
 <p align="center">
   <a href="https://github.com/worldsavepoint/ios-homescreen-organizer/releases"><img alt="发行版" src="https://img.shields.io/badge/download-Releases-blue"></a>
@@ -120,4 +120,15 @@ HOMESCREEN_READ_ONLY=1 '/Applications/Home Screen Organizer.app/Contents/Resourc
 
 [反馈本 fork 的问题](https://github.com/worldsavepoint/ios-homescreen-organizer/issues)时，请附安装方式、复现步骤及脱敏后的错误信息。[上游源码](https://github.com/kats1123/homescreen-mcp) · [上游问题反馈](https://github.com/kats1123/homescreen-mcp/issues) · [上游发行版](https://github.com/kats1123/homescreen-mcp/releases)。
 
+## 免责声明
+
+Home Screen Organizer 与 Apple Inc. 无关联，未获其认可或赞助。
+
 Mac、macOS、iPhone、iPad 和 Screen Time 是 Apple Inc. 的商标。IOS 是 Cisco 在美国及其他国家或地区的商标或注册商标，由 Apple 经许可使用。
+
+本工具使用的私有设备接口可能随 iOS 更新而变化。应用或恢复布局前会保存主屏幕布局备份，并尝试通过回读核对结果。请另行保留 iPhone 或 iPad 最新的完整备份。使用风险由使用者自行承担；软件依据 [MIT 许可证](LICENSE)按原样（AS IS）提供。
+
+<p align="center">
+  <sub>README 访问计数</sub><br>
+  <a href="https://github.com/journey-ad/Moe-Counter"><img src="https://count.moeyy.cn/@worldsavepoint.homescreen?theme=asoul&amp;padding=7&amp;scale=0.7&amp;darkmode=auto" alt="Home Screen Organizer README 访问计数 — Moe Counter" width="320"></a>
+</p>
