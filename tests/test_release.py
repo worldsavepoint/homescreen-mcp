@@ -1,5 +1,6 @@
 """Versioned release assets preserve app contents and executable permissions."""
 import hashlib
+import json
 from pathlib import Path
 import plistlib
 import subprocess
@@ -34,7 +35,7 @@ def test_tag_mismatch_stops_packaging(tag):
 
 def make_build(tmp_path, version=VERSION, arch="arm64"):
     build = tmp_path / "build with spaces"
-    app = build / "Home Screen Organizer.app"
+    app = build / "Screen Organizer.app"
     executable = app / "Contents/MacOS/HomeScreenOrganizer"
     executable.parent.mkdir(parents=True)
     executable.write_text("#!/bin/sh\nexit 0\n")
@@ -46,6 +47,8 @@ def make_build(tmp_path, version=VERSION, arch="arm64"):
         "HomeScreenOrganizerArchitecture": arch,
     }))
     (build / f"home-screen-organizer-{version}.dmg").write_bytes(b"fixture disk image\n")
+    result = release("localize", "--app", app)
+    assert result.returncode == 0, result.stderr
     return build
 
 
@@ -61,9 +64,17 @@ def test_release_archives_and_manifest(tmp_path, arch):
     assert sorted(p.name for p in output.iterdir()) == sorted([dmg, archive, "SHA256SUMS.txt"])
     assert (output / dmg).read_bytes() == b"fixture disk image\n"
     with zipfile.ZipFile(output / archive) as zipped:
-        info = zipped.getinfo("Home Screen Organizer.app/Contents/MacOS/HomeScreenOrganizer")
+        info = zipped.getinfo("Screen Organizer.app/Contents/MacOS/HomeScreenOrganizer")
         assert zipped.read(info) == b"#!/bin/sh\nexit 0\n"
         assert (info.external_attr >> 16) & 0o111
+        source = ROOT / "homescreen/web/locales"
+        manifest = json.loads((source / "manifest.json").read_text())
+        resources = "Screen Organizer.app/Contents/Resources/"
+        for language in manifest["languages"]:
+            code = language["code"]
+            assert zipped.read(resources + f"Localization/{code}.json") == (source / f"{code}.json").read_bytes()
+            strings = plistlib.loads(zipped.read(resources + f"{code}.lproj/InfoPlist.strings"))
+            assert strings["CFBundleDisplayName"] == json.loads((source / f"{code}.json").read_text())["app.name"]
     lines = (output / "SHA256SUMS.txt").read_text().splitlines()
     assert len(lines) == 2
     for line, name in zip(lines, [dmg, archive]):

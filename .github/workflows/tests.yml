@@ -1,4 +1,4 @@
-name: Home Screen Organizer
+name: Screen Organizer
 
 on:
   pull_request:
@@ -72,6 +72,8 @@ jobs:
           digest.update(b"abc")
           assert digest.finalize().hex() == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
           PYTHON
+      - name: Validate shared translation catalogs
+        run: .venv/bin/python tools/check_translations.py
       - name: Validate layouts, draft edits, backups and editor routes
         run: .venv/bin/python -m pytest -q tests
       - name: Build and verify the Mac app
@@ -80,7 +82,8 @@ jobs:
           HOMESCREEN_BUILD_ARCH: ${{ matrix.arch }}
         run: |
           macapp/build.sh
-          APP="$PWD/build/$BUILD_ARCH/Home Screen Organizer.app"
+          APP="$PWD/build/$BUILD_ARCH/Screen Organizer.app"
+          python macapp/release.py check-localization --app "$APP"
           "$APP/Contents/Resources/engine/engine" --help
           test -f "$APP/Contents/Resources/engine/_internal/homescreen/web/index.html"
           test -f "$APP/Contents/Resources/engine/_internal/homescreen/simulator_icon.m"
@@ -90,12 +93,13 @@ jobs:
           codesign --verify --deep --strict "$APP"
           hdiutil verify build/"$BUILD_ARCH"/home-screen-organizer-*.dmg
       - name: Check packaged MCP initialization and tools
-        run: python macapp/check_mcp.py -- "build/$BUILD_ARCH/Home Screen Organizer.app/Contents/Resources/engine/engine" mcp
+        run: python macapp/check_mcp.py -- "build/$BUILD_ARCH/Screen Organizer.app/Contents/Resources/engine/engine" mcp
       - name: Assemble release archives and checksums
         run: |
           python macapp/release.py package --arch "$BUILD_ARCH"
           ditto -x -k build/release/"$BUILD_ARCH"/home-screen-organizer-*-macos-"$BUILD_ARCH".zip "$RUNNER_TEMP/home-screen-organizer-archive"
-          codesign --verify --deep --strict "$RUNNER_TEMP/home-screen-organizer-archive/Home Screen Organizer.app"
+          python macapp/release.py check-localization --app "$RUNNER_TEMP/home-screen-organizer-archive/Screen Organizer.app"
+          codesign --verify --deep --strict "$RUNNER_TEMP/home-screen-organizer-archive/Screen Organizer.app"
           cd build/release/"$BUILD_ARCH"
           shasum -a 256 --check SHA256SUMS.txt
       - name: Upload installable archives
@@ -183,6 +187,15 @@ jobs:
           shasum -a 256 --check SHA256SUMS.txt
           ditto -x -k home-screen-organizer-*-macos.mcpb "$RUNNER_TEMP/mcpb"
           cd ..
+          python - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          source = Path("homescreen/web/locales")
+          target = Path(os.environ["RUNNER_TEMP"]) / "mcpb/server" / os.environ["BUILD_ARCH"] / "_internal/homescreen/web/locales"
+          manifest = json.loads((source / "manifest.json").read_text())
+          for name in ["manifest", *(item["code"] for item in manifest["languages"])]:
+              assert (target / f"{name}.json").read_bytes() == (source / f"{name}.json").read_bytes()
+          PYTHON
           lipo "$RUNNER_TEMP/mcpb/server/$BUILD_ARCH/engine" -verify_arch "$BUILD_ARCH"
           codesign --verify --deep --strict "$RUNNER_TEMP/mcpb/server/$BUILD_ARCH/engine"
           python macapp/check_mcp.py -- /bin/sh "$RUNNER_TEMP/mcpb/server/launch.sh"

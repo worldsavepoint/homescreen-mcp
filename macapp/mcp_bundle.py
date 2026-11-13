@@ -12,7 +12,7 @@ import zipfile
 
 from release import ARCHITECTURES, ROOT, project_version
 
-APP = "Home Screen Organizer.app"
+APP = "Screen Organizer.app"
 RESOURCES = f"{APP}/Contents/Resources/"
 ENGINE = RESOURCES + "engine/"
 NOTICES = ("LICENSE", "dependencies.txt", "requirements-build.lock")
@@ -137,7 +137,7 @@ def assemble(assets_dir, output_dir, repository, version):
             archives.append((archive, engine_entries(archive, arch, version)))
         url = f"https://github.com/{repository}"
         manifest = {
-            "manifest_version": "0.3", "name": "home-screen-organizer", "display_name": "Home Screen Organizer",
+            "manifest_version": "0.3", "name": "home-screen-organizer", "display_name": "Screen Organizer",
             "version": version, "description": "Arrange iPhone Home Screen apps, folders, widgets and the App Library from your Mac.",
             "author": {"name": "Jonathan Kats", "url": "https://github.com/kats1123/homescreen-mcp"},
             "homepage": url, "repository": {"type": "git", "url": url}, "support": url + "/issues", "license": "MIT",
@@ -158,7 +158,7 @@ def assemble(assets_dir, output_dir, repository, version):
                     destination.writestr(copied, archive.read(info))
         server = {
             "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-            "name": "io.github.worldsavepoint/home-screen-organizer", "title": "Home Screen Organizer", "version": version,
+            "name": "io.github.worldsavepoint/home-screen-organizer", "title": "Screen Organizer", "version": version,
             "description": manifest["description"], "repository": {"url": url, "source": "github"},
             "packages": [{"registryType": "mcpb", "identifier": f"{url}/releases/download/v{version}/{bundle.name}",
                           "fileSha256": digest(bundle), "transport": {"type": "stdio"}}],

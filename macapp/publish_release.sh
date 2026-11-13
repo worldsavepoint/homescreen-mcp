@@ -42,10 +42,10 @@ if [[ "$RELEASE_TAG" == *-* ]]; then prerelease=true; fi
 if [[ "$draft" == true ]]; then
   gh release upload "$RELEASE_TAG" --clobber "${assets[@]}"
   gh release edit "$RELEASE_TAG" --draft=false --target "$RELEASE_TARGET" \
-    --title "Home Screen Organizer $RELEASE_TAG" --notes-file "$notes_file" \
+    --title "Screen Organizer $RELEASE_TAG" --notes-file "$notes_file" \
     --prerelease="$prerelease"
 else
   gh release create "$RELEASE_TAG" --target "$RELEASE_TARGET" \
-    --title "Home Screen Organizer $RELEASE_TAG" --notes-file "$notes_file" \
+    --title "Screen Organizer $RELEASE_TAG" --notes-file "$notes_file" \
     --prerelease="$prerelease" "${assets[@]}"
 fi

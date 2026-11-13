@@ -23,8 +23,49 @@ def project_version(tag=None):
     return version
 
 
+def localization_resources(locales):
+    manifest = json.loads((locales / "manifest.json").read_text())
+    codes = [language["code"] for language in manifest["languages"]]
+    if (manifest.get("default") != "en" or "en" not in codes or len(codes) != len(set(codes))
+            or any(not re.fullmatch(r"[a-z]{2,3}(?:-[A-Za-z0-9]+)*", code) for code in codes)):
+        raise ValueError("Check the language manifest before packaging")
+    files = {"Localization/manifest.json": (locales / "manifest.json").read_bytes()}
+    for code in codes:
+        data = (locales / f"{code}.json").read_bytes()
+        catalog = json.loads(data)
+        expected = {"zh-Hans": "屏幕整理", "zh-Hant": "螢幕整理"}.get(code, "Screen Organizer")
+        if catalog.get("app.name") != expected:
+            raise ValueError(f"Check the localized app display name: {code}")
+        files[f"Localization/{code}.json"] = data
+        files[f"{code}.lproj/InfoPlist.strings"] = plistlib.dumps({
+            "CFBundleName": catalog["app.name"], "CFBundleDisplayName": catalog["app.name"]})
+    return codes, files
+
+
+def localize(app, locales, check=False):
+    """Assemble or verify the native catalogs before engine startup."""
+    codes, files = localization_resources(locales)
+    plist_path = app / "Contents/Info.plist"
+    bundle = plistlib.loads(plist_path.read_bytes())
+    metadata = {"CFBundleName": "Screen Organizer", "CFBundleDisplayName": "Screen Organizer",
+                "CFBundleDevelopmentRegion": "en", "CFBundleLocalizations": codes}
+    if check:
+        if any(bundle.get(key) != value for key, value in metadata.items()):
+            raise ValueError("App localization metadata differs from the language manifest")
+        for name, data in files.items():
+            if (app / "Contents/Resources" / name).read_bytes() != data:
+                raise ValueError(f"App localization resource differs from the shared catalog: {name}")
+    else:
+        bundle.update(metadata)
+        plist_path.write_bytes(plistlib.dumps(bundle))
+        for name, data in files.items():
+            path = app / "Contents/Resources" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+
+
 def package(build_dir, output_dir, version, arch):
-    app = build_dir / "Home Screen Organizer.app"
+    app = build_dir / "Screen Organizer.app"
     bundle = plistlib.loads((app / "Contents/Info.plist").read_bytes())
     if (bundle.get("HomeScreenOrganizerReleaseVersion", bundle["CFBundleShortVersionString"]) != version
             or bundle["CFBundleShortVersionString"] != version.split("-")[0]):
@@ -120,10 +161,16 @@ def main():
     verify_command.add_argument("--tag")
     verify_command.add_argument("--input-dir", type=Path, required=True)
     verify_command.add_argument("--repository", required=True)
+    for action in ("localize", "check-localization"):
+        localization_command = commands.add_parser(action, help="Assemble or check native language resources")
+        localization_command.add_argument("--app", type=Path, required=True)
+        localization_command.add_argument("--locales", type=Path, default=ROOT / "homescreen/web/locales")
     args = parser.parse_args()
     try:
-        version = project_version(args.tag)
-        if args.command == "package":
+        version = project_version(getattr(args, "tag", None))
+        if args.command in ("localize", "check-localization"):
+            localize(args.app, args.locales, check=args.command == "check-localization")
+        elif args.command == "package":
             build_dir = args.build_dir or ROOT / "build" / args.arch
             output_dir = args.output_dir or ROOT / "build/release" / args.arch
             package(build_dir.resolve(), output_dir.resolve(), version, args.arch)

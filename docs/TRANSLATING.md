@@ -23,7 +23,7 @@ Use **Screen Organizer** as the Latin-script brand, **屏幕整理** in Simplifi
 4. Preview the editor and native app in the language, including dialogs, accessibility labels, long strings and light/dark presentation.
 5. Submit a focused pull request describing the language and wording changes.
 
-The runtime language menus read the manifest. Packaging includes the locale JSON files. Regional requests fall back to the registered base language; Chinese script and region aliases select the matching Simplified or Traditional catalog. System mode uses preferred languages in order. Missing translated messages display the English source value.
+The runtime language menus read the manifest. Packaging derives native `CFBundleLocalizations` and `InfoPlist.strings` display names from this manifest and each catalog’s `app.name`, and includes every registered catalog in `Contents/Resources/Localization`. CI keeps the initial eight languages and accepts additional valid registered locales; run `python -m pytest -q tests/test_i18n.py tests/test_localized_packaging.py` before submitting. Regional requests fall back to the registered base language; Chinese script and region aliases select the matching Simplified or Traditional catalog. System mode uses preferred languages in order. Missing translated messages display the English source value.
 
 ## Add a message
 

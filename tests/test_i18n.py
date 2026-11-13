@@ -15,8 +15,8 @@ def test_catalogs_cover_supported_languages():
     assert (LOCALES / "manifest.json").is_file(), "Shared locale manifest is required"
     manifest = json.loads((LOCALES / "manifest.json").read_text())
     assert manifest["default"] == "en"
-    assert {item["code"] for item in manifest["languages"]} == {
-        "en", "zh-Hans", "zh-Hant", "es", "de", "fr", "ru", "pt"
+    assert {"en", "zh-Hans", "zh-Hant", "es", "de", "fr", "ru", "pt"} <= {
+        item["code"] for item in manifest["languages"]
     }
     source = json.loads((LOCALES / "en.json").read_text())
     for language in manifest["languages"]:

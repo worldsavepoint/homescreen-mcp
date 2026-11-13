@@ -74,6 +74,7 @@ def test_new_release_targets_built_commit(tmp_path):
     assert result.returncode == 0, result.stderr
     creation = next(args for args in calls if args[:2] == ["release", "create"])
     assert creation[2] == "v1.2.0"
+    assert creation[creation.index("--title") + 1] == "Screen Organizer v1.2.0"
     assert creation[creation.index("--target") + 1] == TARGET
     assert creation[-7:] == ["./home-screen-organizer-1.2.0-macos-arm64.dmg",
                             "./home-screen-organizer-1.2.0-macos-arm64.zip",
@@ -95,6 +96,7 @@ def test_existing_draft_uploads_assets_then_publishes(tmp_path):
     assert [args[1] for args in mutations] == ["upload", "edit"]
     assert "--clobber" in mutations[0]
     assert "--draft=false" in mutations[1]
+    assert mutations[1][mutations[1].index("--title") + 1] == "Screen Organizer v1.2.0"
 
 
 def test_tag_at_another_commit_requires_new_version(tmp_path):

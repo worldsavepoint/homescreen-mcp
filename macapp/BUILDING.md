@@ -1,4 +1,4 @@
-# Building Home Screen Organizer
+# Building Screen Organizer
 
 [README](../README.md) · [中文 README](../README.zh-CN.md) · [MCP client setup](../docs/MCP.md) · [Protocol and data sources](../docs/HOW-IT-WORKS.md)
 
@@ -114,6 +114,27 @@ includes `dependencies.txt` (the installed package inventory), the installed
 `requirements-build.lock`, and the MIT license. Intel bundles also include the
 cryptography source lock and `OPENSSL-LICENSE.txt`.
 
+## Language resources
+
+Run `python3.12 tools/check_translations.py` with Node.js installed before building.
+The build copies every manifest-registered shared catalog to
+`Screen Organizer.app/Contents/Resources/Localization`, generates each language’s
+`<code>.lproj/InfoPlist.strings` from `app.name`, and sets `CFBundleLocalizations`
+from the same manifest. Native consent can therefore load translations before
+starting the engine. English and other non-Chinese display names are **Screen
+Organizer**; Chinese names are **屏幕整理** and **螢幕整理**.
+
+Verify a completed or extracted app against the current source catalogs:
+
+```sh
+python3.12 macapp/release.py check-localization --app 'build/arm64/Screen Organizer.app'
+```
+
+Follow the [translation contribution guide](../docs/TRANSLATING.md) to add a
+language. Runtime menus and packaging follow the manifest; CI validates catalog
+coverage, placeholders and both native packages. The standalone MCPB retains the
+engine’s web catalogs and stable `server/<arch>/` layout.
+
 ## Updating dependencies
 
 The committed lock records the exact wheels downloaded for macOS arm64 and
@@ -169,9 +190,9 @@ native engine. The standalone MCPB preserves the native signatures and is unsign
 as an outer archive. Release checksums cover the complete downloaded files.
 
 The Swift package includes a request/URL validation harness. A full `build.sh` run
-creates `build/<arch>/Home Screen Organizer.app` and
+creates `build/<arch>/Screen Organizer.app` and
 `build/<arch>/home-screen-organizer-<version>.dmg`, where `<arch>` is `arm64`
-or `x86_64`. Install and launch the resulting app as a separate step.
+or `x86_64`. Install and launch the resulting app as a separate step. After replacing an older app, update the engine path in **MCP Setup** or your client configuration. Release asset basenames and all existing public identifiers stay unchanged.
 
 ## Release archives
 

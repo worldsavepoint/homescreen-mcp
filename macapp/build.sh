@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Build Home Screen Organizer.app and home-screen-organizer-<version>.dmg into build/.
+# Build Screen Organizer.app and home-screen-organizer-<version>.dmg into build/.
 #   macapp/build.sh            full build
 # Requires Python 3.12 and Xcode command line tools. See macapp/BUILDING.md.
 set -euo pipefail
@@ -20,7 +20,7 @@ BUILD=$ROOT/build/$ARCH
 PYTHON=${HOMESCREEN_BUILD_PYTHON:-python3.12}
 VENV=$(mktemp -d "${TMPDIR:-/tmp}/homescreen-build.XXXXXXXX")
 trap 'rm -rf "$VENV"' EXIT
-APP="$BUILD/Home Screen Organizer.app"
+APP="$BUILD/Screen Organizer.app"
 
 LOCK="$ROOT/requirements-build.lock"
 WHEEL_LINKS=()
@@ -68,12 +68,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Home Screen Organizer</string>
-  <key>CFBundleDisplayName</key><string>Home Screen Organizer</string>
+  <key>CFBundleName</key><string>Screen Organizer</string>
+  <key>CFBundleDisplayName</key><string>Screen Organizer</string>
   <key>CFBundleIdentifier</key><string>io.github.worldsavepoint.ios-homescreen-organizer</string>
   <key>CFBundleExecutable</key><string>HomeScreenOrganizer</string>
   <key>CFBundleDevelopmentRegion</key><string>en</string>
-  <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$BUNDLE_VERSION</string>
@@ -88,11 +87,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
-mkdir -p "$APP/Contents/Resources/zh-Hans.lproj"
-cat > "$APP/Contents/Resources/zh-Hans.lproj/InfoPlist.strings" <<'LOCALIZATION'
-"CFBundleName" = "主屏幕整理";
-"CFBundleDisplayName" = "主屏幕整理";
-LOCALIZATION
+"$VENV/bin/python" "$ROOT/tools/check_translations.py"
+"$VENV/bin/python" "$ROOT/macapp/release.py" localize --app "$APP"
+"$VENV/bin/python" "$ROOT/macapp/release.py" check-localization --app "$APP"
 
 echo "• ad-hoc signing"
 codesign --force --deep --sign - "$APP"
@@ -103,6 +100,6 @@ DMG=$BUILD/home-screen-organizer-$VERSION.dmg
 STAGE=$BUILD/dmg
 rm -rf "$STAGE" "$DMG" && mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/" && ln -s /Applications "$STAGE/Applications"
-hdiutil create -quiet -volname "Home Screen Organizer" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+hdiutil create -quiet -volname "Screen Organizer" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 rm -rf "$STAGE"
 echo "built $APP ($(du -sh "$APP" | cut -f1)) and $DMG ($(du -sh "$DMG" | cut -f1))"
