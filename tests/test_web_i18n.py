@@ -37,7 +37,7 @@ class Nodes(HTMLParser):
 
 HARNESS = r'''
 const fs = require('fs'), vm = require('vm'), assert = require('assert/strict');
-const input = JSON.parse(fs.readFileSync(0,'utf8'));
+const harnessInput = JSON.parse(fs.readFileSync(0,'utf8'));
 class Element {
  constructor(tag, attrs={}) {this.tagName=tag;this.attrs={...attrs};this.children=[];this.events={};this.style={setProperty(){}};
  this.dataset={}; for(const [k,v] of Object.entries(attrs))if(k.startsWith('data-'))this.dataset[k.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]=v;
@@ -69,9 +69,10 @@ class Element {
  click(){if(!this.disabled)this.dispatchEvent({type:'click'});}focus(){document.activeElement=this;}select(){}blur(){document.activeElement=null;}
 }
 const document = new Element('document');document.createElement=t=>new Element(t);document.createTextNode=t=>{const n=new Element('#text');n.textContent=t;return n;};
-const nodes=input.nodes.map(n=>new Element(n.tag,n.attrs));nodes.forEach((n,i)=>{n._text=input.nodes[i].text||'';(input.nodes[i].parent==null?document:nodes[input.nodes[i].parent]).append(n);});
+const nodes=harnessInput.nodes.map(n=>new Element(n.tag,n.attrs));nodes.forEach((n,i)=>{n._text=harnessInput.nodes[i].text||'';(harnessInput.nodes[i].parent==null?document:nodes[harnessInput.nodes[i].parent]).append(n);});
 document.documentElement=nodes.find(n=>n.tagName==='html');document.body=nodes.find(n=>n.tagName==='body');
-const calls=[], stored=new Map(), bridge=[], copied=[];
+const calls=[], stored=new Map(), bridge=[], copied=[], unhandled=[];
+process.on('unhandledRejection',error=>unhandled.push(error.message));
 const item={id:'synthetic.app',kind:'app',name:'Synthetic Notes',slots:1};
 const fixture={loaded:true,read_only:true,source:'phone',device:{DeviceName:'Synthetic iPhone',ProductVersion:'18.0',ProductType:'iPhone'},
  dock:[],pages:[[{id:'synthetic.folder',kind:'folder',name:'My Folder',pos:[0,0,1,1],pages:[[item]]}]],library:[],bank:[],moved:['synthetic.app'],history:{undo:true,redo:false},
@@ -81,20 +82,21 @@ const context={document,console,URL,URLSearchParams,Intl,Date,Set,Map,Promise,se
  localStorage:{getItem:k=>stored.get(k)||null,setItem:(k,v)=>stored.set(k,v)},Image:class extends Element{constructor(){super('img');}},
  Event:class{constructor(type){this.type=type;}},CustomEvent:class{constructor(type){this.type=type;}},
  addEventListener:(...a)=>document.addEventListener(...a),dispatchEvent:e=>document.dispatchEvent(e),close:()=>{context.closed=true;},
- fetch:async path=>{calls.push(String(path));if(String(path).includes('/locales/'))return {ok:true,json:async()=>input.catalogs[String(path).split('/').pop()]};
+ fetch:async path=>{calls.push(String(path));if(String(path).includes('/locales/'))return {ok:true,json:async()=>harnessInput.catalogs[String(path).split('/').pop()]};
  if(path==='/api/state')return {ok:true,json:async()=>fixture};if(path==='/api/devices')return {ok:true,json:async()=>({switching:false,current:null,devices:[]})};
  if(path==='/api/read')return {ok:true,json:async()=>fixture};throw Error('Unexpected route '+path);}
 };context.window=context;context.globalThis=context;
-if(input.native) {context.screenOrganizerHost={native:true,languagePreference:'de',consentAccepted:true};context.webkit={messageHandlers:{screenOrganizer:{postMessage:m=>bridge.push(m)}}};}
+if(harnessInput.native) {context.screenOrganizerHost={native:true,languagePreference:'de',consentAccepted:true};context.webkit={messageHandlers:{screenOrganizer:{postMessage:m=>bridge.push(m)}}};}
+eval(harnessInput.setup || '');
 vm.createContext(context);
-for(const script of input.scripts)vm.runInContext(script,context);
+for(const script of harnessInput.scripts)vm.runInContext(script,context);
 const tick=()=>new Promise(r=>setImmediate(r));
-(async()=>{await context.ScreenOrganizerI18n.ready;await tick();await tick();
+(async()=>{await eval('(async()=>{'+(harnessInput.before_ready || '')+'})()');await context.ScreenOrganizerI18n.ready;await tick();await tick();
 const $=s=>document.querySelector(s);const i18n=context.ScreenOrganizerI18n;
 ''' 
 
 
-def browser(body, native=False):
+def browser(body, native=False, setup="", before_ready=""):
     node = shutil.which("node")
     if not node:
         pytest.skip("Node unavailable")
@@ -102,10 +104,11 @@ def browser(body, native=False):
     parser.feed((WEB / "index.html").read_text())
     catalogs = {p.name: json.loads(p.read_text()) for p in (WEB / "locales").glob("*.json")}
     scripts = [(WEB / name).read_text() for name in ("i18n.js", "onboarding.js", "app.js") if (WEB / name).exists()]
-    result = subprocess.run([node, "-e", HARNESS + body + "\n})().catch(e=>{console.error(e);process.exitCode=1;});"],
-        input=json.dumps({"nodes": parser.nodes, "scripts": scripts, "catalogs": catalogs, "native": native}),
-        capture_output=True, text=True)
+    result = subprocess.run([node, "-e", HARNESS + body + "\nassert.deepEqual(unhandled, []);console.log(\"browser assertions complete\");})().catch(e=>{console.error(e);process.exitCode=1;});"],
+        input=json.dumps({"nodes": parser.nodes, "scripts": scripts, "catalogs": catalogs, "native": native, "setup": setup, "before_ready": before_ready}),
+        capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "browser assertions complete", "Browser assertions did not finish"
 
 
 def test_standalone_consent_blocks_routes_until_read_and_agreed():
@@ -322,3 +325,92 @@ def test_view_move_details_keep_original_and_renamed_folder_positions(monkeypatc
     assert details['synthetic.b']['to'] == {'kind': 'page', 'page': 2, 'index': 2}
     assert result['location_labels'][old_b]['name'] == old_name
     assert result['moves'] == lay.diff()['moves']
+
+
+def test_pending_language_immediately_blocks_consent_until_new_terms_are_read():
+    browser('''
+const text=$('#consent-text');text.scrollTop=800;text.dispatchEvent({type:'scroll'});
+$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});
+assert.equal($('#consent-continue').disabled,false);
+const originalFetch=context.fetch;let release;
+context.fetch=path=>String(path).endsWith('/fr.json')?new Promise(resolve=>{release=()=>resolve({ok:true,json:async()=>harnessInput.catalogs['fr.json']});}):originalFetch(path);
+const select=$('#consent-language-select');select.value='fr';const changing=select.onchange({target:select});
+assert.equal($('#consent-continue').disabled,true,'language selection blocks consent synchronously');
+$('#consent-continue').onclick();await tick();
+text.scrollTop=800;text.dispatchEvent({type:'scroll'});$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});
+$('#consent-continue').onclick();await tick();
+assert.equal(context.ScreenOrganizerOnboarding.accepted,false);assert.equal(calls.filter(p=>p.startsWith('/api/')).length,0);
+text.scrollHeight=1200;release();await changing;await tick();
+assert.equal($('#consent-title').textContent,'Avant de commencer');assert.equal($('#consent-agree').checked,false);
+assert.equal(text.scrollTop,0);assert.equal($('#consent-continue').disabled,true);
+$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});
+assert.equal($('#consent-continue').disabled,true);
+text.scrollTop=1000;text.dispatchEvent({type:'scroll'});$('#consent-continue').click();await tick();await tick();
+assert.equal(context.ScreenOrganizerOnboarding.accepted,true);assert.ok(calls.includes('/api/devices'));
+''')
+
+
+@pytest.mark.parametrize("failure", ["network", "http"])
+def test_failed_language_load_keeps_consent_blocked_until_fallback_terms_are_read(failure):
+    browser('''
+const text=$('#consent-text');text.scrollTop=800;text.dispatchEvent({type:'scroll'});
+$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});
+const originalFetch=context.fetch;let fail;
+context.fetch=path=>String(path).endsWith('/fr.json')?new Promise((resolve,reject)=>{fail=()=>FAILURE==='network'?reject(Error('synthetic network failure')):resolve({ok:false});}):originalFetch(path);
+const select=$('#consent-language-select');select.value='fr';const changing=select.onchange({target:select});
+assert.equal($('#consent-continue').disabled,true);await tick();
+$('#consent-continue').onclick();assert.equal(context.ScreenOrganizerOnboarding.accepted,false);
+fail();await changing;await tick();
+assert.equal($('#consent-title').textContent,'Before you begin');assert.equal($('#consent-agree').checked,false);assert.equal(text.scrollTop,0);
+assert.equal(calls.filter(p=>p.startsWith('/api/')).length,0);
+text.scrollTop=800;text.dispatchEvent({type:'scroll'});$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});
+$('#consent-continue').click();await tick();await tick();assert.ok(calls.includes('/api/devices'));
+'''.replace('FAILURE', json.dumps(failure)))
+
+
+@pytest.mark.parametrize("completion_order", ["old_first", "latest_first"])
+def test_superseded_language_load_cannot_change_latest_consent_eligibility(completion_order):
+    browser('''
+const text=$('#consent-text');text.scrollTop=800;text.dispatchEvent({type:'scroll'});
+$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});
+const originalFetch=context.fetch;const release={};
+context.fetch=path=>['fr.json','de.json'].includes(String(path).split('/').pop())?new Promise(resolve=>{const file=String(path).split('/').pop();release[file]=()=>resolve({ok:true,json:async()=>harnessInput.catalogs[file]});}):originalFetch(path);
+const select=$('#consent-language-select');select.value='fr';const old=select.onchange({target:select});await tick();
+select.value='de';const latest=select.onchange({target:select});await tick();
+assert.equal($('#consent-continue').disabled,true);
+if(ORDER==='old_first') {release['fr.json']();await old;assert.equal($('#consent-continue').disabled,true);$('#consent-continue').onclick();}
+assert.equal(context.ScreenOrganizerOnboarding.accepted,false);assert.equal(calls.filter(p=>p.startsWith('/api/')).length,0);
+release['de.json']();await latest;await tick();assert.equal($('#consent-title').textContent,'Bevor du beginnst');
+assert.equal($('#consent-agree').checked,false);text.scrollTop=800;text.dispatchEvent({type:'scroll'});
+$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});assert.equal($('#consent-continue').disabled,false);
+if(ORDER==='latest_first') {release['fr.json']();await old;assert.equal($('#consent-continue').disabled,false);assert.equal($('#consent-agree').checked,true);}
+$('#consent-continue').click();await tick();await tick();assert.ok(calls.includes('/api/devices'));
+'''.replace('ORDER', json.dumps(completion_order)))
+
+
+@pytest.mark.parametrize("failure", ["expired", "network"])
+def test_bootstrap_auth_failure_is_handled_before_consent_and_localized_after_catalogs(failure):
+    browser('''
+assert.equal(context.location.hash,'');assert.deepEqual(unhandled,[]);
+assert.equal(calls.filter(p=>p.startsWith('/api/')).length,0);
+assert.ok(!document.body.textContent.includes('editor.authenticationFailed'));
+const text=$('#consent-text');text.scrollTop=800;text.dispatchEvent({type:'scroll'});
+$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});$('#consent-continue').click();await tick();await tick();
+assert.equal($('#toast').hidden,false);
+assert.ok($('#toast').textContent.includes('Authentification impossible. Rouvrez Screen Organizer depuis son lanceur.'));
+assert.ok(!document.body.textContent.includes('editor.authenticationFailed'));
+assert.equal(calls.filter(p=>p.startsWith('/api/')).length,0,'failed authentication blocks device routes');
+''', setup='''
+stored.set('screenOrganizer.language','fr');context.location.hash='#token=synthetic-expired';
+context.history.replaceState=()=>{calls.push('fragment-cleared');context.location.hash='';};
+const originalFetch=context.fetch;
+context.fetch=(path,options)=>{
+ if(path==='/v1/authenticate'){calls.push(path);assert.equal(context.location.hash,'');return FAILURE==='network'?Promise.reject(Error('synthetic authentication network failure')):Promise.resolve({ok:false,status:401});}
+ if(String(path).endsWith('/en.json'))return new Promise(resolve=>{context.releaseCatalog=()=>resolve({ok:true,json:async()=>harnessInput.catalogs['en.json']});});
+ return originalFetch(path,options);
+};
+'''.replace('FAILURE', json.dumps(failure)), before_ready='''
+await tick();await tick();assert.deepEqual(unhandled,[],'bootstrap failure is handled while catalogs and consent wait');
+assert.equal(context.location.hash,'');assert.deepEqual(calls.slice(0,3),['/static/locales/manifest.json','fragment-cleared','/v1/authenticate']);
+context.releaseCatalog();
+''')

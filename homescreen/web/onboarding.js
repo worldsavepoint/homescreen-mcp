@@ -8,6 +8,7 @@
   const send = message => window.webkit?.messageHandlers?.screenOrganizer?.postMessage(message);
   let accepted = native && host.consentAccepted === true;
   let reachedEnd = false, declined = false, returnFocus = null;
+  let languagePending = false, languageRevision = 0;
   let resolveConsent;
   const consent = new Promise(resolve => { resolveConsent = resolve; });
   if (accepted) resolveConsent();
@@ -17,8 +18,15 @@
   }
   function updateConsent() {
     const text = $("#consent-text");
-    if (text.scrollTop + text.clientHeight >= text.scrollHeight - 2) reachedEnd = true;
-    $("#consent-continue").disabled = declined || !reachedEnd || !$("#consent-agree").checked;
+    if (!languagePending && text.scrollTop + text.clientHeight >= text.scrollHeight - 2) reachedEnd = true;
+    $("#consent-continue").disabled = declined || languagePending || !reachedEnd || !$("#consent-agree").checked;
+  }
+  function resetConsent() {
+    reachedEnd = false;
+    $("#consent-agree").checked = false;
+    $("#consent-text").scrollTop = 0;
+    updateConsent();
+    requestAnimationFrame(updateConsent);
   }
   function languageOptions() {
     for (const selector of ["#language-select", "#consent-language-select"]) {
@@ -36,12 +44,8 @@
   function onLocale() {
     languageOptions();
     document.title = i18n.t("app.name") + " · " + i18n.t("app.subtitle");
-    // A newly translated agreement must be read in its displayed language.
-    if (!accepted) {
-      reachedEnd = false;
-      $("#consent-text").scrollTop = 0;
-      requestAnimationFrame(updateConsent);
-    }
+    // Reset reading and agreement for the displayed terms.
+    if (!accepted) resetConsent();
   }
   function hideSetup() {
     $("#mcp-dialog").hidden = true;
@@ -100,7 +104,14 @@
   };
   $("#mcp-close").onclick = hideSetup;
   for (const selector of ["#language-select", "#consent-language-select"]) $(selector).onchange = async event => {
-    await i18n.setLocale(event.target.value);
+    const current = ++languageRevision;
+    languagePending = true;
+    if (!accepted) resetConsent();
+    try { await i18n.setLocale(event.target.value); }
+    catch (_) { if (current === languageRevision) languageOptions(); }
+    if (current !== languageRevision) return;
+    languagePending = false;
+    if (!accepted) resetConsent();
     if (native) send({action: "setLanguage", preference: i18n.preference});
   };
   $("#consent-text").addEventListener("scroll", updateConsent);
@@ -119,7 +130,7 @@
     declined = true;
     updateConsent();
     $("#consent-declined").hidden = false;
-    // Browsers may refuse to close a tab they did not open. Keep its gate closed.
+    // Request tab closure; a browser that keeps the tab open continues showing the declined state.
     window.close();
   };
   document.addEventListener("keydown", event => {

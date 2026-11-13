@@ -1,21 +1,21 @@
-// Home Screen Organizer app. Every change goes through /api/op on the server, which edits the draft as
-// one undoable step and returns the new view; nothing reaches the phone until Apply.
+// Screen Organizer edits local drafts through /api/op and returns an undoable view.
+// Apply and Restore write layouts to the device after creating a backup.
 "use strict";
 
 const t = (key, params) => globalThis.ScreenOrganizerI18n?.t(key, params) || key;
 const number = value => ScreenOrganizerI18n.formatNumber(value);
 
-// The launcher delivers a bootstrap credential in the fragment, never in HTML
-// or a request URL. Remove it before making requests or wiring the rest of the UI.
+// Read the launcher credential from the fragment and remove the fragment.
+// Authenticate with /v1/authenticate; reloads reuse the HttpOnly session cookie.
 const authentication = (async () => {
   const token = new URLSearchParams(location.hash.slice(1)).get("token");
   if (location.hash) history.replaceState(null, "", location.pathname + location.search);
-  if (!token) return; // a reload can reuse the HttpOnly session cookie
+  if (!token) return;
   const response = await fetch("/v1/authenticate", {
     method: "POST", headers: { "X-Token": token }, credentials: "same-origin",
   });
-  if (!response.ok) throw new Error(t("editor.authenticationFailed"));
-})();
+  if (!response.ok) return {code: "invalid_credentials"};
+})().catch(() => ({code: "invalid_credentials"}));
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, text) => {
@@ -102,7 +102,13 @@ let query = "";
 
 async function api(path, body) {
   await globalThis.ScreenOrganizerOnboarding?.ready;
-  await authentication;
+  const authenticationFailure = await authentication;
+  if (authenticationFailure) {
+    await globalThis.ScreenOrganizerI18n?.ready;
+    const error = new Error(t("editor.authenticationFailed"));
+    error.code = authenticationFailure.code;
+    throw error;
+  }
   if (V && V.read_only && ["/api/apply", "/api/restore"].includes(path)) {
     throw new Error(t("editor.readOnly"));
   }
