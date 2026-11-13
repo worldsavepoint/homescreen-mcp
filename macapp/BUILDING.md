@@ -208,9 +208,12 @@ required. The launcher selects `arm64` or `x86_64` from the Mac's native archite
 
 MCPB stdio configuration runs `/bin/sh` with the extracted `server/launch.sh`.
 The manifest configures `HOMESCREEN_READ_ONLY=1`; the launcher defaults to that value
-when it is unset and preserves an explicit environment setting. Configure
-`HOMESCREEN_READ_ONLY=0` in the client when enabling write tools. Existing
-`HOMESCREEN_DATA` settings and data directories continue to apply.
+when it is unset and preserves an explicit environment setting. To enable MCP
+Apply and Restore, configure both `HOMESCREEN_READ_ONLY=0` and
+`HOMESCREEN_ALLOW_APPLY=1` in the client, then reconnect to restart the server.
+Before Apply, review `diff` and supply its latest `apply_token`; Restore takes the
+selected backup name. Existing `HOMESCREEN_DATA` settings and data directories
+continue to apply. See [write controls](../docs/MCP.md#data-and-write-controls).
 
 To assemble a bundle from the two downloaded native Actions artifacts:
 
