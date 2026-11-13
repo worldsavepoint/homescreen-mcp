@@ -90,27 +90,7 @@ jobs:
           codesign --verify --deep --strict "$APP"
           hdiutil verify build/"$BUILD_ARCH"/home-screen-organizer-*.dmg
       - name: Check packaged MCP initialization and tools
-        run: |
-          .venv/bin/python - <<'PYTHON'
-          import asyncio
-          import os
-          from pathlib import Path
-          from mcp import ClientSession
-          from mcp.client.stdio import StdioServerParameters, stdio_client
-          async def check():
-              engine = Path("build", os.environ["BUILD_ARCH"], "Home Screen Organizer.app/Contents/Resources/engine/engine").resolve()
-              parameters = StdioServerParameters(command=str(engine), args=["mcp"], env={
-                  **os.environ, "HOMESCREEN_READ_ONLY": "1",
-                  "HOMESCREEN_DATA": str(Path(os.environ["RUNNER_TEMP"], "mcp-check")),
-              })
-              async with stdio_client(parameters) as (read, write):
-                  async with ClientSession(read, write) as session:
-                      info = await session.initialize()
-                      assert info.server_info.name == "ios-homescreen-mcp"
-                      tools = await session.list_tools()
-                      assert {"read_phone", "show_layout", "move", "diff"} <= {t.name for t in tools.tools}
-          asyncio.run(check())
-          PYTHON
+        run: python macapp/check_mcp.py -- "build/$BUILD_ARCH/Home Screen Organizer.app/Contents/Resources/engine/engine" mcp
       - name: Assemble release archives and checksums
         run: |
           python macapp/release.py package --arch "$BUILD_ARCH"
@@ -126,10 +106,93 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  assemble:
+    name: Assemble standalone MCP distribution
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: home-screen-organizer-macos-*
+          path: artifacts
+          merge-multiple: false
+      - name: Verify native archives and assemble MCP bundle
+        env:
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          python macapp/release.py collect --tag "v$VERSION" --input-dir "$PWD/artifacts" --output-dir "$PWD/release"
+          python macapp/mcp_bundle.py --assets-dir "$PWD/release" --output-dir "$PWD/release" --repository "$REPOSITORY"
+          cd release
+          sha256sum --check SHA256SUMS.txt
+          python -m zipfile -e home-screen-organizer-*-macos.mcpb "$RUNNER_TEMP/mcpb-manifest"
+      - name: Validate official MCPB manifest and Registry metadata
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/mcpb" @anthropic-ai/mcpb@2.1.2
+          "$RUNNER_TEMP/mcpb/node_modules/.bin/mcpb" validate "$RUNNER_TEMP/mcpb-manifest/manifest.json"
+          curl --fail --location --retry 3 https://github.com/modelcontextprotocol/registry/releases/download/v1.8.9/mcp-publisher_linux_amd64.tar.gz -o "$RUNNER_TEMP/mcp-publisher.tar.gz"
+          echo "4d527ca8f1ced0394c962dc925c2a4a4addef441cbefd62501c875e9481823a8  $RUNNER_TEMP/mcp-publisher.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/publisher"
+          tar -xzf "$RUNNER_TEMP/mcp-publisher.tar.gz" -C "$RUNNER_TEMP/publisher" mcp-publisher
+          "$RUNNER_TEMP/publisher/mcp-publisher" validate "$PWD/release/server.json"
+      - name: Upload complete distribution
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: home-screen-organizer-distribution
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  mcp-bundle:
+    name: Native standalone MCP bundle (${{ matrix.arch }})
+    needs: assemble
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    env:
+      BUILD_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: home-screen-organizer-distribution
+          path: release
+      - name: Extract and initialize the native bundled engine
+        run: |
+          test "$(uname -m)" = "$BUILD_ARCH"
+          cd release
+          shasum -a 256 --check SHA256SUMS.txt
+          ditto -x -k home-screen-organizer-*-macos.mcpb "$RUNNER_TEMP/mcpb"
+          cd ..
+          lipo "$RUNNER_TEMP/mcpb/server/$BUILD_ARCH/engine" -verify_arch "$BUILD_ARCH"
+          codesign --verify --deep --strict "$RUNNER_TEMP/mcpb/server/$BUILD_ARCH/engine"
+          python macapp/check_mcp.py -- /bin/sh "$RUNNER_TEMP/mcpb/server/launch.sh"
+
   release:
     name: Publish versioned release
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs: test
+    needs: [test, mcp-bundle]
+    outputs:
+      version: ${{ needs.test.outputs.version }}
     concurrency:
       group: publish-${{ github.repository }}-${{ needs.test.outputs.version }}
       cancel-in-progress: false
@@ -143,15 +206,51 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: home-screen-organizer-macos-*
-          path: artifacts
-          merge-multiple: false
+          name: home-screen-organizer-distribution
+          path: release
       - name: Verify assets and publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: v${{ needs.test.outputs.version }}
           RELEASE_TARGET: ${{ github.sha }}
+        run: bash macapp/publish_release.sh "$PWD/release" "$PWD/macapp/RELEASE_NOTES.md"
+
+  registry:
+    name: Publish official MCP Registry package
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+    concurrency:
+      group: registry-${{ github.repository }}-${{ needs.release.outputs.version }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read metadata from the published release
+        id: metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: v${{ needs.release.outputs.version }}
         run: |
-          python3 macapp/release.py collect --tag "$RELEASE_TAG" --input-dir "$PWD/artifacts" --output-dir "$PWD/release"
-          bash macapp/publish_release.sh "$PWD/release" "$PWD/macapp/RELEASE_NOTES.md"
+          HAS_METADATA=$(gh release view "$RELEASE_TAG" --json assets --jq '[.assets[].name] | index("server.json") != null')
+          echo "available=$HAS_METADATA" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_METADATA" = true ]; then
+            mkdir released
+            gh release download "$RELEASE_TAG" --pattern server.json --dir released
+          else
+            echo "Retained release has no standalone MCP package metadata."
+          fi
+      - name: Verify pinned publisher and publish through OIDC
+        if: steps.metadata.outputs.available == 'true'
+        run: |
+          curl --fail --location --retry 3 https://github.com/modelcontextprotocol/registry/releases/download/v1.8.9/mcp-publisher_linux_amd64.tar.gz -o "$RUNNER_TEMP/mcp-publisher.tar.gz"
+          echo "4d527ca8f1ced0394c962dc925c2a4a4addef441cbefd62501c875e9481823a8  $RUNNER_TEMP/mcp-publisher.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/publisher"
+          tar -xzf "$RUNNER_TEMP/mcp-publisher.tar.gz" -C "$RUNNER_TEMP/publisher" mcp-publisher
+          MCP_PUBLISHER="$RUNNER_TEMP/publisher/mcp-publisher" bash macapp/publish_registry.sh "$PWD/released/server.json"

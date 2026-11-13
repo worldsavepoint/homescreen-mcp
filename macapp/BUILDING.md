@@ -135,9 +135,9 @@ a native Intel Mac. Use a fresh virtual environment for each release build.
 
 ## Signing and build outputs
 
-The build script applies **ad-hoc signing** (`codesign --sign -`) to the app.
-For Developer ID distribution, sign with the publisher's certificate and submit
-the release for Apple notarization using the publisher's Apple credentials.
+The build script applies **ad-hoc signing** (`codesign --sign -`) to the app and
+native engine. The standalone MCPB preserves the native signatures and is unsigned
+as an outer archive. Release checksums cover the complete downloaded files.
 
 The Swift package includes a request/URL validation harness. A full `build.sh` run
 creates `build/<arch>/Home Screen Organizer.app` and
@@ -163,7 +163,56 @@ permissions in the ZIP, and produces the following in `build/release/<arch>/`:
 
 Use `--arch arm64` or `--arch x86_64` to select a completed native build explicitly.
 CI collects both architecture artifacts, verifies all four archive hashes, and
-creates one shared `SHA256SUMS.txt` for the published release.
+creates one shared `SHA256SUMS.txt` for the published release. The assembly job
+then adds the standalone MCPB and Registry metadata to that manifest.
+
+## Standalone MCP bundle
+
+The standalone `home-screen-organizer-<version>-macos.mcpb` contains both native
+engines, their bundled dependencies, the MIT license and per-architecture license
+and dependency records. It requires macOS 14 or later. An MCPB-compatible client
+can install this archive directly; Python and a separate app installation are not
+required. The launcher selects `arm64` or `x86_64` from the Mac's native architecture.
+
+MCPB stdio configuration runs `/bin/sh` with the extracted `server/launch.sh`.
+The manifest configures `HOMESCREEN_READ_ONLY=1`; the launcher defaults to that value
+when it is unset and preserves an explicit environment setting. Configure
+`HOMESCREEN_READ_ONLY=0` in the client when enabling write tools. Existing
+`HOMESCREEN_DATA` settings and data directories continue to apply.
+
+To assemble a bundle from the two downloaded native Actions artifacts:
+
+```sh
+python3.12 macapp/release.py collect --input-dir artifacts --output-dir release
+python3.12 macapp/mcp_bundle.py --assets-dir release --output-dir release \
+  --repository worldsavepoint/ios-homescreen-organizer
+python3.12 macapp/release.py verify --input-dir release \
+  --repository worldsavepoint/ios-homescreen-organizer
+```
+
+`artifacts/` must contain the `home-screen-organizer-macos-arm64` and
+`home-screen-organizer-macos-x86_64` artifact directories, each with its native
+DMG, ZIP and checksum manifest. Assembly verifies every source archive before
+writing output, checks app versions and architecture labels, and copies native
+engine bytes, modes and relative symlinks into the MCPB. It rejects unsafe ZIP
+paths, unsupported file types and escaping, dangling or cyclic engine symlinks.
+
+The output adds these files beside the four native archives:
+
+- `home-screen-organizer-<version>-macos.mcpb`
+- `server.json`, identifying `io.github.worldsavepoint/home-screen-organizer` and
+  the exact versioned GitHub MCPB URL and SHA256.
+- `SHA256SUMS.txt`, covering all four native archives, the MCPB and `server.json`.
+
+To check a locally extracted bundle on the matching native Mac:
+
+```sh
+ditto -x -k release/home-screen-organizer-<version>-macos.mcpb extracted-mcpb
+python3.12 macapp/check_mcp.py -- /bin/sh "$PWD/extracted-mcpb/server/launch.sh"
+```
+
+The check initializes the server and lists tools with a startup deadline and a
+fresh temporary read-only data directory, then terminates the server.
 
 ## Automatic releases
 
@@ -172,38 +221,41 @@ Pull requests and pushes to `main` run a native CI matrix:
 - `macos-15` builds and validates Apple silicon (`arm64`).
 - `macos-15-intel` builds and validates Intel (`x86_64`).
 
-Each job checks the layout, draft, backup, editor and launcher modules, builds the
-Mac app, starts the packaged engine, completes a packaged MCP initialization and
-tool-list handshake, verifies Mach-O architectures and signatures, and checks
-archive checksums. The installable Actions artifacts are
-`home-screen-organizer-macos-arm64` and
+Each build checks the functional modules, packaged MCP initialization and tool
+discovery, Mach-O architectures, ad-hoc signatures and archive checksums. The
+installable Actions artifacts are `home-screen-organizer-macos-arm64` and
 `home-screen-organizer-macos-x86_64`.
+
+After both builds, CI assembles the complete distribution and validates its MCPB
+manifest and Registry metadata with the official tools. It uploads
+`home-screen-organizer-distribution`, then extracts that MCPB on both native Mac
+architectures and repeats initialization and tool discovery. These final startup
+checks use only Python's standard library and the assembled engines.
 
 To publish a new version:
 
-1. Set `project.version` in `pyproject.toml` to a new version, such as `1.2.0`.
-2. Merge the contribution into `main`.
-3. After both architectures complete validation and packaging, CI creates the
-   matching `v1.2.0` tag at the exact built commit and publishes both DMGs, both
-   ZIPs and one shared `SHA256SUMS.txt` to GitHub Releases.
+1. Set `project.version` in `pyproject.toml` to the new SemVer release version.
+2. Merge the contribution into `main`, or push its matching `v<version>` tag.
+3. After both native builds and standalone MCPB checks pass, CI publishes both
+   DMGs, both ZIPs, the dual-architecture MCPB, `server.json` and the shared
+   `SHA256SUMS.txt` in a GitHub release targeted at the exact built commit.
+4. A following job validates and publishes the released `server.json` to the
+   official MCP Registry using GitHub OIDC authentication.
 
-Version `1.2.0` adds Intel support as a SemVer minor release. Both architecture
-builds and their complete archive pairs are required for publication.
+Each project version has one published release. Subsequent builds retain a
+published release's assets; CI resumes uploads and publication for an existing
+draft. The Registry job reads metadata from the published release, compares the
+exact existing Registry version's name, version and package metadata, and skips
+matching publications. Conflicting metadata requires a new project version.
+Retained releases without standalone MCP metadata skip Registry publication.
 
-Each project version has one published release. Increment `project.version` for
-the next release; subsequent builds of an already published version retain that
-release. CI resumes asset uploads and publication for an existing draft.
+The Registry job has `id-token: write` and `contents: read`. It verifies the
+pinned official `mcp-publisher` v1.8.9 Linux archive's SHA256 before extracting the
+publisher and authenticating with `login github-oidc`. GitHub release write
+permission is scoped to the separate release job. All GitHub actions are pinned
+to commits.
 
-Pushing a matching version tag also runs the build and publication workflow.
-Versions such as `1.2.0-beta.1` produce GitHub prereleases.
-
-The app's standard macOS version fields contain the numeric release core, such as
-`1.2.0`. `HomeScreenOrganizerReleaseVersion` retains the complete release version, including
-the prerelease suffix; archive filenames and Git tags use this complete version.
-
-CI uses native macOS arm64 and x86_64 runners, Python 3.12, hash-checked
-dependencies and commit-pinned GitHub actions. App builds use ad-hoc signing.
-The release job receives repository contents write permission to publish its assets.
-
-Original application and packaging by Jonathan Kats, distributed under the MIT
-license. This fork maintains its release workflow and compatibility changes.
+Versions such as `1.2.0-beta.1` produce GitHub prereleases. The app's standard
+macOS version fields contain the numeric core (`1.2.0`), while
+`HomeScreenOrganizerReleaseVersion`, archive names, Registry metadata and Git tags
+retain the complete version.

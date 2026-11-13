@@ -1,6 +1,7 @@
 """Assemble versioned macOS release assets from a completed app build."""
 import argparse
 import hashlib
+import json
 from pathlib import Path
 import plistlib
 import platform
@@ -75,6 +76,32 @@ def collect(input_dir, output_dir, version):
     (output_dir / "SHA256SUMS.txt").write_text("".join(lines))
 
 
+def verify_distribution(folder, version, repository):
+    bundle_name = f"home-screen-organizer-{version}-macos.mcpb"
+    expected = {f"home-screen-organizer-{version}-macos-{arch}.{extension}"
+                for arch in ARCHITECTURES for extension in ("dmg", "zip")}
+    expected.update((bundle_name, "server.json"))
+    seen = set()
+    for line in (folder / "SHA256SUMS.txt").read_text().splitlines():
+        digest, name = line.split("  ")
+        if name not in expected or name in seen or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("Check the complete release checksum manifest")
+        with (folder / name).open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != digest:
+                raise ValueError(f"Archive checksum differs: {name}")
+        seen.add(name)
+    if seen != expected:
+        raise ValueError("Supply checksums for all release assets")
+    metadata = json.loads((folder / "server.json").read_text())
+    with (folder / bundle_name).open("rb") as stream:
+        bundle_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+    package = {"registryType": "mcpb", "identifier": f"https://github.com/{repository}/releases/download/v{version}/{bundle_name}",
+               "fileSha256": bundle_hash, "transport": {"type": "stdio"}}
+    if (metadata["name"] != "io.github.worldsavepoint/home-screen-organizer"
+            or metadata["version"] != version or metadata["packages"] != [package]):
+        raise ValueError("Registry metadata differs from the release bundle, repository or version")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -89,6 +116,10 @@ def main():
     collect_command.add_argument("--tag")
     collect_command.add_argument("--input-dir", type=Path, required=True)
     collect_command.add_argument("--output-dir", type=Path, required=True)
+    verify_command = commands.add_parser("verify", help="Verify the complete standalone distribution and Registry metadata")
+    verify_command.add_argument("--tag")
+    verify_command.add_argument("--input-dir", type=Path, required=True)
+    verify_command.add_argument("--repository", required=True)
     args = parser.parse_args()
     try:
         version = project_version(args.tag)
@@ -98,6 +129,8 @@ def main():
             package(build_dir.resolve(), output_dir.resolve(), version, args.arch)
         elif args.command == "collect":
             collect(args.input_dir.resolve(), args.output_dir.resolve(), version)
+        elif args.command == "verify":
+            verify_distribution(args.input_dir.resolve(), version, args.repository)
         print(version)
     except (ValueError, KeyError, OSError, subprocess.CalledProcessError) as exc:
         parser.exit(1, f"{exc}\n")

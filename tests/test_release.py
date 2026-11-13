@@ -151,3 +151,54 @@ def test_collect_checks_each_archive_before_copying(tmp_path):
     result = release("collect", "--input-dir", incoming, "--output-dir", output)
     assert result.returncode != 0
     assert not output.exists()
+
+
+def distribution(tmp_path):
+    import json
+    incoming = artifact_set(tmp_path)
+    output = tmp_path / "release"
+    result = release("collect", "--input-dir", incoming, "--output-dir", output)
+    assert result.returncode == 0, result.stderr
+    bundle = output / f"home-screen-organizer-{VERSION}-macos.mcpb"
+    bundle.write_bytes(b"bundle fixture")
+    metadata = {"name": "io.github.worldsavepoint/home-screen-organizer", "version": VERSION, "packages": [{
+        "registryType": "mcpb", "identifier": f"https://github.com/example/project/releases/download/v{VERSION}/{bundle.name}",
+        "fileSha256": hashlib.sha256(bundle.read_bytes()).hexdigest(), "transport": {"type": "stdio"}}]}
+    (output / "server.json").write_text(json.dumps(metadata))
+    refresh_distribution_checksums(output)
+    return output
+
+
+def refresh_distribution_checksums(output):
+    (output / "SHA256SUMS.txt").write_text("".join(
+        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+        for path in sorted(output.iterdir()) if path.name != "SHA256SUMS.txt"))
+
+
+def test_verify_distribution_checks_all_assets_and_package_metadata(tmp_path):
+    output = distribution(tmp_path)
+    result = release("verify", "--input-dir", output, "--repository", "example/project", "--tag", f"v{VERSION}")
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("damage", ["missing-checksum", "duplicate-checksum", "hash", "url", "version", "name"])
+def test_verify_rejects_incomplete_checksums_and_mismatched_registry_metadata(tmp_path, damage):
+    import json
+    output = distribution(tmp_path)
+    if damage in ("missing-checksum", "duplicate-checksum"):
+        manifest = output / "SHA256SUMS.txt"
+        lines = manifest.read_text().splitlines()
+        manifest.write_text("\n".join(lines[1:] if damage == "missing-checksum" else lines + [lines[0]]) + "\n")
+    else:
+        metadata_path = output / "server.json"
+        metadata = json.loads(metadata_path.read_text())
+        if damage == "hash":
+            metadata["packages"][0]["fileSha256"] = "f" * 64
+        elif damage == "url":
+            metadata["packages"][0]["identifier"] = "https://example.com/other.mcpb"
+        else:
+            metadata[damage] = "different"
+        metadata_path.write_text(json.dumps(metadata))
+        refresh_distribution_checksums(output)
+    result = release("verify", "--input-dir", output, "--repository", "example/project", "--tag", f"v{VERSION}")
+    assert result.returncode != 0

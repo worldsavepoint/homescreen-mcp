@@ -5,11 +5,13 @@ set -euo pipefail
 : "${GH_REPO:?Set GH_REPO}" "${RELEASE_TAG:?Set RELEASE_TAG}" "${RELEASE_TARGET:?Set RELEASE_TARGET}"
 assets_dir=${1:?Supply the release assets directory}
 notes_file=$(cd "$(dirname "${2:?Supply the release notes file}")" && pwd)/$(basename "$2")
+python3 "$(dirname "$0")/release.py" verify --tag "$RELEASE_TAG" --input-dir "$assets_dir" --repository "$GH_REPO"
 cd "$assets_dir"
 assets=("./home-screen-organizer-${RELEASE_TAG#v}-macos-arm64.dmg"
         "./home-screen-organizer-${RELEASE_TAG#v}-macos-arm64.zip"
         "./home-screen-organizer-${RELEASE_TAG#v}-macos-x86_64.dmg"
-        "./home-screen-organizer-${RELEASE_TAG#v}-macos-x86_64.zip" "SHA256SUMS.txt")
+        "./home-screen-organizer-${RELEASE_TAG#v}-macos-x86_64.zip"
+        "./home-screen-organizer-${RELEASE_TAG#v}-macos.mcpb" "server.json" "SHA256SUMS.txt")
 for asset in "${assets[@]}"; do test -f "$asset"; done
 shasum -a 256 --check SHA256SUMS.txt
 

@@ -1,0 +1,83 @@
+"""Check a packaged stdio MCP server using initialization and tool discovery only."""
+import argparse
+import json
+import os
+import selectors
+import subprocess
+import tempfile
+import time
+
+
+def check(command, timeout):
+    with tempfile.TemporaryDirectory(prefix="home-screen-mcp-check-") as data:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   env={**os.environ, "HOMESCREEN_READ_ONLY": "1", "HOMESCREEN_DATA": data})
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
+        pending = b""
+
+        def send(message):
+            process.stdin.write(json.dumps({"jsonrpc": "2.0", **message}).encode() + b"\n")
+            process.stdin.flush()
+
+        def receive(identifier):
+            nonlocal pending
+            while True:
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    message = json.loads(line)
+                    if message.get("id") == identifier:
+                        if "error" in message:
+                            raise ValueError(f"MCP request failed: {message['error']}")
+                        return message["result"]
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise ValueError("MCP startup deadline exceeded")
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    raise ValueError("MCP server closed before completing startup")
+                pending += chunk
+
+        try:
+            send({"id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": {"name": "home-screen-organizer-distribution-check", "version": "1.0.0"}}})
+            result = receive(1)
+            if result["serverInfo"]["name"] != "ios-homescreen-mcp":
+                raise ValueError("Unexpected MCP server identity")
+            send({"method": "notifications/initialized"})
+            send({"id": 2, "method": "tools/list", "params": {}})
+            tools = {tool["name"] for tool in receive(2)["tools"]}
+            if not {"read_phone", "show_layout", "move", "diff"} <= tools:
+                raise ValueError("Required MCP tools are missing")
+            print("ios-homescreen-mcp initialized; required tools discovered")
+        finally:
+            selector.close()
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            process.stdin.close()
+            process.stdout.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--timeout", type=float, default=45)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not command or args.timeout <= 0:
+        parser.error("Supply a server command and a positive timeout")
+    try:
+        check(command, args.timeout)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        parser.exit(1, f"{exc}\n")
+
+
+if __name__ == "__main__":
+    main()
