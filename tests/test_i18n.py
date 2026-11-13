@@ -1,0 +1,245 @@
+"""Shared translations resolve languages, format values and validate contributions."""
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+LOCALES = ROOT / "homescreen/web/locales"
+
+
+def test_catalogs_cover_supported_languages():
+    assert (LOCALES / "manifest.json").is_file(), "Shared locale manifest is required"
+    manifest = json.loads((LOCALES / "manifest.json").read_text())
+    assert manifest["default"] == "en"
+    assert {item["code"] for item in manifest["languages"]} == {
+        "en", "zh-Hans", "zh-Hant", "es", "de", "fr", "ru", "pt"
+    }
+    source = json.loads((LOCALES / "en.json").read_text())
+    for language in manifest["languages"]:
+        catalog = json.loads((LOCALES / (language["code"] + ".json")).read_text())
+        assert catalog.keys() == source.keys()
+        assert all(isinstance(value, str) and value.strip() for value in catalog.values())
+
+
+def run_browser(body, setup=""):
+    executable = shutil.which("node")
+    if executable is None:
+        pytest.skip("Node unavailable")
+    source = ROOT / "homescreen/web/i18n.js"
+    assert source.is_file(), "Shared browser translator is required"
+    harness = r'''
+const fs = require("fs"), vm = require("vm"), assert = require("assert/strict");
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+const manifest = {default: "en", languages: [
+ {code:"en",name:"English",aliases:["en"]},
+ {code:"zh-Hans",name:"简体中文",aliases:["zh","zh-CN","zh-SG"]},
+ {code:"zh-Hant",name:"繁體中文",aliases:["zh-TW","zh-HK","zh-MO"]},
+ ...["es","de","fr","ru","pt"].map(code => ({code,name:code,aliases:[code]}))
+]};
+const catalogs = {
+ "en": {hello:"Hello {name}", missing:"English fallback", html:"{name}", empty:"English empty"},
+ "de": {hello:"Hallo {name}", html:"{name}", empty:""},
+ "fr": {hello:"Bonjour {name}"}
+};
+const stored = new Map(), calls = [];
+const context = {URL, Intl, Date, console,
+ navigator:{languages:["de-DE"]},
+ localStorage:{getItem:key=>stored.get(key) || null, setItem:(key,value)=>stored.set(key,value)},
+ fetch:async url=>{ const file = String(url).split("/").pop(); calls.push(file);
+   return {ok:true,json:async()=>file === "manifest.json" ? manifest : (catalogs[file.slice(0,-5)] || {})}; }
+};
+context.window = context;
+eval(input.setup);
+vm.createContext(context); vm.runInContext(input.source, context);
+(async()=>{ const i18n = context.ScreenOrganizerI18n; await i18n.ready;
+''' + body + r'''
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+    result = subprocess.run([executable, "-e", harness], input=json.dumps({"source": source.read_text(), "setup": setup}),
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_locale_resolution_uses_script_region_and_ordered_preferences():
+    run_browser('''
+for (const [request, expected] of [["zh-Hant-HK","zh-Hant"],["zh-CN","zh-Hans"],
+ ["zh_TW","zh-Hant"],["ZH-hans-cn","zh-Hans"],["zh-SG","zh-Hans"],
+ ["pt-BR","pt"],["ru-RU","ru"],["zz-ZZ","en"]]) {
+ assert.equal(i18n.resolveLocale(request, []), expected, request);
+}
+assert.equal(i18n.resolveLocale("system", ["zz-ZZ","fr-CA","de"]), "fr");
+assert.equal(i18n.resolveLocale("system", ["zh-Hant-HK","en"]), "zh-Hant");
+assert.equal(i18n.resolveLocale("system", ["zz-ZZ"]), "en");
+assert.equal(i18n.locale, "de");
+''')
+
+
+def test_catalog_fallback_interpolation_and_formatters():
+    run_browser('''
+assert.equal(i18n.t("hello", {name:"Synthetic Folder"}), "Hallo Synthetic Folder");
+assert.equal(i18n.t("missing"), "English fallback");
+assert.equal(i18n.t("unknown"), "unknown");
+assert.equal(i18n.t("empty"), "");
+assert.equal(i18n.t("hello"), "Hallo {name}");
+assert.equal(i18n.t("html", {name:"<b>data</b> $&"}), "<b>data</b> $&");
+assert.equal(i18n.formatNumber(1234.5), "1.234,5");
+assert.equal(i18n.formatDate(new Date(2026, 0, 2)), "2.1.2026");
+assert.ok(calls.every(file => /^(manifest|en|de)\\.json$/.test(file)));
+''')
+
+
+def test_language_changes_persist_and_notify_after_catalog_ready():
+    run_browser('''
+const observed = [];
+const unsubscribe = i18n.onChange(() => observed.push([i18n.locale, i18n.t("hello",{name:"X"})]));
+await i18n.setLocale("fr");
+assert.deepEqual(observed, [["fr", "Bonjour X"]]);
+assert.equal(i18n.preference, "fr");
+assert.ok([...stored.values()].includes("fr"));
+unsubscribe();
+await i18n.setLocale("en");
+assert.equal(observed.length, 1);
+await i18n.setLocale("system");
+assert.equal(i18n.preference, "system");
+assert.equal(i18n.locale, "de");
+''')
+
+
+def test_saved_language_preference_is_restored_on_startup():
+    run_browser('''
+assert.equal(i18n.preference, "fr");
+assert.equal(i18n.locale, "fr");
+assert.equal(i18n.t("hello", {name:"X"}), "Bonjour X");
+''', 'stored.set("screenOrganizer.language", "fr");')
+
+
+def test_translation_works_when_preference_storage_is_unavailable():
+    run_browser('''
+await i18n.setLocale("fr");
+assert.equal(i18n.locale, "fr");
+assert.equal(i18n.t("hello", {name:"X"}), "Bonjour X");
+''', '''context.localStorage = {
+getItem(){throw new Error("blocked");}, setItem(){throw new Error("blocked");}};''')
+
+
+def test_dom_translation_uses_text_and_declared_attributes():
+    run_browser('''
+const make = attributes => ({attributes, textContent:"", matches:()=>true,
+ getAttribute(name){return this.attributes[name] ?? null;},
+ setAttribute(name,value){this.attributes[name]=value;}, querySelectorAll:()=>[]});
+const root = make({"data-i18n":"missing", "data-i18n-title":"hello",
+ "data-i18n-placeholder":"missing", "data-i18n-aria-label":"missing"});
+i18n.translateDOM(root);
+assert.equal(root.textContent,"English fallback");
+assert.equal(root.attributes.title,"Hallo {name}");
+assert.equal(root.attributes.placeholder,"English fallback");
+assert.equal(root.attributes["aria-label"],"English fallback");
+''')
+
+
+def write_catalogs(folder, translation):
+    folder.mkdir(exist_ok=True)
+    (folder / "manifest.json").write_text(json.dumps({"default":"en", "languages":[
+        {"code":"en","name":"English","aliases":["en"]},
+        {"code":"de","name":"Deutsch","aliases":["de"]}]}))
+    (folder / "en.json").write_text(json.dumps({"greeting":"Hello {name}"}))
+    (folder / "de.json").write_text(json.dumps(translation))
+
+
+@pytest.mark.parametrize("translation,diagnostic", [
+    ({"greeting":"Hallo {person}"}, "placeholder"),
+    ({"greeting":7}, "string"),
+    ({}, "missing"),
+    ({"greeting":"Hallo {name}","extra":"x"}, "extra"),
+])
+def test_validator_rejects_incomplete_or_invalid_catalogs(tmp_path, translation, diagnostic):
+    checker = ROOT / "tools/check_translations.py"
+    assert checker.is_file(), "Translation validation command is required"
+    write_catalogs(tmp_path, translation)
+    result = subprocess.run([sys.executable, str(checker), "--locales", str(tmp_path)],
+                            capture_output=True, text=True)
+    assert result.returncode == 1
+    assert diagnostic in result.stderr.lower()
+
+
+def test_validator_checks_registration_and_accepts_valid_catalogs(tmp_path):
+    checker = ROOT / "tools/check_translations.py"
+    assert checker.is_file(), "Translation validation command is required"
+    write_catalogs(tmp_path, {"greeting":"Hallo {name}"})
+    command = [sys.executable, str(checker), "--locales", str(tmp_path)]
+    assert subprocess.run(command, capture_output=True).returncode == 0
+    (tmp_path / "fr.json").write_text('{}')
+    result = subprocess.run(command, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "unregistered" in result.stderr.lower()
+
+
+def test_translation_command_accepts_shipped_catalogs():
+    checker = ROOT / "tools/check_translations.py"
+    assert checker.is_file(), "Translation validation command is required"
+    result = subprocess.run([sys.executable, str(checker)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_unavailable_translation_uses_english_and_can_retry():
+    run_browser('''
+const originalFetch = context.fetch;
+context.fetch = async url => String(url).endsWith("fr.json") ? {ok:false} : originalFetch(url);
+await i18n.setLocale("fr");
+assert.equal(i18n.t("hello", {name:"X"}), "Hello X");
+context.fetch = originalFetch;
+await i18n.setLocale("fr");
+assert.equal(i18n.t("hello", {name:"X"}), "Bonjour X");
+''')
+
+
+def test_latest_language_selection_wins_catalog_loading_race():
+    run_browser('''
+const originalFetch = context.fetch;
+let release;
+context.fetch = url => String(url).endsWith("fr.json")
+ ? new Promise(resolve => {release = () => resolve({ok:true,json:async()=>catalogs.fr});})
+ : originalFetch(url);
+const first = i18n.setLocale("fr");
+await new Promise(resolve => setImmediate(resolve));
+await i18n.setLocale("en");
+release(); await first;
+assert.equal(i18n.locale, "en");
+assert.equal(i18n.preference, "en");
+assert.equal(i18n.t("hello", {name:"X"}), "Hello X");
+''')
+
+
+@pytest.mark.parametrize("mutation,diagnostic", [
+    (lambda path: (path / "de.json").unlink(), "missing registered"),
+    (lambda path: (path / "de.json").write_text('{"greeting":"A","greeting":"B"}'), "duplicate"),
+    (lambda path: (path / "manifest.json").write_text(json.dumps({
+        "default":"en", "languages":[
+            {"code":"en","name":"English","aliases":["en"]},
+            {"code":"de","name":"Deutsch","aliases":["en"]}]})), "alias"),
+])
+def test_validator_rejects_registration_and_duplicate_key_errors(tmp_path, mutation, diagnostic):
+    write_catalogs(tmp_path, {"greeting":"Hallo {name}"})
+    mutation(tmp_path)
+    result = subprocess.run([sys.executable, str(ROOT / "tools/check_translations.py"),
+                             "--locales", str(tmp_path)], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert diagnostic in result.stderr.lower()
+
+
+def test_package_data_includes_registered_catalogs():
+    import tomllib
+
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    patterns = config["tool"]["setuptools"]["package-data"]["homescreen"]
+    packaged = {path.relative_to(ROOT / "homescreen").as_posix()
+                for pattern in patterns for path in (ROOT / "homescreen").glob(pattern)
+                if path.is_file()}
+    manifest = json.loads((LOCALES / "manifest.json").read_text())
+    for name in ["manifest", *(item["code"] for item in manifest["languages"])]:
+        resource = f"web/locales/{name}.json"
+        assert resource in packaged
