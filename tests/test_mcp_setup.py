@@ -47,6 +47,7 @@ def generate(binary, executable):
     "/Applications/Home Screen Organizer.app/Contents/Resources/engine/engine",
     '/Applications/Organize "引用" \\ folder\'s.app/Contents/Resources/engine/engine',
     '/Applications/Line\nTab\tControl\x01.app/engine',
+    '/Applications/Example\x7f.app/engine',
 ])
 def test_client_formats_preserve_engine_and_read_only_environment(setup_binary, executable):
     output = generate(setup_binary, executable)

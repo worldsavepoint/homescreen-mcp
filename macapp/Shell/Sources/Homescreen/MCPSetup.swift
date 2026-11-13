@@ -15,6 +15,7 @@ struct MCPSetup {
 
     var codexTOML: String {
         let command = json(executablePath, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+            .replacingOccurrences(of: "\u{7f}", with: "\\u007f")
         return """
         [mcp_servers.ios-homescreen-mcp]
         command = \(command)
