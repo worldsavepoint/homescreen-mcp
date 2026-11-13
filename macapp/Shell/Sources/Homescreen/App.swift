@@ -3,12 +3,12 @@ import SwiftUI
 import WebKit
 
 @main
-struct HomescreenApp: App {
+struct HomeScreenOrganizerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var engine = Engine()
 
     var body: some Scene {
-        Window("Homescreen", id: "main") {
+        Window("Home Screen Organizer", id: "main") {
             RootView()
                 .environmentObject(engine)
                 .frame(minWidth: 1000, minHeight: 680)
@@ -31,18 +31,28 @@ struct HomescreenApp: App {
                     try? FileManager.default.createDirectory(at: Engine.dataFolder, withIntermediateDirectories: true)
                     NSWorkspace.shared.open(Engine.dataFolder)
                 }
-                Button("Copy MCP Setup Command") {
-                    let cmd = "claude mcp add homescreen -- \"\(Engine.executable.path)\" mcp"
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(cmd, forType: .string)
+                Menu("MCP") {
+                    let setup = MCPSetup(executablePath: Engine.executable.path)
+                    Button("Copy Launch Command") { copy(setup.launchCommand) }
+                    Button("Copy Cursor / Claude JSON") { copy(setup.cursorClaudeJSON) }
+                    Button("Copy Codex TOML") { copy(setup.codexTOML) }
+                    Button("Copy VS Code / Copilot JSON") { copy(setup.vscodeJSON) }
                 }
             }
             CommandGroup(replacing: .help) {
-                Button("Homescreen on GitHub") {
+                Button("Home Screen Organizer on GitHub") {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/worldsavepoint/ios-homescreen-organizer")!)
+                }
+                Button("Original Homescreen by Jonathan Kats") {
                     NSWorkspace.shared.open(URL(string: "https://github.com/kats1123/homescreen-mcp")!)
                 }
             }
         }
+    }
+
+    private func copy(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
     }
 }
 
@@ -65,14 +75,14 @@ struct RootView: View {
             VStack(spacing: 14) {
                 AppMark().frame(width: 56, height: 56)
                 ProgressView().controlSize(.small)
-                Text("Starting Homescreen…").foregroundStyle(.secondary)
+                Text("Starting Home Screen Organizer…").foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .ready(let url):
             WebView(url: url).ignoresSafeArea()
         case .failed(let message):
             VStack(alignment: .leading, spacing: 12) {
-                Text("Homescreen couldn't start").font(.title2.bold())
+                Text("Home Screen Organizer couldn't start").font(.title2.bold())
                 ScrollView {
                     Text(message).font(.system(.footnote, design: .monospaced)).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -133,24 +143,27 @@ struct WebView: NSViewRepresentable {
         let origin: URL
         init(origin: URL) { self.origin = origin }
 
-        private func isLocal(_ url: URL?) -> Bool {
-            url?.host == origin.host && url?.port == origin.port
-        }
-
         // links to anything but the engine open in the default browser
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            if let url = action.request.url, !isLocal(url), url.scheme != "about", url.scheme != "data" {
+            guard let url = action.request.url else { decisionHandler(.cancel); return }
+            switch NavigationPolicy.destination(url, origin: origin) {
+            case .browser:
                 NSWorkspace.shared.open(url)
                 decisionHandler(.cancel)
-            } else {
+            case .embedded:
                 decisionHandler(.allow)
+            case .blocked:
+                decisionHandler(.cancel)
             }
         }
 
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-            if let url = action.request.url { NSWorkspace.shared.open(url) }
+            if let url = action.request.url,
+               NavigationPolicy.destination(url, origin: origin) != .blocked {
+                NSWorkspace.shared.open(url)
+            }
             return nil
         }
 

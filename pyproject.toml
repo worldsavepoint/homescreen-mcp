@@ -1,6 +1,6 @@
 [project]
-name = "homescreen-mcp"
-version = "1.1.0"
+name = "home-screen-organizer"
+version = "1.2.0"
 description = "Arrange your iPhone Home Screen from your Mac: drag-and-drop app, CLI and MCP server. Keeps App Library apps in the App Library."
 readme = "README.md"
 license = "MIT"
@@ -16,25 +16,30 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Utilities",
 ]
-dependencies = ["pymobiledevice3>=11", "mcp>=2,<3", "pillow", "starlette>=0.40", "uvicorn>=0.30"]
+dependencies = ["pymobiledevice3==11.52.1", "mcp==2.3.0", "pillow==13.0.0", "starlette==1.10.0", "uvicorn==0.54.0"]
 
 [project.optional-dependencies]
-dev = ["pytest", "httpx"]
+dev = ["pytest==9.2.0", "httpx==0.28.1"]
+build = ["pyinstaller==6.22.3", "setuptools==84.2.1", "wheel==0.48.0", "pip==26.2.2"]
 
 [project.urls]
-Homepage = "https://github.com/kats1123/homescreen-mcp"
-Issues = "https://github.com/kats1123/homescreen-mcp/issues"
+Homepage = "https://github.com/worldsavepoint/ios-homescreen-organizer"
+Issues = "https://github.com/worldsavepoint/ios-homescreen-organizer/issues"
 
 [project.scripts]
+home-screen-organizer = "homescreen.cli:main"
+home-screen-mcp = "homescreen.server:main"
+ios-homescreen-organizer = "homescreen.cli:main"
+ios-homescreen-mcp = "homescreen.server:main"
 homescreen = "homescreen.cli:main"
 homescreen-mcp = "homescreen.server:main"
 
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["homescreen"]
 
 [tool.setuptools.package-data]
-homescreen = ["web/*"]
+homescreen = ["web/*", "simulator_icon.m"]

@@ -1,6 +1,18 @@
-// Homescreen app. Every change goes through /api/op on the server, which edits the draft as
+// Home Screen Organizer app. Every change goes through /api/op on the server, which edits the draft as
 // one undoable step and returns the new view; nothing reaches the phone until Apply.
 "use strict";
+
+// The launcher delivers a bootstrap credential in the fragment, never in HTML
+// or a request URL. Remove it before making requests or wiring the rest of the UI.
+const authentication = (async () => {
+  const token = new URLSearchParams(location.hash.slice(1)).get("token");
+  if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+  if (!token) return; // a reload can reuse the HttpOnly session cookie
+  const response = await fetch("/v1/authenticate", {
+    method: "POST", headers: { "X-Token": token }, credentials: "same-origin",
+  });
+  if (!response.ok) throw new Error("Could not authenticate. Reopen Home Screen Organizer from its launcher.");
+})();
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, text) => {
@@ -19,17 +31,22 @@ let query = "";
 // ---- server ----------------------------------------------------------------------------
 
 async function api(path, body) {
+  await authentication;
+  if (V && V.read_only && ["/api/apply", "/api/restore"].includes(path)) {
+    throw new Error("Read-only mode: device writes are disabled.");
+  }
   const opts = body === undefined ? {} : {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Token": window.HS_TOKEN },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   };
-  const r = await fetch(path, opts);
+  const r = await fetch(path, { credentials: "same-origin", ...opts });
   let data = {};
   try { data = await r.json(); } catch (_) { /* empty body */ }
   if (!r.ok) {
     if (data.view) setView(data.view);
-    throw new Error(data.error || `request failed (${r.status})`);
+    const message = typeof data.error === "string" ? data.error : data.error?.message;
+    throw new Error(message || `request failed (${r.status})`);
   }
   return data;
 }
@@ -158,6 +175,7 @@ function setView(v) {
 }
 
 function render() {
+  $("#read-only-notice").hidden = !(V && V.read_only);
   const loaded = V && V.loaded;
   $("#empty").hidden = loaded;
   $("#board").hidden = !loaded;
@@ -415,7 +433,7 @@ function renderFooter() {
     if (d.gaps_changed) { add(" · "); add(`${d.gaps_changed}`, true); add(" gap change" + (d.gaps_changed > 1 ? "s" : "")); }
   }
   if (d.problems.length) s.appendChild(el("span", "problem", ` · ${d.problems.length} problem${d.problems.length > 1 ? "s" : ""}`));
-  btn.disabled = !d.items_moved && d.pages_before === d.pages_after && !d.gaps_changed;
+  btn.disabled = V.read_only || (!d.items_moved && d.pages_before === d.pages_after && !d.gaps_changed);
 }
 
 // ---- interaction -----------------------------------------------------------------------
@@ -646,6 +664,7 @@ async function readDevice() {
 }
 
 async function review() {
+  if (V.read_only) { toast("Read-only mode: device writes are disabled.", "error"); return; }
   const d = V.diff;
   const body = el("div");
   const stats = el("div", "stats");
@@ -699,7 +718,7 @@ function showResult(r) {
 }
 
 // iOS keeps web clips that are off the Home Screen but never reports them over USB; when a
-// write frees a spot, it puts one there. Homescreen remembers them from now on.
+// write frees a spot, it puts one there. Home Screen Organizer remembers them from now on.
 async function showHiddenClips(r, ids) {
   const body = el("div");
   body.appendChild(el("p", null, `Everything else landed as planned. The ${D()} also had ${ids.length === 1 ? "a web clip" : `${ids.length} web clips`} `
@@ -707,7 +726,7 @@ async function showHiddenClips(r, ids) {
   const ul = el("ul", "moves");
   for (const n of r.hidden_webclips) ul.appendChild(el("li", null, n));
   body.appendChild(ul);
-  body.appendChild(el("p", null, "Homescreen knows about them now. Send them back to the App Library, or leave them on the Home Screen and arrange them like any app."));
+  body.appendChild(el("p", null, "Home Screen Organizer knows about them now. Send them back to the App Library, or leave them on the Home Screen and arrange them like any app."));
   const act = await modal({ title: "Hidden web clips showed up", body, actions: [
     { label: "Keep them here", value: () => "keep" },
     { label: "Send to App Library", primary: true, value: () => "library" },
@@ -730,6 +749,7 @@ async function showBackups() {
     const m = b.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-(.*)\.plist$/);
     row.appendChild(el("span", null, m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]} · ${m[7].replace(/-/g, " ")}` : b));
     const btn = el("button", null, "Restore");
+    btn.disabled = Boolean(V && V.read_only);
     btn.onclick = async () => {
       $("#modal").hidden = true;
       if (!(await confirmBox("Restore this backup?", `This writes that layout to your ${D()}. Your current layout is backed up first.`, "Restore"))) return;
@@ -795,7 +815,7 @@ $("#help").onclick = () => {
   for (const [k, v] of tips) { const li = el("li"); li.append(el("b", null, k), el("span", "to", v)); ul.appendChild(li); }
   body.appendChild(ul);
   body.appendChild(el("p", null, "Nothing changes on the device until you apply. Apps in the App Library stay there."));
-  modal({ title: "How Homescreen works", body, actions: [{ label: "Got it", primary: true, value: () => null }] });
+  modal({ title: "How Home Screen Organizer works", body, actions: [{ label: "Got it", primary: true, value: () => null }] });
 };
 $("#read-empty").onclick = readDevice;
 $("#undo").onclick = () => op("undo");

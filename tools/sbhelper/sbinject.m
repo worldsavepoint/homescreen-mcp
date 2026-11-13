@@ -36,6 +36,13 @@ static id call0(id o, const char *sel) {
     @try { return ((id (*)(id, SEL))objc_msgSend)(o, s); } @catch (NSException *e) { return nil; }
 }
 
+static id icon_controller(void) {
+    id app = UIApplication.sharedApplication;
+    if ([app respondsToSelector:sel_registerName("defaultIconController")])
+        return call0(app, "defaultIconController");
+    return call0(NSClassFromString(@"SBIconController"), "sharedInstance");
+}
+
 // On "homescreen.gap": pin $SBTEST_DIR/gap.txt's bundle id ("bundle cellIndex") to a grid cell
 // on page 1 through -[SBIconListModel addFixedIconLocations:options:], save, and log what it did.
 static void sbinject_gap(NSString *dir) {
@@ -45,7 +52,7 @@ static void sbinject_gap(NSString *dir) {
                                                     encoding:NSUTF8StringEncoding error:NULL] componentsSeparatedByString:@" "];
         NSString *bundle = args[0];
         NSInteger cell = [args[1] integerValue];
-        id ctl = call0(UIApplication.sharedApplication, "defaultIconController");
+        id ctl = icon_controller();
         id model = call0(ctl, "iconModel");
         id root = call0(model, "rootFolder");
         NSArray *lists = call0(root, "lists");
@@ -77,7 +84,7 @@ static void sbinject_gap(NSString *dir) {
 // behind SBGetIconState and SBGetFlattenedIconState) to $SBTEST_DIR/export-*.plist.
 static void sbinject_exports(NSString *dir) {
     NSMutableString *log = [NSMutableString string];
-    id ctl = call0(UIApplication.sharedApplication, "defaultIconController");
+    id ctl = icon_controller();
     id model = call0(ctl, "iconModel");
     [log appendFormat:@"app=%@ ctl=%@ model=%@\n", NSStringFromClass([UIApplication.sharedApplication class]), NSStringFromClass([ctl class]), NSStringFromClass([model class])];
     void (^save)(NSString *, id) = ^(NSString *name, id obj) {
@@ -108,10 +115,10 @@ __attribute__((constructor)) static void sbinject_init(void) {
     notify_register_dispatch("homescreen.import", &token, dispatch_get_main_queue(), ^(int t) {
         NSData *d = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"in.plist"]];
         id plist = d ? [NSPropertyListSerialization propertyListWithData:d options:0 format:NULL error:NULL] : nil;
-        id ctl = ((id (*)(id, SEL))objc_msgSend)(UIApplication.sharedApplication, sel_registerName("defaultIconController"));
         BOOL ok = NO;
         NSString *err = @"";
         @try {
+            id ctl = icon_controller();
             ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(ctl, sel_registerName("importIconState:"), plist);
         } @catch (NSException *e) {
             err = e.description;

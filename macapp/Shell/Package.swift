@@ -2,9 +2,9 @@
 import PackageDescription
 
 let package = Package(
-    name: "Homescreen",
+    name: "HomeScreenOrganizer",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "Homescreen", path: "Sources/Homescreen")
+        .executableTarget(name: "HomeScreenOrganizer", path: "Sources/Homescreen")
     ]
 )

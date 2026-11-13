@@ -1,19 +1,25 @@
-"""The Homescreen app: a local web UI over the same draft, apply and backup engine.
+"""The Home Screen Organizer app: a local web UI over the same draft, apply and backup engine.
 
-Listens on 127.0.0.1 only. Every POST needs the per-launch token embedded in the page, and the
-Host header must be local, so other sites open in the browser can't drive it.
+Listens on 127.0.0.1 only. Sensitive routes require a per-launch credential delivered
+out of band; browser sessions also enforce the exact local origin.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import os
+import re
 import secrets
 import threading
 import webbrowser
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote, urlsplit
 
 from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
@@ -25,7 +31,10 @@ from .config import DATA, session
 from .model import Layout, LayoutError, Node, widget_apps
 
 WEB = Path(__file__).parent / "web"
-TOKEN = secrets.token_urlsafe(24)
+TOKEN = os.environ.get("HOMESCREEN_UI_TOKEN") or secrets.token_urlsafe(32)
+_HEALTH_SECRET = os.environ.get("HOMESCREEN_HEALTH_SECRET")
+_BROWSER_TOKEN = secrets.token_urlsafe(32)
+_COOKIE = "homescreen_session"
 LOCAL_HOSTS = {"127.0.0.1", "localhost"}
 _device_lock = asyncio.Lock()  # one read/apply/restore at a time
 _icon_gate = asyncio.Semaphore(4)
@@ -76,15 +85,21 @@ def _usage_view(lay: Layout) -> dict[str, Any] | None:
             "now": usage.swipes(lay, opens), "top": usage.top_apps(lay, opens, 12)}
 
 
+def _read_only() -> bool:
+    return os.environ.get("HOMESCREEN_READ_ONLY") == "1"
+
+
 def view() -> dict[str, Any]:
     s = session()
     if s.layout is None:
-        return {"loaded": False, "source": s.source.name, "device_id": config.current_device()}
+        return {"loaded": False, "source": s.source.name, "device_id": config.current_device(),
+                "read_only": _read_only()}
     lay = s.layout
     d = lay.diff()
     moved = {k.rsplit("[", 1)[-1].rstrip("]") for k in d["moves"]}
     return {
         "loaded": True,
+        "read_only": _read_only(),
         "source": s.source.name,
         "device_id": s.device_id,
         "device": s.info,
@@ -135,13 +150,63 @@ async def _json(request: Request) -> dict[str, Any]:
     return body if isinstance(body, dict) else {}
 
 
-def _guard(request: Request) -> Response | None:
-    host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]")
-    if host not in LOCAL_HOSTS:
-        return JSONResponse({"error": "bad host"}, status_code=403)
-    if request.method == "POST" and request.headers.get("x-token") != TOKEN:
-        return JSONResponse({"error": "bad token"}, status_code=403)
-    return None
+def _matches(value: str | None, expected: str) -> bool:
+    return value is not None and secrets.compare_digest(value.encode(), expected.encode())
+
+
+def _security_error(message: str, status: int, code: str, param: str | None = None) -> JSONResponse:
+    error_type = {400: "invalid_request_error", 401: "authentication_error", 403: "permission_error"}[status]
+    return JSONResponse({"error": {"message": message, "type": error_type,
+                                   "param": param, "code": code}}, status_code=status)
+
+
+def _guard(request: Request, *, public: bool = False, header_only: bool = False) -> Response | None:
+    host = request.headers.get("host", "")
+    try:
+        authority = urlsplit("http://" + host)
+        valid_host = (authority.hostname in LOCAL_HOSTS and authority.username is None
+                      and not authority.path and not authority.query and not authority.fragment)
+        authority.port  # reject malformed port numbers
+    except ValueError:
+        valid_host = False
+    if not valid_host:
+        return _security_error("bad host", 403, "invalid_host", "host")
+    origin = request.headers.get("origin")
+    if origin is not None and origin != f"{request.url.scheme}://{host}":
+        return _security_error("bad origin", 403, "invalid_origin", "origin")
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        return _security_error("cross-site request", 403, "cross_site_request", "sec_fetch_site")
+    if public:
+        return None
+    if _matches(request.headers.get("x-token"), TOKEN):
+        return None
+    if not header_only and _matches(request.cookies.get(_COOKIE), _BROWSER_TOKEN):
+        if request.method in {"GET", "HEAD"} or origin is not None:
+            return None
+        return _security_error("same-origin proof required", 403, "origin_required", "origin")
+    return _security_error("authentication required", 401, "invalid_credentials")
+
+
+async def post_auth(request: Request) -> Response:
+    if (bad := _guard(request, header_only=True)):
+        return bad
+    response = JSONResponse({"ok": True})
+    response.set_cookie(_COOKIE, _BROWSER_TOKEN, httponly=True, samesite="strict", path="/")
+    return response
+
+
+async def get_health(request: Request) -> Response:
+    if _HEALTH_SECRET:
+        if (bad := _guard(request, public=True)):
+            return bad
+        challenge = request.headers.get("x-homescreen-challenge", "")
+        if len(challenge) != 64 or re.fullmatch(r"[0-9a-fA-F]{64}", challenge) is None:
+            return _security_error("invalid health challenge", 400, "invalid_health_challenge", "challenge")
+        proof = hmac.new(_HEALTH_SECRET.encode(), challenge.encode(), hashlib.sha256).hexdigest()
+        return JSONResponse({"app": "homescreen", "ready": True, "proof": proof})
+    if (bad := _guard(request, header_only=True)):
+        return bad
+    return JSONResponse({"app": "homescreen", "ready": True})
 
 
 def _err(e: Exception, status: int = 400) -> JSONResponse:
@@ -149,10 +214,10 @@ def _err(e: Exception, status: int = 400) -> JSONResponse:
 
 
 async def index(request: Request) -> Response:
-    if (bad := _guard(request)):
+    if (bad := _guard(request, public=True)):
         return bad
     stamp = str(int(max(f.stat().st_mtime for f in WEB.iterdir())))  # fresh assets after an update
-    html = ((WEB / "index.html").read_text().replace("__TOKEN__", TOKEN)
+    html = ((WEB / "index.html").read_text()
             .replace("/static/app.css", f"/static/app.css?v={stamp}").replace("/static/app.js", f"/static/app.js?v={stamp}"))
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
@@ -230,6 +295,8 @@ async def post_read(request: Request) -> Response:
 async def post_apply(request: Request) -> Response:
     if (bad := _guard(request)):
         return bad
+    if _read_only():
+        return _security_error("read-only mode: device writes are disabled", 403, "read_only")
     body = await _json(request)
     async with _device_lock:
         try:
@@ -299,6 +366,8 @@ async def get_backups(request: Request) -> Response:
 async def post_restore(request: Request) -> Response:
     if (bad := _guard(request)):
         return bad
+    if _read_only():
+        return _security_error("read-only mode: device writes are disabled", 403, "read_only")
     body = await _json(request)
     async with _device_lock:
         try:
@@ -314,6 +383,16 @@ async def get_icon(request: Request) -> Response:
     if (bad := _guard(request)):
         return bad
     bundle = request.query_params.get("id", "")
+    lay = session().layout
+    known = set()
+    if lay is not None:
+        for node in lay.nodes.values():
+            if node.bundle_id:
+                known.add(node.bundle_id)
+            if node.kind == "widget":
+                known.update(widget_apps(node.raw))
+    if not bundle or bundle not in known:
+        return Response(status_code=404)
     async with _icon_gate:
         try:
             png = await session().icon(bundle)
@@ -321,11 +400,15 @@ async def get_icon(request: Request) -> Response:
             png = None
     if not png:
         return Response(status_code=404)
-    return Response(png, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+    return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 app = Starlette(routes=[
     Route("/", index),
+    Route("/v1/health", get_health),
+    Route("/health", get_health),
+    Route("/v1/authenticate", post_auth, methods=["POST"]),
+    Route("/api/auth", post_auth, methods=["POST"]),
     Route("/api/state", get_state),
     Route("/api/op", post_op, methods=["POST"]),
     Route("/api/read", post_read, methods=["POST"]),
@@ -339,8 +422,27 @@ app = Starlette(routes=[
 ])
 
 
+async def local_boundary(request: Request, call_next: Callable) -> Response:
+    response = _guard(request, public=True)
+    if response is None:
+        response = await call_next(request)
+    response.headers.update({
+        "Cache-Control": "no-store",
+        "X-Frame-Options": "DENY",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
+            "frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'",
+    })
+    return response
+
+
+app.add_middleware(BaseHTTPMiddleware, dispatch=local_boundary)
+
+
 def _exit_with_parent(pid: int) -> None:
-    """Inside Homescreen.app: stop when the app is gone, even if it crashed."""
+    """Inside Home Screen Organizer.app: stop when the app is gone, even if it crashed."""
     import os
     import time
 
@@ -363,7 +465,7 @@ def main(port: int = 8765, open_browser: bool = True) -> None:
     if os.environ.get("HOMESCREEN_PARENT_PID", "").isdigit():
         _exit_with_parent(int(os.environ["HOMESCREEN_PARENT_PID"]))
     url = f"http://127.0.0.1:{port}/"
-    print(f"Homescreen is running at {url}  (Ctrl-C to stop)")
+    print(f"Home Screen Organizer is running at {url}  (Ctrl-C to stop)")
     if open_browser:
-        threading.Timer(1.0, webbrowser.open, args=(url,)).start()
+        threading.Timer(1.0, webbrowser.open, args=(url + "#token=" + quote(TOKEN, safe=""),)).start()
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

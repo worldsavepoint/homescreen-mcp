@@ -105,8 +105,8 @@ def test_app_api_guards_and_ops(dict_phone, tmp_path, monkeypatch):
     importlib.reload(config)
     importlib.reload(ui)
     c = TestClient(ui.app, base_url="http://127.0.0.1:8765")
-    assert c.get("/").status_code == 200 and ui.TOKEN in c.get("/").text
-    assert c.post("/api/read", json={}).status_code == 403
+    assert c.get("/").status_code == 200 and ui.TOKEN not in c.get("/").text
+    assert c.post("/api/read", json={}).status_code == 401
     assert TestClient(ui.app, base_url="http://evil.example").get("/api/state").status_code == 403
     h = {"X-Token": ui.TOKEN}
     v = c.post("/api/read", json={}, headers=h).json()
@@ -119,8 +119,8 @@ def test_app_api_guards_and_ops(dict_phone, tmp_path, monkeypatch):
     assert bad.status_code == 400 and "dock" in bad.json()["error"]
     r = c.post("/api/apply", json={"token": v["diff"]["apply_token"]}, headers=h).json()
     assert r["result"]["ok"]
-    assert c.get("/api/backups").json()["backups"]
-    assert c.get("/icon", params={"id": app_id}).status_code == 200
+    assert c.get("/api/backups", headers=h).json()["backups"]
+    assert c.get("/icon", params={"id": app_id}, headers=h).status_code == 200
 
 
 def test_screen_time_reader_and_optimizer(tmp_path):
@@ -322,6 +322,8 @@ def test_hidden_webclips_are_learned_and_kept_in_app_library(tmp_path):
     res = asyncio.run(s.apply(s.require().token()))
     assert not res["ok"] and res["hidden_webclips"] == ["Odds"]  # iOS surfaced it; reported, not retried
     assert phone.writes == 1
+    # A mismatching readback blocks further writes until an explicit fresh read.
+    asyncio.run(s.read())
     # it's remembered: send it to the App Library, and later writes keep it there
     s.edit(lambda lay: lay.move("C5066B8C", "library"))
     res = asyncio.run(s.apply(s.require().token()))

@@ -143,7 +143,7 @@ def test_lost_response_is_not_retried(phone, tmp_path):
     lay.move(lay.pages[0][1].id, "page:3", 0)
     s.edited()
     res = run(s.apply(lay.token()))
-    assert res["ok"] and "DID land" in res["error"]
+    assert res["ok"] and "Readback result: matched" in res["error"]
 
 
 def test_single_move_counts_once(phone):
@@ -256,9 +256,8 @@ def test_root_archive_for_phone_write():
     assert out["ignored"] == ["com.lib.app"]
 
 
-def test_restore_old_backup_without_library(tmp_path):
-    """Backups from before the App Library was tracked restore cleanly and verify on pages."""
-    from homescreen.session import _pack
+def test_restore_old_backup_without_provenance_is_rejected(tmp_path):
+    """Legacy layouts cannot prove which device they came from."""
     path = tmp_path / "IconState.plist"
     path.write_bytes(IOS27.read_bytes())
     s = Session(FileSource(path), tmp_path / "data")
@@ -266,5 +265,7 @@ def test_restore_old_backup_without_library(tmp_path):
     state = s.require().to_state()
     bdir = s._dev_dir("backups")
     (bdir / "20200101-000000-old.plist").write_bytes(plistlib.dumps(state))  # old style: bare list
-    res = run(s.restore("20200101-000000-old.plist"))
-    assert res["ok"] and res["app_library_only"] == 1, res
+    before = path.read_bytes()
+    with pytest.raises(LayoutError):
+        run(s.restore("20200101-000000-old.plist"))
+    assert path.read_bytes() == before

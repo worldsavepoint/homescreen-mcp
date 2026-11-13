@@ -19,9 +19,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import platform
 import plistlib
+import re
 import subprocess
 import uuid
+from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -31,6 +34,21 @@ Layout = tuple[list[Any], list[Any] | None]
 
 DISK_MARK = "__bundleIdOnly__"  # an app that was a bare bundle id string in the dict format
 NAME_MARK = "__nameFromDefault__"  # folder had no displayName of its own
+DEVICE_OPERATION_TIMEOUT = 30.0
+SUBPROCESS_TIMEOUT = 10.0
+
+
+def require_writable() -> None:
+    if os.environ.get("HOMESCREEN_READ_ONLY") == "1":
+        raise PermissionError("read-only mode: device writes are disabled")
+
+
+def _bounded(operation):
+    @wraps(operation)
+    async def call(*args, **kwargs):
+        async with asyncio.timeout(DEVICE_OPERATION_TIMEOUT):
+            return await operation(*args, **kwargs)
+    return call
 
 
 class Source(Protocol):
@@ -194,18 +212,34 @@ class PhoneSource:
 
     def __init__(self, udid: str | None = None, format_version: str | None = None):
         self.udid = udid
+        self._bound_udid = udid
         self.name = "phone"
         self.format_version = format_version or os.environ.get("HOMESCREEN_FORMAT", "2")
         self.write_mode = os.environ.get("HOMESCREEN_WRITE", "full")
         self._lockdown = None
         self._last_dict: dict[str, Any] | None = None
 
+    def _check_identity(self, values: Any) -> None:
+        actual = values.get("UniqueDeviceID") if isinstance(values, dict) else None
+        if not isinstance(actual, str) or not actual:
+            raise ValueError("connected device identity is unavailable")
+        if self._bound_udid is not None and actual != self._bound_udid:
+            raise ValueError("connected device identity does not match the bound device")
+        self._bound_udid = self.udid = actual
+
     async def _ld(self):
         if self._lockdown is None:
             from pymobiledevice3.lockdown import create_using_usbmux
-            self._lockdown = await create_using_usbmux(serial=self.udid)
+            connection = await create_using_usbmux(serial=self._bound_udid)
+            try:
+                self._check_identity(connection.all_values)
+            except ValueError:
+                await connection.close()
+                raise
+            self._lockdown = connection
         return self._lockdown
 
+    @_bounded
     async def _call(self, fn):
         """Run fn(springboard) on a fresh service connection; drop the lockdown on failure
         so an unplugged/replugged phone reconnects next time."""
@@ -217,23 +251,33 @@ class PhoneSource:
             self._lockdown = None
             raise
 
+    @_bounded
     async def info(self) -> dict[str, Any]:
-        vals = (await self._ld()).all_values
-        out = {k: vals.get(k) for k in ("DeviceName", "ProductType", "ProductVersion", "UniqueDeviceID")}
+        connection = await self._ld()
         try:
-            out["icon_metrics"] = await self._call(lambda sb: sb.get_homescreen_icon_metrics())
-        except Exception as e:  # metrics are a nice-to-have
-            out["icon_metrics_error"] = str(e)
+            vals = await connection.get_value()
+            self._check_identity(vals)
+        except BaseException:
+            self._lockdown = None
+            raise
+        out = {k: vals.get(k) for k in ("DeviceName", "ProductType", "ProductVersion", "UniqueDeviceID")}
+        # A service failure invalidates the connection. Do not return cached identity
+        # as a successful prewrite check after _call has discarded that connection.
+        out["icon_metrics"] = await self._call(lambda sb: sb.get_homescreen_icon_metrics())
+        if self._lockdown is not connection:
+            raise ConnectionError("device connection changed during identity verification")
         return out
 
     async def read_raw(self, format_version: str | None) -> Any:
         return await self._call(lambda sb: sb.get_icon_state(format_version=format_version))
 
+    @_bounded
     async def installed_apps(self) -> dict[str, dict[str, Any]]:
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
         async with InstallationProxyService(lockdown=await self._ld()) as ip:
             return await ip.get_apps(application_type="Any", calculate_sizes=False, show_placeholders=True)
 
+    @_bounded
     async def memory_reports(self, out: Path) -> list[Path]:
         """Copy the device's JetsamEvent reports (written when memory runs low; each lists the
         apps held in memory) into out. Read-only: nothing is erased on the device."""
@@ -243,6 +287,7 @@ class PhoneSource:
             await cr.pull(str(out), match=r"JetsamEvent", progress_bar=False)
         return sorted(out.rglob("JetsamEvent*.ips"))
 
+    @_bounded
     async def read(self) -> Layout:
         raw = await self.read_raw(self.format_version)
         if is_dict_format(raw):
@@ -255,8 +300,10 @@ class PhoneSource:
 
     pins: dict[str, int] | None = None  # the phone never reports gaps
 
+    @_bounded
     async def write(self, state: list[Any], library: list[Any] | None,
                     pins: list[dict[str, int]] | None = None) -> None:
+        require_writable()
         if self._last_dict is not None:
             payload: Any = model_to_disk(state, library, self._last_dict, pins)
         elif self.write_mode == "list":
@@ -273,6 +320,7 @@ class PhoneSource:
             payload = to_root_archive(state, library, pins)
         await self._call(lambda sb: sb.set_icon_state(payload))
 
+    @_bounded
     async def icon_png(self, bundle_id: str) -> bytes | None:
         return await self._call(lambda sb: sb.get_icon_pngdata(bundle_id))
 
@@ -302,7 +350,33 @@ def library_from_installed(state: list[Any], apps: dict[str, dict[str, Any]]) ->
 # ---- iOS Simulator --------------------------------------------------------------------
 
 def _run(*args: str) -> str:
-    return subprocess.run(args, check=True, capture_output=True, text=True).stdout
+    return subprocess.run(args, check=True, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT).stdout
+
+
+@lru_cache(maxsize=1)
+def _simulator_icon_reader():
+    import tempfile
+
+    directory = tempfile.TemporaryDirectory(prefix="homescreen-sim-icons-")
+    executable = Path(directory.name) / "read-icon"
+    sdk = _run("xcrun", "--sdk", "iphonesimulator", "--show-sdk-path").strip()
+    subprocess.run(["xcrun", "clang", "-target", f"{platform.machine()}-apple-ios16.0-simulator",
+                    "-isysroot", sdk, "-fobjc-arc", "-framework", "UIKit",
+                    str(Path(__file__).with_name("simulator_icon.m")), "-o", str(executable)],
+                   check=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT)
+    subprocess.run(["codesign", "-s", "-", "-f", str(executable)], check=True,
+                   capture_output=True, timeout=SUBPROCESS_TIMEOUT)
+    return directory, executable
+
+
+def _simulator_icon_png(udid: str, bundle_id: str) -> bytes | None:
+    try:
+        directory, executable = _simulator_icon_reader()
+        result = subprocess.run(["xcrun", "simctl", "spawn", udid, str(executable), bundle_id],
+                                capture_output=True, check=True, timeout=SUBPROCESS_TIMEOUT)
+        return result.stdout if result.stdout.startswith(b"\x89PNG\r\n\x1a\n") else None
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 class SimSource:
@@ -323,7 +397,7 @@ class SimSource:
         if self._apps is None:
             text = _run("xcrun", "simctl", "listapps", self.udid)
             conv = subprocess.run(["plutil", "-convert", "json", "-o", "-", "-"], input=text.encode(),
-                                  check=True, capture_output=True)
+                                  check=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT)
             self._apps = json.loads(conv.stdout)
         return self._apps
 
@@ -349,15 +423,17 @@ class SimSource:
                 return parts[0]
         return None
 
+    @_bounded
     async def write(self, state: list[Any], library: list[Any] | None,
                     pins: list[dict[str, int]] | None = None) -> None:
+        require_writable()
         base = plistlib.loads(self.path.read_bytes())
         out = model_to_disk(state, library, base, pins if pins is not None else [])
         before = self._springboard_pid()
         self.path.write_bytes(plistlib.dumps(out, fmt=plistlib.FMT_BINARY))
         # SIGKILL so SpringBoard can't save its old in-memory layout over ours on the way out
         subprocess.run(["xcrun", "simctl", "spawn", self.udid, "launchctl", "kill", "SIGKILL",
-                        "system/com.apple.SpringBoard"], capture_output=True)
+                        "system/com.apple.SpringBoard"], capture_output=True, timeout=SUBPROCESS_TIMEOUT)
         for _ in range(120):
             await asyncio.sleep(0.5)
             pid = self._springboard_pid()
@@ -375,7 +451,8 @@ class SimSource:
         import tempfile
         from PIL import Image, ImageStat
         with tempfile.NamedTemporaryFile(suffix=".png") as f:
-            r = subprocess.run(["xcrun", "simctl", "io", self.udid, "screenshot", f.name], capture_output=True)
+            r = subprocess.run(["xcrun", "simctl", "io", self.udid, "screenshot", f.name],
+                               capture_output=True, timeout=SUBPROCESS_TIMEOUT)
             if r.returncode:
                 return False
             return ImageStat.Stat(Image.open(f.name).convert("L")).mean[0] > 40
@@ -386,16 +463,37 @@ class SimSource:
             return None
         from urllib.parse import unquote, urlparse
         bundle = Path(unquote(urlparse(app["Bundle"]).path))
-        names = (app.get("CFBundleIcons", {}).get("CFBundlePrimaryIcon", {}).get("CFBundleIconFiles")
+        # Older simctl versions omit the icon declarations supplied by the bundle itself.
+        try:
+            info = plistlib.loads((bundle / "Info.plist").read_bytes())
+        except (OSError, ValueError):
+            info = {}
+        primary = info.get("CFBundleIcons", {}).get("CFBundlePrimaryIcon", {})
+        names = (primary.get("CFBundleIconFiles") or info.get("CFBundleIconFiles")
+                 or app.get("CFBundleIcons", {}).get("CFBundlePrimaryIcon", {}).get("CFBundleIconFiles")
                  or ["AppIcon60x60"])
+        if info.get("SBIconClass"):
+            png = await asyncio.to_thread(_simulator_icon_png, self.udid, bundle_id)
+            if png:
+                return png
         for name in names:
-            for suffix in ("@3x.png", "@2x.png", ".png"):
-                p = bundle / f"{name}{suffix}"
-                if p.exists():
+            if not isinstance(name, str):
+                continue
+            has_extension = name.lower().endswith(".png")
+            stem = name[:-4] if has_extension else name
+            for filename in (f"{stem}@3x.png", f"{stem}@2x.png", name if has_extension else f"{name}.png"):
+                p = bundle / filename
+                if p.is_file() and p.resolve().is_relative_to(bundle.resolve()):
                     return p.read_bytes()
         # many system apps don't list their icon files; take the biggest phone-size one
-        found = sorted((p for p in bundle.glob("*60x60@*.png") if "~ipad" not in p.name), key=lambda p: p.name)
-        return found[-1].read_bytes() if found else None
+        found = sorted((p for p in bundle.glob("*60x60@*.png")
+                        if "~ipad" not in p.name and p.is_file()
+                        and p.resolve().is_relative_to(bundle.resolve())), key=lambda p: p.name)
+        if found:
+            return found[-1].read_bytes()
+        if primary.get("CFBundleIconName") and (bundle / "Assets.car").exists():
+            return await asyncio.to_thread(_simulator_icon_png, self.udid, bundle_id)
+        return None
 
 
 # ---- fixture file ---------------------------------------------------------------------
@@ -421,10 +519,17 @@ class FileSource:
 
     async def write(self, state: list[Any], library: list[Any] | None,
                     pins: list[dict[str, int]] | None = None) -> None:
+        require_writable()
         raw = plistlib.loads(self.path.read_bytes())
         out = model_to_disk(state, library, raw, pins if pins is not None else []) if is_dict_format(raw) else state
         self.path.write_bytes(plistlib.dumps(out, fmt=plistlib.FMT_BINARY))
 
     async def icon_png(self, bundle_id: str) -> bytes | None:
-        p = self.path.with_suffix(".icons") / f"{bundle_id}.png"
+        if not isinstance(bundle_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*", bundle_id):
+            return None
+        sidecar = self.path.with_suffix(".icons")
+        icons = sidecar.parent.resolve() / sidecar.name
+        p = (icons / f"{bundle_id}.png").resolve()
+        if not p.is_relative_to(icons):
+            return None
         return p.read_bytes() if p.exists() else None
