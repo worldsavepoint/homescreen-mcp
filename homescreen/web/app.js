@@ -68,11 +68,15 @@ function errorKey(message, code) {
   if (message === "move or remove the widgets on this page first") return "error.moveWidgets";
   if (/^another Session operation/.test(message)) return "error.busy";
   if (/^(no layout loaded|device identity|a pending write|the phone's|token doesn't match)/.test(message)) return "error.readAgain";
+  if (/^device grid changed(?: during read; no layout was loaded|; explicitly read the intended device again)$/.test(message) ||
+      /^saved draft (?:identity is invalid|pin identity is unavailable|pin identity is ambiguous); call read again$/.test(message)) return "error.readAgain";
   if (/^iOS 16 /.test(message)) return "error.ios16";
-  if (/ has no (known wire identifier|wire identifier for its pin); use ordinary page order$/.test(message)) return "error.pinIdentifier";
+  if (/^ambiguous pin identifier on a (layout|backup) page$/.test(message) ||
+      / has no (known wire identifier|wire identifier for its pin); use ordinary page order$/.test(message)) return "error.pinIdentifier";
   if (message === "pinned backup has no saved grid dimensions; use a backup with grid provenance" ||
       message === "backup grid dimensions must be positive integers") return "error.backupGrid";
-  if (/^(backup pins must identify |backup pin is outside |backup pin footprint |backup layout has problems, not restoring: |invalid pin cell |pin identifiers do not match |pins do not fit the loaded grid:)/.test(message)) return "error.savedPosition";
+  if (["pins must identify items on each page", "invalid saved pin memory", "saved pin footprint does not fit the loaded grid"].includes(message) ||
+      /^(backup pins must identify |backup pin is outside |backup pin footprint |backup layout has problems, not restoring: |invalid pin cell |pin identifiers do not match |pins do not fit the loaded grid:)/.test(message)) return "error.savedPosition";
   if (/^(backup |no backup named)/.test(message)) return "error.backup";
   if (/^draft has problems/.test(message)) return "validation.unknown";
   if (/^(can't place |cells are |that spot is taken |page \d+ has no room )/.test(message) || /doesn't fit at row/.test(message)) return "error.position";

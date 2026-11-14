@@ -49,20 +49,31 @@ def test_localization_resources_follow_manifest_and_shared_display_names(tmp_pat
     assert command("check-localization", app).returncode == 0
 
 
-def test_additional_registered_locale_is_packaged_without_code_changes(tmp_path):
+@pytest.mark.parametrize("italian_registered", [False, True])
+def test_additional_registered_locale_is_packaged_without_code_changes(tmp_path, italian_registered):
     locales = tmp_path / "catalogs"
     shutil.copytree(LOCALES, locales)
     manifest = json.loads((locales / "manifest.json").read_text())
-    manifest["languages"].append({"code": "it", "name": "Italiano", "aliases": ["it"]})
+    if italian_registered:
+        if not any(language["code"] == "it" for language in manifest["languages"]):
+            manifest["languages"].append({"code": "it", "name": "Italiano", "aliases": ["it", "en-x-test-1"]})
+            shutil.copyfile(locales / "en.json", locales / "it.json")
+    from tools.check_translations import canonical_locales
+
+    registered = set(canonical_locales(manifest["languages"]).values())
+    index = 1
+    while (code := f"en-x-test-{index}") in registered:
+        index += 1
+    manifest["languages"].append({"code": code, "name": "Test translation", "aliases": [code]})
     (locales / "manifest.json").write_text(json.dumps(manifest))
-    shutil.copyfile(locales / "en.json", locales / "it.json")
+    shutil.copyfile(locales / "en.json", locales / f"{code}.json")
     validation = subprocess.run([sys.executable, str(ROOT / "tools/check_translations.py"),
                                  "--locales", str(locales)], capture_output=True, text=True)
     assert validation.returncode == 0, validation.stderr
     app = make_app(tmp_path)
     result = command("localize", app, locales)
     assert result.returncode == 0, result.stderr
-    assert (app / "Contents/Resources/it.lproj/InfoPlist.strings").is_file()
+    assert (app / f"Contents/Resources/{code}.lproj/InfoPlist.strings").is_file()
     assert command("check-localization", app, locales).returncode == 0
 
 

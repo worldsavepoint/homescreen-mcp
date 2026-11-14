@@ -255,6 +255,16 @@ assert.ok($('#toast').querySelector('pre').textContent.includes("widgets can't g
 
 
 @pytest.mark.parametrize("message,key", [
+    ("device grid changed during read; no layout was loaded", "error.readAgain"),
+    ("device grid changed; explicitly read the intended device again", "error.readAgain"),
+    ("saved draft identity is invalid; call read again", "error.readAgain"),
+    ("saved draft pin identity is unavailable; call read again", "error.readAgain"),
+    ("saved draft pin identity is ambiguous; call read again", "error.readAgain"),
+    ("ambiguous pin identifier on a layout page", "error.pinIdentifier"),
+    ("ambiguous pin identifier on a backup page", "error.pinIdentifier"),
+    ("pins must identify items on each page", "error.savedPosition"),
+    ("invalid saved pin memory", "error.savedPosition"),
+    ("saved pin footprint does not fit the loaded grid", "error.savedPosition"),
     ("widget 'name with quotes' has no known wire identifier; use ordinary page order", "error.pinIdentifier"),
     ("folder 'name' has no wire identifier for its pin; use ordinary page order", "error.pinIdentifier"),
     ("pinned backup has no saved grid dimensions; use a backup with grid provenance", "error.backupGrid"),
