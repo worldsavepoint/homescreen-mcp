@@ -194,3 +194,30 @@ def test_serialized_root_values(tmp_path, format, suffix):
     else:
         with pytest.raises(ValueError, match="build path"):
             check_archive(path, [root])
+
+
+@pytest.mark.parametrize("prefix,encoding", [
+    ('<?xml version="1.0"?>', "utf-8-sig"),
+    ("", "utf-8"),
+    ('<?xml version="1.0"?>' + "<!--" + "x" * 1500 + "-->", "utf-8"),
+    (" \n<!--localization--><?build fixture?>", "utf-8"),
+    ("<!--localization-->", "utf-16"),
+])
+@pytest.mark.parametrize("suffix", ["", "/child", "-sibling"])
+def test_localized_xml_plist_data(tmp_path, prefix, encoding, suffix):
+    import base64
+    from macapp.check_package_paths import check_archive
+
+    root = tmp_path / "build-root"
+    data = base64.b64encode((str(root) + suffix).encode()).decode()
+    xml = f'{prefix}<plist version="1.0"><dict><key>source</key><data>{data}</data></dict></plist>'
+    packaged = native_zip(tmp_path)
+    with zipfile.ZipFile(packaged, "a") as archive:
+        archive.writestr("Screen Organizer.app/Contents/Resources/en.lproj/InfoPlist.strings", xml.encode(encoding))
+        archive.writestr("Localizable.strings", '"label" = "Open";\n')
+        archive.writestr("document.xml", '<?xml version="1.0"?><document><!-- <plist -->Hello</document>')
+    if suffix == "-sibling":
+        check_archive(packaged, [root])
+    else:
+        with pytest.raises(ValueError, match="build path"):
+            check_archive(packaged, [root])

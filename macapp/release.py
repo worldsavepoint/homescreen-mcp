@@ -111,7 +111,7 @@ def package(build_dir, output_dir, version, arch):
 
 
 def app_contents(app):
-    entries = {}
+    entries = {Path("."): (app.lstat().st_mode, None)}
     for path in app.rglob("*"):
         mode = path.lstat().st_mode
         if stat.S_ISLNK(mode):
@@ -136,6 +136,8 @@ def verify_image(image, archive, folder):
                    check=True, capture_output=True)
     try:
         app = "Screen Organizer.app"
+        if {entry.name for entry in mount.iterdir()} != {app, "Applications"}:
+            raise ValueError("Check the release disk image contents")
         if not (mount / "Applications").is_symlink() or os.readlink(mount / "Applications") != "/Applications":
             raise ValueError("Check the Applications link in the release image")
         for location in (unpacked, mount):
@@ -179,31 +181,52 @@ def previous_assets(output, arch):
     return names
 
 
+def preserve_entry(source, destination, libc):
+    if source.is_symlink() or not source.is_dir():
+        os.link(source, destination, follow_symlinks=False)
+        return
+    destination.mkdir()
+    # Retained directories keep their own ACL, including an empty one.
+    subprocess.run(["chmod", "-N", destination], check=True, capture_output=True)
+    for child in source.iterdir():
+        preserve_entry(child, destination / child.name, libc)
+    # Set the directory's own restrictions after copying its existing children.
+    if libc.copyfile(os.fsencode(source), os.fsencode(destination), None, 7) != 0:  # COPYFILE_METADATA
+        raise OSError(ctypes.get_errno(), "Could not preserve the release directory metadata")
+
+
 def install_generation(staged, output, arch):
     # Lock the parent directory while preserving sibling files and exchanging generations.
     parent_fd = os.open(output.parent, os.O_RDONLY)
     try:
         fcntl.flock(parent_fd, fcntl.LOCK_EX)
-        if not output.exists():
-            staged.rename(output)
+        assets = list(staged.iterdir())
+        current_names = {asset.name for asset in assets} | previous_assets(output, arch)
+        replacement = staged / ".generation"
+        libc = ctypes.CDLL(None, use_errno=True)
+        existing = output.exists()
+        if existing:
+            replacement.mkdir()
+            subprocess.run(["chmod", "-N", replacement], check=True, capture_output=True)
+            # Darwin COPYFILE_SECURITY copies the directory stat and ACL before its children inherit them.
+            if libc.copyfile(os.fsencode(output), os.fsencode(replacement), None, 3) != 0:
+                raise OSError(ctypes.get_errno(), "Could not preserve the release directory permissions")
+        else:
+            # A new output inherits its parent's ACL before its files are assembled in private.
+            with tempfile.TemporaryDirectory(dir=output.parent, prefix=".native-generation-") as folder:
+                Path(folder).rename(replacement)
+            replacement.chmod(stat.S_IMODE(staged.stat().st_mode))
+        for asset in assets:
+            shutil.copyfile(asset, replacement / asset.name)
+        if not existing:
+            replacement.rename(output)
             return
-        current_names = {entry.name for entry in staged.iterdir()} | previous_assets(output, arch)
         for entry in output.iterdir():
             if entry.name in current_names:
                 continue
-            destination = staged / entry.name
-            if entry.is_symlink():
-                destination.symlink_to(os.readlink(entry))
-            elif entry.is_dir():
-                shutil.copytree(entry, destination, symlinks=True)
-            else:
-                os.link(entry, destination)
+            preserve_entry(entry, replacement / entry.name, libc)
         # Darwin RENAME_SWAP exchanges two populated directories on the same volume.
-        libc = ctypes.CDLL(None, use_errno=True)
-        # Darwin COPYFILE_SECURITY copies the existing directory stat and ACL.
-        if libc.copyfile(os.fsencode(output), os.fsencode(staged), None, 3) != 0:
-            raise OSError(ctypes.get_errno(), "Could not preserve the release directory permissions")
-        if libc.renamex_np(os.fsencode(staged), os.fsencode(output), 2) != 0:
+        if libc.renamex_np(os.fsencode(replacement), os.fsencode(output), 2) != 0:
             raise OSError(ctypes.get_errno(), "Could not install the verified release")
     finally:
         os.close(parent_fd)

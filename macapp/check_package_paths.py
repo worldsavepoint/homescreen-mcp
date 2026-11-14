@@ -1,5 +1,6 @@
 """Check a trusted native release ZIP for local build paths."""
 import argparse
+import codecs
 import io
 from importlib.util import MAGIC_NUMBER
 import marshal
@@ -12,6 +13,7 @@ import struct
 import sysconfig
 import tempfile
 from types import CodeType
+from xml.etree import ElementTree
 import zipfile
 
 ENGINE = "Screen Organizer.app/Contents/Resources/engine/engine"
@@ -19,6 +21,17 @@ ENGINE = "Screen Organizer.app/Contents/Resources/engine/engine"
 
 class BuildPathError(ValueError):
     pass
+
+
+def is_xml_plist(data):
+    markup = data.lstrip(b" \t\r\n\0")
+    if not markup.startswith((b"<", codecs.BOM_UTF8, codecs.BOM_UTF16_BE, codecs.BOM_UTF16_LE)):
+        return False
+    try:
+        _, root = next(ElementTree.iterparse(io.BytesIO(data), events=("start",)))
+        return root.tag == "plist"
+    except (ElementTree.ParseError, LookupError, StopIteration):
+        return False
 
 
 def check_archive(path, blocked):
@@ -60,9 +73,10 @@ def check_archive(path, blocked):
             lower = name.lower()
             if lower.endswith(".pyc") and data.startswith(MAGIC_NUMBER) and any(root in data for root in roots):
                 check_value(marshal.loads(data[16:]))
-            elif (lower.endswith(".plist") or data.startswith(b"bplist00")
-                  or (data.startswith(b"<?xml") and b"<plist" in data[:1024])):
-                check_value(plistlib.loads(data))
+            elif data.startswith(b"bplist00"):
+                check_value(plistlib.loads(data, fmt=plistlib.FMT_BINARY))
+            elif lower.endswith(".plist") or is_xml_plist(data):
+                check_value(plistlib.loads(data, fmt=plistlib.FMT_XML))
             stream = io.BytesIO(data)
             if name.lower().endswith((".zip", ".whl")) or zipfile.is_zipfile(stream):
                 with zipfile.ZipFile(stream) as nested:

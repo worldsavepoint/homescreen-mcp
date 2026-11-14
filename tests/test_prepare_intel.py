@@ -84,7 +84,9 @@ def test_reused_intel_paths_follow_the_prepared_wheel(tmp_path):
         read_roots(reused, intel_inputs(reused))
 
 
-def test_preparation_replaces_stale_cryptography_wheels(tmp_path):
+@pytest.mark.parametrize("cached", ["file", "symlink", "hardlink"])
+def test_preparation_replaces_stale_cryptography_wheels(tmp_path, cached):
+    import hashlib
     import sys
     import zipfile
     from macapp.build_paths import intel_inputs, read_roots
@@ -102,7 +104,14 @@ def test_preparation_replaces_stale_cryptography_wheels(tmp_path):
     output = tmp_path / "cache"
     target = output / "wheels"
     target.mkdir(parents=True)
-    (target / name).write_bytes(b"stale")
+    unrelated = tmp_path / "unrelated"
+    unrelated.write_bytes(b"keep original")
+    if cached == "symlink":
+        (target / name).symlink_to(unrelated)
+    elif cached == "hardlink":
+        (target / name).hardlink_to(unrelated)
+    else:
+        (target / name).write_bytes(b"stale")
     (target / "cryptography-older.whl").write_bytes(b"old tag")
     (target / "other.whl").write_bytes(b"keep")
     lock = tmp_path / "pins"
@@ -114,6 +123,18 @@ def test_preparation_replaces_stale_cryptography_wheels(tmp_path):
     subprocess.run([sys.executable, "-", wheels, output, lock, license], input=output_step,
                    text=True, check=True, env=env, capture_output=True)
     assert sorted(p.name for p in target.iterdir()) == sorted([name, "other.whl"])
+    assert unrelated.read_bytes() == b"keep original"
+    assert not (target / name).is_symlink() and not (target / name).samefile(unrelated)
     assert (target / name).read_bytes() == (wheels / name).read_bytes()
-    subprocess.run([sys.executable, SCRIPT.with_name("build_paths.py"), "intel-record", output, wheels], check=True)
+    digest = hashlib.sha256((target / name).read_bytes()).hexdigest()
+    assert f"cryptography==50.0.2 --hash=sha256:{digest}" in (output / "requirements-build.lock").read_text()
+    provenance = [sys.executable, SCRIPT.with_name("build_paths.py")]
+    subprocess.run([*provenance, "intel-record", output, wheels], check=True)
+    subprocess.run([*provenance, "intel-check", output], check=True)
     assert wheels in read_roots(output, intel_inputs(output))
+    (target / name).unlink()
+    (target / name).symlink_to(wheels / name)
+    for action in ("intel-check", "intel-record"):
+        result = subprocess.run([*provenance, action, output], capture_output=True, text=True)
+        assert result.returncode != 0
+        assert result.stderr == "Prepare a fresh native build to record its locations\n"

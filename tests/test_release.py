@@ -1,6 +1,7 @@
 """Versioned release assets preserve app contents and executable permissions."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
 import shutil
@@ -271,6 +272,64 @@ def test_rejected_package_preserves_verified_assets(tmp_path):
     assert (output / "SHA256SUMS.txt").read_bytes() != before["SHA256SUMS.txt"]
 
 
+@pytest.mark.parametrize("change", ["extra-file", "root-mode", "wrong-link", "matching"])
+def test_disk_image_root_contract(tmp_path, change):
+    from macapp.release import verify_image
+
+    build = make_build(tmp_path)
+    app = build / "Screen Organizer.app"
+    archive = tmp_path / "release.zip"
+    subprocess.run(["ditto", "-c", "-k", "--keepParent", app, archive], check=True)
+    layout = tmp_path / "image-files"
+    if change == "extra-file":
+        (layout / ".extra").write_text(str(tmp_path / "private checkout"))
+    elif change == "root-mode":
+        (layout / app.name).chmod(0o700)
+    elif change == "wrong-link":
+        (layout / "Applications").unlink()
+        (layout / "Applications").symlink_to("/tmp")
+    image = tmp_path / "release.dmg"
+    subprocess.run(["hdiutil", "create", "-quiet", "-format", "UDZO", "-srcfolder", layout, image], check=True)
+    verification = tmp_path / "verify"
+    verification.mkdir()
+    if change == "matching":
+        verify_image(image, archive, verification)
+    else:
+        with pytest.raises(ValueError):
+            verify_image(image, archive, verification)
+    assert not os.path.ismount(verification / "mount")
+
+
+def test_invalid_build_records_have_one_package_diagnostic(tmp_path):
+    from macapp.build_paths import RECORD
+
+    checkout = tmp_path / "private checkout"
+    (checkout / "macapp").mkdir(parents=True)
+    for name in ("release.py", "check_package_paths.py", "build_paths.py"):
+        shutil.copyfile(SCRIPT.with_name(name), checkout / "macapp" / name)
+    shutil.copyfile(ROOT / "pyproject.toml", checkout / "pyproject.toml")
+    build = tmp_path / "build"
+    contents = build / "Screen Organizer.app/Contents"
+    contents.mkdir(parents=True)
+    (contents / "Info.plist").write_bytes(plistlib.dumps({
+        "CFBundleShortVersionString": VERSION, "HomeScreenOrganizerArchitecture": "arm64"}))
+    (build / f"home-screen-organizer-{VERSION}.dmg").touch()
+    output = tmp_path / "previous release"
+    output.mkdir()
+    (output / "note").write_text("preserve")
+    invalid = ["[]", '"value"', "7", "true", "null", "{", "{}",
+               json.dumps({"version": 2, "roots": {str(checkout): True}, "inputs": {}}),
+               json.dumps({"version": 2, "roots": [str(checkout)], "inputs": []})]
+    for record in invalid:
+        (build / RECORD).write_text(record)
+        result = subprocess.run([sys.executable, checkout / "macapp/release.py", "package",
+                                 "--arch", "arm64", "--build-dir", build, "--output-dir", output],
+                                capture_output=True, text=True)
+        assert result.returncode != 0
+        assert result.stderr == "Prepare a fresh native build to record its locations\n"
+        assert list(output.iterdir()) == [output / "note"] and (output / "note").read_text() == "preserve"
+
+
 def test_recreated_package_uses_original_intel_roots(tmp_path):
     from macapp.build_paths import write_record
 
@@ -332,6 +391,73 @@ def test_replacement_preserves_permissions_and_drops_managed_prior_pair(tmp_path
     assert subprocess.check_output(["ls", "-lde", str(output)], text=True).splitlines()[1:] == acl
     assert (output / "notes").read_text() == "private"
     assert sorted(p.suffix for p in output.iterdir()) == ["", ".dmg", ".txt", ".zip"]
+
+
+@pytest.mark.parametrize("inherited", [False, True])
+def test_release_descendant_acls(tmp_path, inherited):
+    from macapp.release import install_generation
+
+    def acl(path):
+        return subprocess.check_output(["ls", "-lde", path], text=True).splitlines()[1:]
+
+    output = tmp_path / "release"
+    output.mkdir(mode=0o700)
+    nested = output / "notes"
+    nested.mkdir()
+    plain = output / "existing folder"
+    plain.mkdir()
+    (plain / "record").write_text("existing")
+    note = nested / "retained"
+    note.write_text("keep")
+    (nested / ".nfs-retained").write_text("keep hidden file")
+    link = nested / "shortcut"
+    link.symlink_to("../ordinary")
+    subprocess.run(["chmod", "+a", "everyone deny write", note], check=True)
+    subprocess.run(["chmod", "+a", "everyone deny add_file", nested], check=True)
+    if inherited:
+        subprocess.run(["chmod", "+a", "everyone deny write,file_inherit,only_inherit", output], check=True)
+        subprocess.run(["chmod", "+a", "everyone deny add_file,directory_inherit,only_inherit", output], check=True)
+    ordinary = output / "ordinary"
+    ordinary.write_bytes(b"regular")
+    expected = [acl(p) for p in (output, ordinary, nested, note)]
+    assert expected[2] and expected[3]
+    assert bool(expected[1]) == inherited
+    staged = tmp_path / "assets"
+    staged.mkdir()
+    for name in ("archive.zip", "image.dmg", "SHA256SUMS.txt"):
+        (staged / name).write_bytes(name.encode())
+    install_generation(staged, output, "arm64")
+    for name in ("archive.zip", "image.dmg", "SHA256SUMS.txt"):
+        assert acl(output / name) == expected[1]
+        assert (output / name).read_bytes() == name.encode()
+    assert [acl(p) for p in (output, ordinary, nested, note)] == expected
+    assert note.read_text() == "keep" and link.readlink() == Path("../ordinary")
+    assert (nested / ".nfs-retained").read_text() == "keep hidden file"
+    assert acl(plain) == [] and (plain / "record").read_text() == "existing"
+
+
+def test_first_release_inherits_output_parent_acl(tmp_path):
+    from macapp.release import install_generation
+
+    def acl(path):
+        return subprocess.check_output(["ls", "-lde", path], text=True).splitlines()[1:]
+
+    parent = tmp_path / "published"
+    parent.mkdir()
+    staging = parent / "private staging"
+    staging.mkdir()
+    staged = staging / "assets"
+    staged.mkdir()
+    (staged / "asset.zip").write_bytes(b"verified")
+    subprocess.run(["chmod", "+a", "everyone deny writeextattr,file_inherit,directory_inherit,only_inherit", parent],
+                   check=True)
+    expected = parent / "normal"
+    expected.mkdir()
+    (expected / "asset.zip").write_bytes(b"ordinary")
+    output = parent / "first release"
+    install_generation(staged, output, "arm64")
+    assert acl(expected) and acl(output) == acl(expected)
+    assert acl(expected / "asset.zip") and acl(output / "asset.zip") == acl(expected / "asset.zip")
 
 
 @pytest.mark.parametrize("bad", ["../relative", "wrong-architecture", "mismatched-pair", "duplicate", "hash"])

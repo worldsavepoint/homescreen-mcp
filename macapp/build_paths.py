@@ -35,7 +35,8 @@ def write_record(folder, roots, inputs=()):
 def read_roots(folder, inputs=()):
     try:
         record = json.loads((folder / RECORD).read_text())
-        if record.get("version") != 2:
+        if (not isinstance(record, dict) or type(record.get("version")) is not int or record["version"] != 2
+                or not isinstance(record.get("roots"), list) or not isinstance(record.get("inputs"), dict)):
             raise ValueError
         roots = [Path(value) for value in record["roots"]]
         if not roots or any(not root.is_absolute() or root.parent == root for root in roots):
@@ -49,7 +50,10 @@ def read_roots(folder, inputs=()):
 
 def intel_inputs(folder):
     wheel, = (folder / "wheels").glob("cryptography-*.whl")
-    return folder / "requirements-build.lock", wheel
+    inputs = (folder / "requirements-build.lock", wheel)
+    if any(path.is_symlink() or not path.is_file() for path in inputs):
+        raise ValueError("Prepare a fresh native build to record its locations")
+    return inputs
 
 
 def main():

@@ -106,9 +106,16 @@ with zipfile.ZipFile(wheel) as archive, tempfile.TemporaryDirectory() as extract
         assert minimums and all(value == (14, 0) for value in minimums), "Expected macOS 14.0 deployment minimum"
 
 digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
-(output / "wheels").mkdir(parents=True, exist_ok=True)
-shutil.copy2(wheel, output / "wheels" / wheel.name)
-for previous in (output / "wheels").glob("cryptography-*.whl"):
+wheel_dir = output / "wheels"
+wheel_dir.mkdir(parents=True, exist_ok=True)
+with tempfile.NamedTemporaryFile(dir=wheel_dir, delete=False) as stream:
+    new_wheel = Path(stream.name)
+try:
+    shutil.copy2(wheel, new_wheel)
+    new_wheel.replace(wheel_dir / wheel.name)
+finally:
+    new_wheel.unlink(missing_ok=True)
+for previous in wheel_dir.glob("cryptography-*.whl"):
     if previous.name != wheel.name and (previous.is_file() or previous.is_symlink()):
         previous.unlink()
 shutil.copy2(openssl_license, output / "OPENSSL-LICENSE.txt")
