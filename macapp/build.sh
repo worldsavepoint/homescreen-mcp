@@ -24,11 +24,13 @@ APP="$BUILD/Screen Organizer.app"
 
 LOCK="$ROOT/requirements-build.lock"
 WHEEL_LINKS=()
+BUILD_PATH_ARGS=()
 if [[ "$ARCH" == x86_64 ]]; then
   DEPENDENCIES="$ROOT/build/dependencies/x86_64"
-  if [[ ! -f "$DEPENDENCIES/requirements-build.lock" ]]; then
+  if ! "$PYTHON" "$ROOT/macapp/build_paths.py" intel-check "$DEPENDENCIES" 2>/dev/null; then
     bash "$ROOT/macapp/prepare_intel.sh" "$PYTHON" "$DEPENDENCIES"
   fi
+  BUILD_PATH_ARGS=(--intel "$DEPENDENCIES")
   LOCK="$DEPENDENCIES/requirements-build.lock"
   WHEEL_LINKS=(--find-links "$DEPENDENCIES/wheels")
 fi
@@ -106,6 +108,5 @@ rm -rf "$STAGE"
 echo "built $APP ($(du -sh "$APP" | cut -f1)) and $DMG ($(du -sh "$DMG" | cut -f1))"
 
 echo "• release archives"
+"$VENV/bin/python" "$ROOT/macapp/build_paths.py" app-record "$BUILD" "$ROOT" "$BUILD" "$VENV" "${BUILD_PATH_ARGS[@]}"
 "$VENV/bin/python" "$ROOT/macapp/release.py" package --arch "$ARCH"
-"$VENV/bin/python" "$ROOT/macapp/check_package_paths.py" \
-  "$ROOT/build/release/$ARCH/home-screen-organizer-$VERSION-macos-$ARCH.zip" "$ROOT" "$BUILD" "$VENV"

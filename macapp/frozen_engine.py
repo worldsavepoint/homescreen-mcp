@@ -6,12 +6,19 @@ from pathlib import Path
 def replace_sysconfig(pure, code_cache, workpath, name, values, prefix):
     index, = (i for i, entry in enumerate(pure) if entry[0] == name)
     # Paths occur in plain values, lists, assignments and compiler include/library flags.
-    path = re.compile(r"(?:(?<![^\s=:,'\"])|(?<=-I)|(?<=-L)|(?<=-F))" + re.escape(prefix)
-                      + r"(?=/|[\s:,'\"]|$)")
+    path = re.compile(r"(?<![^\s=:,'\"])(-[ILF])?" + re.escape(prefix) + r"(?=/|[\s:,'\"]|$)")
     lines = ["from sys import prefix", "build_time_vars = {"]
     for key, value in values.items():
-        parts = path.split(value) if isinstance(value, str) else []
-        expression = " + prefix + ".join(map(repr, parts)) if len(parts) > 1 else repr(value)
+        expression = repr(value)
+        if isinstance(value, str):
+            fragments = []
+            start = 0
+            for match in path.finditer(value):
+                end = match.start() + len(match.group(1) or "")
+                fragments.extend([repr(value[start:end]), "prefix"])
+                start = match.end()
+            if fragments:
+                expression = " + ".join([*fragments, repr(value[start:])])
         lines.append(f"    {key!r}: {expression},")
     lines.append("}")
     destination = Path(workpath) / (name + ".py")

@@ -93,7 +93,7 @@ The other dependency versions match the arm64 pins.
 The committed `requirements-build-x86_64.lock` contains the Intel wheel and
 build-tool pins; `requirements-cryptography-x86_64.lock` pins the cryptography
 source archive and its hash. The generated lock combines these inputs with the
-compiled wheel. Keep the generated lock and wheel together for installation.
+compiled wheel. Keep the generated directory together for reuse. Its private build-path record associates the wheel and lock with the original compilation directories.
 
 ## Building the app
 
@@ -108,8 +108,8 @@ the Python 3.12 executable.
 
 The script creates a fresh temporary virtual environment, installs wheels from
 the architecture's hashed lock, adds the local source, and rebuilds the Python
-engine and Swift launcher. On Intel, it calls `prepare_intel.sh` when
-`build/dependencies/x86_64/requirements-build.lock` is missing. The app bundle
+engine and Swift launcher. On Intel, it calls `prepare_intel.sh` when the recorded
+Intel wheel or generated lock needs preparation. The app bundle
 includes `dependencies.txt` (the installed package inventory), the installed
 `requirements-build.lock`, and the MIT license. Intel bundles also include the
 cryptography source lock and `OPENSSL-LICENSE.txt`.
@@ -203,7 +203,7 @@ cd "build/release/$(uname -m)"
 shasum -a 256 --check SHA256SUMS.txt
 ```
 
-To recreate the archives from a completed build, run `python3.12 macapp/release.py package --arch "$(uname -m)"`. The package command checks the bundle version and architecture, preserves executable
+To recreate the archives from a completed build, use the locked build environment and run `.venv/bin/python macapp/release.py package --arch "$(uname -m)"`. The package command checks the bundle version and architecture, checks the staged ZIP against the locations recorded alongside the app build, preserves executable
 permissions in the ZIP, and produces the following in `build/release/<arch>/`:
 
 - `home-screen-organizer-<version>-macos-<arch>.dmg`

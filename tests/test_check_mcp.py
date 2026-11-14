@@ -103,3 +103,19 @@ def test_source_version_available_without_installed_distribution(monkeypatch):
 
     monkeypatch.setattr(server, "version", source_only)
     assert server._project_version() == tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+
+
+@pytest.mark.parametrize("installed, release", [("1.3.0", "1.3.0"), ("1.3.0a2", "1.3.0-alpha.2"),
+                                                ("1.3.0b12", "1.3.0-beta.12"), ("1.3.0rc3", "1.3.0-rc.3")])
+def test_installed_and_source_prerelease_identity(tmp_path, monkeypatch, installed, release):
+    from homescreen import server
+    from importlib.metadata import PackageNotFoundError
+
+    monkeypatch.setattr(server, "version", lambda name: installed)
+    assert server._project_version() == release
+    def missing(name):
+        raise PackageNotFoundError(name)
+    monkeypatch.setattr(server, "version", missing)
+    monkeypatch.setattr(server, "__file__", str(tmp_path / "homescreen/server.py"))
+    (tmp_path / "pyproject.toml").write_text(f'[project]\nversion="{release}"\n')
+    assert server._project_version() == release

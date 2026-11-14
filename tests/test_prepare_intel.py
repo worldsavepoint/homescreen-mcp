@@ -61,3 +61,24 @@ exit 98
     assert "checksum" in (result.stdout + result.stderr).lower()
     assert not marker.exists()
     assert not output.exists()
+
+
+def test_reused_intel_paths_follow_the_prepared_wheel(tmp_path):
+    import shutil
+    from macapp.build_paths import intel_inputs, read_roots, write_record
+
+    prepared = tmp_path / "dependencies"
+    wheel = prepared / "wheels/cryptography-test.whl"
+    wheel.parent.mkdir(parents=True)
+    wheel.write_bytes(b"compiled")
+    (prepared / "requirements-build.lock").write_bytes(b"locked")
+    with pytest.raises(ValueError):
+        read_roots(prepared, intel_inputs(prepared))
+    original = tmp_path / "system-temp/build with spaces"
+    write_record(prepared, [original], intel_inputs(prepared))
+    reused = tmp_path / "another-checkout"
+    shutil.copytree(prepared, reused)
+    assert original in read_roots(reused, intel_inputs(reused))
+    (reused / "wheels" / wheel.name).write_bytes(b"different")
+    with pytest.raises(ValueError):
+        read_roots(reused, intel_inputs(reused))

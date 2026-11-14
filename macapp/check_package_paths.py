@@ -3,59 +3,128 @@ import argparse
 import io
 import os
 from pathlib import Path
+import re
+import stat
+import struct
 import sysconfig
 import tempfile
+from types import CodeType
 import zipfile
-
-from PyInstaller.archive.readers import CArchiveReader
 
 ENGINE = "Screen Organizer.app/Contents/Resources/engine/engine"
 
 
+class BuildPathError(ValueError):
+    pass
+
+
+def runner_roots():
+    actions = os.environ.get("GITHUB_ACTIONS") == "true"
+    hosted = actions and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+    roots = [] if hosted else [Path.home()]
+    if actions and (temp := os.environ.get("RUNNER_TEMP")):
+        roots.append(Path(temp))
+    return roots
+
+
 def check_archive(path, blocked):
-    prefixes = {os.fsencode(form) for root in blocked
-                for form in (root.absolute(), root.resolve())}
+    try:
+        from PyInstaller import __version__
+        from PyInstaller.archive.readers import CArchiveReader
+        if __version__ != "6.22.3":
+            raise ImportError
+    except ImportError:
+        raise ValueError("Use the locked build environment to verify the archive") from None
+
+    roots = {os.fsencode(form) for root in blocked for form in (root.absolute(), root.resolve())}
+    # A directory can be followed by a slash, a string terminator or a token delimiter.
+    patterns = [re.compile(re.escape(root) + rb"(?=$|[/\x00-\x20\x7f\"':,;=])") for root in roots]
 
     def check(data):
-        if any(prefix in data for prefix in prefixes):
-            raise ValueError("Release payload contains a local build path")
+        if any(pattern.search(data) for pattern in patterns):
+            raise BuildPathError("Release payload contains a local build path")
 
-    def check_zip(archive):
-        for entry in archive.infolist():
-            check(entry.filename.encode())
-            data = archive.read(entry)
-            check(data)
-            if entry.filename.lower().endswith(".zip"):
-                with zipfile.ZipFile(io.BytesIO(data)) as nested:
+    def check_value(value):
+        if isinstance(value, str):
+            check(value.encode(errors="surrogatepass"))
+        elif isinstance(value, bytes):
+            check(value)
+        elif isinstance(value, CodeType):
+            check_value(value.co_filename)
+            check_value(value.co_consts)
+        elif isinstance(value, (tuple, frozenset)):
+            for item in value:
+                check_value(item)
+
+    def check_payload(name, data, regular):
+        check(data)
+        if regular:
+            stream = io.BytesIO(data)
+            if name.lower().endswith((".zip", ".whl")) or zipfile.is_zipfile(stream):
+                with zipfile.ZipFile(stream) as nested:
                     check_zip(nested)
 
-    module = sysconfig._get_sysconfigdata_name()
-    found_module = False
-    with zipfile.ZipFile(path) as archive, tempfile.TemporaryDirectory() as folder:
-        check_zip(archive)
-        engine = Path(folder) / "engine"
-        engine.write_bytes(archive.read(ENGINE))
-        package = CArchiveReader(str(engine))
+    def check_extra(extra):
+        check(extra)
+        offset = 0
+        while len(extra) - offset >= 4:
+            size, = struct.unpack_from("<H", extra, offset + 2)
+            offset += 4
+            check(extra[offset:offset + size])
+            offset += size
+
+    def check_zip(archive):
+        check(archive.comment)
+        for info in archive.infolist():
+            check(info.filename.encode())
+            check(info.comment)
+            check_extra(info.extra)
+            # The local header can carry different extra fields than the central directory.
+            archive.fp.seek(info.header_offset)
+            header = archive.fp.read(30)
+            name_length, extra_length = struct.unpack_from("<HH", header, 26)
+            check(archive.fp.read(name_length))
+            check_extra(archive.fp.read(extra_length))
+            kind = stat.S_IFMT(info.external_attr >> 16)
+            check_payload(info.filename, archive.read(info), kind in (0, stat.S_IFREG) and not info.is_dir())
+
+    def check_engine(path):
+        module = sysconfig._get_sysconfigdata_name()
+        found = False
+        package = CArchiveReader(str(path))
         for option in package.options:
             check(option.encode())
         for name, entry in package.toc.items():
             check(name.encode())
             data = package.extract(name)
-            check(data)
+            check_payload(name, data, entry[-1] in ("x", "Z"))
             if entry[-1] == "z":
                 pyz = package.open_embedded_archive(name)
                 for member in pyz.toc:
                     check(member.encode())
-                    check(pyz.extract(member, raw=True) or b"")
+                    raw = pyz.extract(member, raw=True) or b""
+                    check(raw)
+                    if any(root in raw for root in roots):
+                        check_value(pyz.extract(member))
                 if module in pyz.toc:
                     if pyz.extract(module).co_filename != module + ".py":
-                        raise ValueError("Check the packaged sysconfig module filename")
-                    found_module = True
-            elif name.lower().endswith(".zip"):
-                with zipfile.ZipFile(io.BytesIO(data)) as nested:
-                    check_zip(nested)
-    if not found_module:
-        raise ValueError("Include the active sysconfig module in the packaged engine")
+                        raise ValueError
+                    found = True
+        if not found:
+            raise ValueError
+
+    try:
+        check(path.read_bytes())
+        with zipfile.ZipFile(path) as archive, tempfile.TemporaryDirectory() as folder:
+            check_zip(archive)
+            engine = Path(folder) / "engine"
+            engine.write_bytes(archive.read(ENGINE))
+            check_engine(engine)
+    except BuildPathError:
+        raise
+    except (Exception, SystemExit):
+        # Archive readers include their input filename in parsing errors.
+        raise ValueError("Could not verify the native release archive") from None
 
 
 def main():
@@ -63,14 +132,8 @@ def main():
     parser.add_argument("archive", type=Path)
     parser.add_argument("build_roots", type=Path, nargs="+")
     args = parser.parse_args()
-    roots = args.build_roots
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        if temp := os.environ.get("RUNNER_TEMP"):
-            roots.append(Path(temp))
-    else:
-        roots.append(Path.home())
     try:
-        check_archive(args.archive, roots)
+        check_archive(args.archive, [*args.build_roots, *runner_roots()])
     except ValueError as error:
         parser.exit(1, f"{error}\n")
     print("Native archive build-path check passed")

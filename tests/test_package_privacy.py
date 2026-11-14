@@ -14,7 +14,7 @@ def test_build_configuration_relocates_complete_path_components(tmp_path, monkey
     name = sysconfig._get_sysconfigdata_name()
     values = {"prefix": root, "list": f"{root}/lib {root}", "flags": f"-I{root}/inc",
               "sibling": root + "-tools", "other": "/parent" + root + "/lib",
-              "literal": "__PYTHON_PREFIX__", "number": 42}
+              "literal": "__PYTHON_PREFIX__", "number": 42, "vendor_flags": "/vendor-I" + root + " /vendor-F" + root + " /vendor-L" + root}
     entries = [("another", "another.py", "PYMODULE"), (name, "original.py", "PYMODULE")]
     cache = {"another": object(), name: object()}
     replace_sysconfig(entries, cache, tmp_path, name, values, root)
@@ -83,3 +83,75 @@ def test_analysis_collects_project_version_document(document):
              "home_screen_organizer_plugin-2.0.dist-info/RECORD", "homescreen/web/index.html"]
     data = [(name, "source", "DATA") for name in files]
     assert project_metadata(data, document) == [data[i] for i in (0, 3, 4, 5)]
+
+
+@pytest.mark.parametrize("kind", ["archive-comment", "member-comment", "extra", "local-extra", "wheel", "extensionless"])
+def test_zip_metadata_and_nested_containers(tmp_path, kind):
+    import struct
+    from macapp.check_package_paths import check_archive
+
+    root = tmp_path / "build-root"
+    path = native_zip(tmp_path)
+    marker = bytes(root)
+    info = zipfile.ZipInfo("entry")
+    with zipfile.ZipFile(path, "a") as archive:
+        if kind == "archive-comment":
+            archive.comment = marker
+        elif kind == "member-comment":
+            info.comment = marker
+        elif kind in ("extra", "local-extra"):
+            info.extra = struct.pack("<HH", 4567, len(marker)) + marker
+        else:
+            nested = io.BytesIO()
+            with zipfile.ZipFile(nested, "w", zipfile.ZIP_DEFLATED) as wheel:
+                wheel.writestr("data", marker)
+            archive.writestr("data.whl" if kind == "wheel" else "data", nested.getvalue())
+        archive.writestr(info, "metadata")
+    if kind == "local-extra":
+        before, after = path.read_bytes().rsplit(marker, 1)
+        path.write_bytes(before + b"x" * len(marker) + after)
+    with pytest.raises(ValueError, match="build path"):
+        check_archive(path, [root])
+
+
+def test_zip_named_link_and_prefix_siblings(tmp_path):
+    import stat
+    from macapp.check_package_paths import check_archive
+
+    root = tmp_path / "app"
+    path = native_zip(tmp_path, config=str(root) + "-other/lib")
+    with zipfile.ZipFile(path, "a") as archive:
+        link = zipfile.ZipInfo("stdlib.zip")
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        archive.writestr(link, "base_library.zip")
+    check_archive(path, [root])
+
+
+@pytest.mark.parametrize("hosted, clean", [("github-hosted", True), ("self-hosted", False), ("", False)])
+def test_archive_home_by_runner_type(tmp_path, monkeypatch, hosted, clean):
+    import subprocess
+    from macapp import check_package_paths as scanner
+
+    folder = tmp_path / "personal"
+    archive = native_zip(tmp_path, config=str(folder / "another-place"))
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", hosted)
+    monkeypatch.setenv("HOME", str(folder))
+    result = subprocess.run([sys.executable, scanner.__file__, str(archive), str(tmp_path / "checkout")],
+                            capture_output=True)
+    assert (result.returncode == 0) == clean
+    assert bytes(folder) not in result.stderr
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_malformed_archive_diagnostic(tmp_path, missing):
+    import subprocess
+    from macapp import check_package_paths as scanner
+
+    path = native_zip(tmp_path)
+    with zipfile.ZipFile(path, "w" if missing else "a") as archive:
+        archive.writestr("bad.zip", b"wrong")
+    result = subprocess.run([sys.executable, scanner.__file__, str(path), str(tmp_path)], capture_output=True)
+    assert result.returncode != 0
+    assert result.stderr and b"Traceback" not in result.stderr
+    assert bytes(tmp_path) not in result.stderr

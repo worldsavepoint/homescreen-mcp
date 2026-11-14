@@ -86,7 +86,7 @@ All modes include Dock and App Library organization. iPad grid, Dock and folder 
 
 ## Use an MCP assistant
 
-Open **MCP Setup** in the app. Register or update **Codex** and **Claude Code** with the native client panel, or copy launch settings for **Cursor, Claude Desktop, VS Code / Copilot**, and other stdio clients. New registrations use read-only mode; advanced settings show and export the selected access mode. Configuration, startup checks and live connection status are shown separately.
+Open **MCP Setup** in the app. Register or update **Codex** and **Claude Code** with the native client panel, or copy launch settings for **Cursor, Claude Desktop, VS Code / Copilot**, and other stdio clients. Read-only is the default. Register uses the access mode selected in Advanced settings, which also exports that mode. Configuration, startup checks and live connection status are shown separately.
 
 Any local stdio MCP client can launch the bundled engine:
 

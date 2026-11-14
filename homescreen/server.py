@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -41,11 +42,17 @@ use get_icons for icons needing visual review."""
 
 def _project_version() -> str:
     try:
-        return version("home-screen-organizer")
+        installed = version("home-screen-organizer")
     except PackageNotFoundError:
         # A source checkout can run without installing the project's wheel.
         with (Path(__file__).resolve().parents[1] / "pyproject.toml").open("rb") as source:
             return tomllib.load(source)["project"]["version"]
+    prerelease = re.fullmatch(r"(\d+\.\d+\.\d+)(a|b|rc)(\d+)", installed)
+    if prerelease:
+        base, tag, sequence = prerelease.groups()
+        stage = {"a": "alpha", "b": "beta", "rc": "rc"}[tag]
+        return f"{base}-{stage}.{sequence}"
+    return installed
 
 
 mcp = MCPServer("ios-homescreen-mcp", instructions=INSTRUCTIONS, version=_project_version())

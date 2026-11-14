@@ -12,7 +12,7 @@ Screen Organizer exposes a local **stdio MCP server** for inspecting layouts, ed
 | [Source installation](../macapp/BUILDING.md#source-installation) | `/absolute/path/ios-homescreen-organizer/.venv/bin/home-screen-mcp` | None |
 | Standalone MCPB | Client-managed `server/launch.sh` | Managed by the bundle manifest |
 
-Open **MCP Setup** in the app after accepting the launch agreement. The client panel detects Codex and Claude Code and can register, inspect and update this server. If a client executable is missing, install it using its official guide or choose its executable in the panel. New registrations use **read-only** mode and the existing **stdio** engine.
+Open **MCP Setup** in the app after accepting the launch agreement. The client panel detects Codex and Claude Code and can register, inspect and update this server. If a client executable is missing, install it using its official guide or choose its executable in the panel. **Read-only** is the default. Register uses the mode selected in **Advanced settings** and the existing **stdio** engine.
 
 **Advanced settings** show the current engine path and access mode and copy a launch command, Cursor / Claude JSON, Codex TOML, VS Code JSON or Copilot JSON. Exports use the selected mode; Apply-enabled mode sets both `HOMESCREEN_READ_ONLY=0` and `HOMESCREEN_ALLOW_APPLY=1`. Configuration status records a saved registration; the separate startup check initializes and discovers tools; live connection status comes from client-reported state.
 

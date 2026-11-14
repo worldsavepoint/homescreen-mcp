@@ -46,6 +46,14 @@ def make_build(tmp_path, version=VERSION, arch="arm64"):
         "HomeScreenOrganizerReleaseVersion": version,
         "HomeScreenOrganizerArchitecture": arch,
     }))
+    from test_package_privacy import native_zip
+    from macapp.build_paths import write_record
+
+    native_zip(tmp_path)
+    engine = app / "Contents/Resources/engine/engine"
+    engine.parent.mkdir(parents=True)
+    engine.write_bytes((tmp_path / "engine").read_bytes())
+    write_record(build, [build])
     (build / f"home-screen-organizer-{version}.dmg").write_bytes(b"fixture disk image\n")
     result = release("localize", "--app", app)
     assert result.returncode == 0, result.stderr
@@ -98,7 +106,8 @@ def test_prerelease_keeps_tag_version_with_numeric_bundle_version(tmp_path):
     project = tmp_path / "project"
     script = project / "macapp/release.py"
     script.parent.mkdir(parents=True)
-    script.write_bytes(SCRIPT.read_bytes())
+    for name in ("release.py", "check_package_paths.py", "build_paths.py"):
+        (script.parent / name).write_bytes((SCRIPT.parent / name).read_bytes())
     (project / "pyproject.toml").write_text('[project]\nversion = "1.2.0-beta.1"\n')
     output = tmp_path / "prerelease"
     result = subprocess.run([sys.executable, str(script), "package", "--build-dir", str(build),
@@ -213,3 +222,47 @@ def test_verify_rejects_incomplete_checksums_and_mismatched_registry_metadata(tm
         refresh_distribution_checksums(output)
     result = release("verify", "--input-dir", output, "--repository", "example/project", "--tag", f"v{VERSION}")
     assert result.returncode != 0
+
+
+def test_rejected_package_preserves_verified_assets(tmp_path):
+    build = make_build(tmp_path)
+    output = tmp_path / "release"
+    args = ("package", "--arch", "arm64", "--build-dir", build, "--output-dir", output)
+    dirty = build / "Screen Organizer.app/Contents/Resources/note"
+    dirty.write_text(str(build / "private"))
+    assert release(*args).returncode != 0
+    assert not output.exists()
+    dirty.unlink()
+    result = release(*args)
+    assert result.returncode == 0, result.stderr
+    (output / "other").write_text("keep")
+    before = {p.name: p.read_bytes() for p in output.iterdir()}
+    dirty.write_text(str(build / "another"))
+    assert release(*args).returncode != 0
+    assert {p.name: p.read_bytes() for p in output.iterdir()} == before
+    dirty.write_text("public resource")
+    result = release(*args)
+    assert result.returncode == 0, result.stderr
+    assert (output / "other").read_text() == "keep"
+    assert (output / "SHA256SUMS.txt").read_bytes() != before["SHA256SUMS.txt"]
+
+
+def test_recreated_package_uses_original_intel_roots(tmp_path):
+    from macapp.build_paths import write_record
+
+    build = make_build(tmp_path, arch="x86_64")
+    original = tmp_path / "old-temp/intel"
+    prepared = tmp_path / "copied-dependencies"
+    wheel = prepared / "wheels/cryptography-source.whl"
+    wheel.parent.mkdir(parents=True)
+    wheel.write_bytes(b"fixture")
+    lock = prepared / "requirements-build.lock"
+    lock.write_text("fixture")
+    write_record(prepared, [original], (lock, wheel))
+    subprocess.run([sys.executable, str(SCRIPT.with_name("build_paths.py")), "app-record",
+                    str(build), str(build), "--intel", str(prepared)], check=True)
+    (build / "Screen Organizer.app/Contents/Resources/note").write_text(str(original / "openssl/lib"))
+    output = tmp_path / "release"
+    result = release("package", "--build-dir", build, "--output-dir", output, "--arch", "x86_64")
+    assert result.returncode != 0 and "build path" in result.stderr
+    assert str(original) not in result.stderr and not output.exists()

@@ -12,7 +12,7 @@ Screen Organizer（屏幕整理）提供本地 <strong>stdio MCP 服务器</stro
 | [源码安装](../macapp/BUILDING.md#source-installation) | `/absolute/path/ios-homescreen-organizer/.venv/bin/home-screen-mcp` | 无 |
 | 独立 MCPB | 客户端管理的 `server/launch.sh` | 由清单管理 |
 
-同意启动协议后，打开 App 的<strong>MCP 配置</strong>。客户端面板检测 Codex 和 Claude Code，可注册、检查和更新此服务器。未找到客户端时，请按官方指南安装或在面板中选择可执行文件。新注册采用<strong>只读</strong>模式与现有的 <strong>stdio</strong> 引擎。
+同意启动协议后，打开 App 的<strong>MCP 配置</strong>。客户端面板检测 Codex 和 Claude Code，可注册、检查和更新此服务器。未找到客户端时，请按官方指南安装或在面板中选择可执行文件。默认模式为<strong>只读</strong>。注册时采用<strong>高级设置</strong>中选定的访问模式和现有的 <strong>stdio</strong> 引擎。
 
 <strong>高级设置</strong>显示当前引擎路径与访问模式，可复制启动命令、Cursor / Claude JSON、Codex TOML、VS Code JSON 或 Copilot JSON。导出内容采用所选模式；启用应用时设置 `HOMESCREEN_READ_ONLY=0` 与 `HOMESCREEN_ALLOW_APPLY=1`。配置状态表示已保存的注册；独立启动检查执行初始化与工具发现；实时连接状态来自客户端报告。
 

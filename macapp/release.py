@@ -1,13 +1,17 @@
 """Assemble versioned macOS release assets from a completed app build."""
 import argparse
+import ctypes
+import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
 import platform
 import re
 import shutil
 import subprocess
+import tempfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,18 +79,57 @@ def package(build_dir, output_dir, version, arch):
     dmg = build_dir / f"home-screen-organizer-{version}.dmg"
     if not dmg.is_file():
         raise ValueError(f"Build the disk image first: {dmg.name}")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    disk_image = output_dir / f"home-screen-organizer-{version}-macos-{arch}.dmg"
-    archive = output_dir / f"home-screen-organizer-{version}-macos-{arch}.zip"
-    shutil.copyfile(dmg, disk_image)
-    subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
-                    str(app), str(archive)], check=True)
-    lines = []
-    for asset in (disk_image, archive):
-        with asset.open("rb") as stream:
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        lines.append(f"{digest}  {asset.name}\n")
-    (output_dir / "SHA256SUMS.txt").write_text("".join(lines))
+    from build_paths import read_roots
+    from check_package_paths import check_archive, runner_roots
+
+    if output_dir in (build_dir, *build_dir.parents) or build_dir in output_dir.parents:
+        raise ValueError("Choose a separate directory for the release archives")
+    roots = [ROOT, build_dir, output_dir, *read_roots(build_dir), *runner_roots()]
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    basename = f"home-screen-organizer-{version}-macos-{arch}"
+    with tempfile.TemporaryDirectory(dir=output_dir.parent, prefix=".native-release-") as folder:
+        staged = Path(folder) / "assets"
+        staged.mkdir()
+        disk_image = staged / (basename + ".dmg")
+        archive = staged / (basename + ".zip")
+        shutil.copyfile(dmg, disk_image)
+        subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
+                        str(app), str(archive)], check=True, capture_output=True)
+        check_archive(archive, [*roots, staged])
+        lines = []
+        for asset in (disk_image, archive):
+            with asset.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            lines.append(f"{digest}  {asset.name}\n")
+        (staged / "SHA256SUMS.txt").write_text("".join(lines))
+        install_generation(staged, output_dir)
+
+
+def install_generation(staged, output):
+    # Lock the parent directory while preserving sibling files and exchanging generations.
+    parent_fd = os.open(output.parent, os.O_RDONLY)
+    try:
+        fcntl.flock(parent_fd, fcntl.LOCK_EX)
+        if not output.exists():
+            staged.rename(output)
+            return
+        current_names = {entry.name for entry in staged.iterdir()}
+        for entry in output.iterdir():
+            if entry.name in current_names:
+                continue
+            destination = staged / entry.name
+            if entry.is_symlink():
+                destination.symlink_to(os.readlink(entry))
+            elif entry.is_dir():
+                shutil.copytree(entry, destination, symlinks=True)
+            else:
+                os.link(entry, destination)
+        # Darwin RENAME_SWAP exchanges two populated directories on the same volume.
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.renamex_np(os.fsencode(staged), os.fsencode(output), 2) != 0:
+            raise OSError(ctypes.get_errno(), "Could not install the verified release")
+    finally:
+        os.close(parent_fd)
 
 
 def collect(input_dir, output_dir, version):
@@ -179,7 +222,11 @@ def main():
         elif args.command == "verify":
             verify_distribution(args.input_dir.resolve(), version, args.repository)
         print(version)
-    except (ValueError, KeyError, OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.CalledProcessError) as exc:
+        if args.command == "package":
+            parser.exit(1, "Could not prepare the verified native release\n")
+        parser.exit(1, f"{exc}\n")
+    except (ValueError, KeyError) as exc:
         parser.exit(1, f"{exc}\n")
 
 
