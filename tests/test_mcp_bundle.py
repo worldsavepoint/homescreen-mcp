@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "macapp/mcp_bundle.py"
 VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
 BUNDLE = f"home-screen-organizer-{VERSION}-macos.mcpb"
-RESOURCES = "Home Screen Organizer.app/Contents/Resources/"
+RESOURCES = "Screen Organizer.app/Contents/Resources/"
 ENGINE = b'#!/bin/sh\nprintf \'%s\\n\' "$HOMESCREEN_READ_ONLY" "$@"\n'
 
 
@@ -34,18 +34,21 @@ def assets(tmp_path, extra=None):
         prefix = f"home-screen-organizer-{VERSION}-macos-{arch}"
         (folder / f"{prefix}.dmg").write_bytes(b"disk fixture")
         with zipfile.ZipFile(folder / f"{prefix}.zip", "w") as archive:
-            member(archive, "Home Screen Organizer.app/Contents/Info.plist", plistlib.dumps({
+            member(archive, "Screen Organizer.app/Contents/Info.plist", plistlib.dumps({
                 "CFBundleShortVersionString": VERSION, "HomeScreenOrganizerReleaseVersion": VERSION,
                 "HomeScreenOrganizerArchitecture": arch}))
             member(archive, RESOURCES + "engine/engine", ENGINE, stat.S_IFREG | 0o755)
             member(archive, RESOURCES + "engine/_internal/libsigned.dylib", b"signed native bytes\x00" + arch.encode(), stat.S_IFREG | 0o755)
             member(archive, RESOURCES + "engine/_internal/current", b"libsigned.dylib", stat.S_IFLNK | 0o777)
             member(archive, RESOURCES + "engine/_internal/example.dist-info/licenses/LICENSE", b"third party notice")
-            for name in ("LICENSE", "dependencies.txt", "requirements-build.lock"):
+            for name in ("LICENSE", "dependencies.txt", "requirements-build.lock", "THIRD-PARTY-NOTICES.txt", "SourceInventory.json",
+                         "ThirdPartyLicenses/components.json", "ThirdPartyLicenses/h11/LICENSE.txt"):
                 member(archive, RESOURCES + name, b"notice " + name.encode())
             if arch == "x86_64":
                 for name in ("OPENSSL-LICENSE.txt", "requirements-cryptography-x86_64.lock"):
                     member(archive, RESOURCES + name, b"Intel notice")
+            for catalog in (ROOT / "homescreen/web/locales").glob("*.json"):
+                member(archive, RESOURCES + "engine/_internal/homescreen/web/locales/" + catalog.name, catalog.read_bytes())
             if extra:
                 extra(archive, arch)
     checksum(folder)
@@ -82,12 +85,19 @@ def test_bundle_contains_both_signed_engines_modes_symlinks_and_notices(tmp_path
             assert archive.read(prefix + "_internal/example.dist-info/licenses/LICENSE") == b"third party notice"
             assert archive.read(f"licenses/{arch}/LICENSE") == b"notice LICENSE"
             assert archive.read(f"licenses/{arch}/dependencies.txt") == b"notice dependencies.txt"
+            for catalog in (ROOT / "homescreen/web/locales").glob("*.json"):
+                assert archive.read(prefix + "_internal/homescreen/web/locales/" + catalog.name) == catalog.read_bytes()
         assert archive.read("licenses/x86_64/OPENSSL-LICENSE.txt") == b"Intel notice"
+        assert archive.read("THIRD-PARTY-NOTICES.txt") == b"notice THIRD-PARTY-NOTICES.txt"
+        assert archive.read("licenses/arm64/ThirdPartyLicenses/h11/LICENSE.txt") == b"notice ThirdPartyLicenses/h11/LICENSE.txt"
         assert archive.read("LICENSE") == (ROOT / "LICENSE").read_bytes()
         assert stat.S_IMODE(archive.getinfo("server/launch.sh").external_attr >> 16) == 0o755
         manifest = json.loads(archive.read("manifest.json"))
+    assert manifest["license"] == "GPL-3.0-or-later"
     assert manifest["manifest_version"] == "0.3"
     assert manifest["version"] == VERSION
+    assert manifest["name"] == "home-screen-organizer"
+    assert manifest["display_name"] == "Screen Organizer"
     assert manifest["author"]["name"] == "Jonathan Kats"
     assert manifest["server"] == {"type": "binary", "entry_point": "server/launch.sh", "mcp_config": {
         "command": "/bin/sh", "args": ["${__dirname}/server/launch.sh"], "env": {"HOMESCREEN_READ_ONLY": "1"}}}
@@ -96,7 +106,7 @@ def test_bundle_contains_both_signed_engines_modes_symlinks_and_notices(tmp_path
     assert server["$schema"] == "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json"
     assert server["name"] == "io.github.worldsavepoint/home-screen-organizer"
     assert server["version"] == VERSION
-    assert server["title"] == "Home Screen Organizer"
+    assert server["title"] == "Screen Organizer"
     assert server["packages"] == [{"registryType": "mcpb", "identifier":
         f"https://github.com/worldsavepoint/ios-homescreen-organizer/releases/download/v{VERSION}/{BUNDLE}",
         "fileSha256": hashlib.sha256((output / BUNDLE).read_bytes()).hexdigest(), "transport": {"type": "stdio"}}]
@@ -199,3 +209,19 @@ def test_dangling_or_cyclic_symlink_fails_before_output(tmp_path, target):
     result = assemble(folder, output)
     assert result.returncode != 0
     assert not output.exists()
+
+
+def test_publish_checks_mcpb_members_against_signed_native_zips(tmp_path):
+    sys.path.insert(0, str(ROOT / "macapp"))
+    from mcp_bundle import verify_bundle
+    folder = assets(tmp_path)
+    output = tmp_path / "dist"
+    assert assemble(folder, output).returncode == 0
+    bundle = output / BUNDLE
+    verify_bundle(bundle, folder, VERSION, "worldsavepoint/ios-homescreen-organizer",
+                  (ROOT / "LICENSE").read_bytes(), (ROOT / "macapp/mcp_launcher.sh").read_bytes())
+    with zipfile.ZipFile(bundle, "a") as modified:
+        modified.writestr("server/arm64/unexpected.py", b"unexpected")
+    with pytest.raises(ValueError, match="bundle"):
+        verify_bundle(bundle, folder, VERSION, "worldsavepoint/ios-homescreen-organizer",
+                      (ROOT / "LICENSE").read_bytes(), (ROOT / "macapp/mcp_launcher.sh").read_bytes())

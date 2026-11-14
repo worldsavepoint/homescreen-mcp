@@ -265,20 +265,23 @@ def test_gaps_round_trip_dict_format(tmp_path):
 
 
 def test_gaps_remembered_when_device_cannot_report_them(tmp_path):
-    """A real phone never reports gaps; gaps set in Homescreen must survive a re-read."""
-    path = tmp_path / "phone.plist"
-    path.write_bytes(plistlib.dumps(_gap_layout()))           # list format: no gap info
-    s = Session(FileSource(path), tmp_path / "data")
+    from fake_phone import app
+    from test_live_frame import FrameSource
+
+    source = FrameSource(False)
+    source.metrics = None
+    source.raw = _gap_layout()
+    s = Session(source, tmp_path / "data")
     asyncio.run(s.read())
     assert s.gaps_readable is False
     s.edit(lambda lay: lay.pin("com.g.a5", 1, 23))
     assert asyncio.run(s.apply(s.require().token()))["ok"]
-    asyncio.run(s.read())                                     # phone reports no gaps...
-    assert s.require().pins == {"com.g.a5": 23}               # ...but Homescreen remembers it
-    # a gap that no longer fits (page changed on the phone) is dropped, not forced
-    page = _gap_layout()
-    page[1] = page[1] + [{"bundleIdentifier": f"com.g.x{i}", "displayIdentifier": f"com.g.x{i}", "displayName": "X"} for i in range(13)]
-    path.write_bytes(plistlib.dumps(page))
+    assert next(iter(source.payloads[0]["listMetadata"].values()))["fixedLocations"] == {"com.g.a5": 23}
+    asyncio.run(s.read())
+    assert s.require().pins == {"com.g.a5": 23}
+    # Reflow a page that has grown too full for its remembered gap.
+    source.raw = _gap_layout()
+    source.raw[1].extend(app(f"com.g.x{i}", f"X{i}") for i in range(13))
     asyncio.run(s.read())
     assert s.require().validate() == []
 
@@ -298,7 +301,7 @@ class HiddenWebClipPhone:
     async def read(self):
         return [list(p) for p in self.state], list(self.apps)  # installed apps only
 
-    async def write(self, state, library, pins=None):
+    async def write(self, state, library, pins=None, grid=None):
         self.writes += 1
         listed = {x.get("displayIdentifier") for x in library}
         state = [list(p) for p in state]

@@ -104,6 +104,11 @@ def test_build_recreates_environment_and_requires_locked_hashes(tmp_path):
     uname.chmod(0o755)
     fake_python = fake_bin / "python3.12"
     fake_python.write_text('''#!/bin/zsh
+if [[ "$1" == */source_checkout.py ]]; then
+  mkdir -p "$3/macapp"
+  print -r -- "0123456789012345678901234567890123456789"
+  exit 0
+fi
 if [[ "$1" != "-m" || "$2" != "venv" ]]; then exit 80; fi
 mkdir -p "$3/bin"
 cat > "$3/bin/python" <<'SCRIPT'
@@ -116,7 +121,8 @@ chmod +x "$3/bin/python"
     fake_python.chmod(0o755)
     result = subprocess.run(["zsh", str(ROOT / "macapp/build.sh")], capture_output=True, text=True,
                             env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
-                                 "HOMESCREEN_BUILD_VENV": str(build_venv), "HOMESCREEN_BUILD_ARCH": "arm64", "COMMAND_LOG": str(log)})
+                                 "HOMESCREEN_BUILD_VENV": str(build_venv), "HOMESCREEN_BUILD_PYTHON": str(fake_python),
+                                 "HOMESCREEN_BUILD_ARCH": "arm64", "COMMAND_LOG": str(log)})
     assert result.returncode == 79, result.stdout + result.stderr
     install = log.read_text()
     assert "--require-hashes" in install

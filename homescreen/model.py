@@ -40,13 +40,22 @@ class Grid:
 
     @classmethod
     def from_metrics(cls, m: dict[str, Any] | None) -> "Grid":
-        m = m or {}
-        try:
-            return cls(int(m["homeScreenIconColumns"]), int(m["homeScreenIconRows"]),
-                       int(m.get("homeScreenIconDockMaxCount", DEFAULT_DOCK_SLOTS)),
-                       int(m.get("homeScreenIconFolderColumns", 3)) * int(m.get("homeScreenIconFolderRows", 3)))
-        except (KeyError, TypeError, ValueError):
+        if m is None:
             return cls()
+        if not isinstance(m, dict):
+            raise LayoutError("device grid metrics must be positive integers; read the device again")
+
+        def dimension(key: str, default: int) -> int:
+            value = m.get(key, default)
+            if isinstance(value, str) and value.isascii() and value.isdecimal():
+                value = int(value)
+            if type(value) is not int or value <= 0:
+                raise LayoutError("device grid metrics must be positive integers; read the device again")
+            return value
+
+        return cls(dimension("homeScreenIconColumns", GRID_COLS), dimension("homeScreenIconRows", GRID_ROWS),
+                   dimension("homeScreenIconDockMaxCount", DEFAULT_DOCK_SLOTS),
+                   dimension("homeScreenIconFolderColumns", 3) * dimension("homeScreenIconFolderRows", 3))
 
     def to_dict(self) -> dict[str, int]:
         return {"cols": self.cols, "rows": self.rows, "dock": self.dock, "folder": self.folder}
@@ -129,7 +138,8 @@ class Layout:
                  dock_slots: int = DEFAULT_DOCK_SLOTS, source: list[Any] | None = None,
                  library: list[Any] | None = None, source_library: list[Any] | None = None,
                  bank: list[Any] | None = None, pins: dict[str, int] | None = None,
-                 source_pins: dict[str, int] | None = None, grid: Grid | None = None):
+                 source_pins: dict[str, int] | None = None, grid: Grid | None = None,
+                 identity: dict[str, Any] | None = None, source_identity: dict[str, Any] | None = None):
         """source / source_library: the state as read from the device, when raw_state is a saved draft.
 
         library: App Library-only apps (iOS stores these as "ignored"). None means the device
@@ -137,6 +147,7 @@ class Layout:
         """
         if not isinstance(raw_state, list) or not raw_state:
             raise LayoutError("icon state must be a non-empty list (dock, then pages)")
+        self.approval_device: str | None = None
         self.grid = grid or IPHONE
         self.page_slots = self.grid.slots if grid else page_slots
         self.dock_slots = self.grid.dock if grid else dock_slots
@@ -149,14 +160,70 @@ class Layout:
         self.library = None if library is None else [self._wrap(r, "library") for r in library]
         # App Bank: a draft-only tray for items set aside while rearranging. Never written.
         self.bank = [self._wrap(r, "bank") for r in bank or []]
+        if identity is not None:
+            self._restore_identity(identity)
+        self.source_identity = copy.deepcopy(source_identity) if source_identity is not None else (
+            self.identity(include_bank=False) if source is None else
+            Layout(self.source, library=self.source_library, grid=self.grid).identity())
         # Gaps: items pinned to a grid cell (row * 4 + column) on their page. Unpinned items flow
         # into the free cells in order, like iOS does. iOS doesn't report pins over USB.
         self.pins: dict[str, int] = dict(pins or {})
         self.source_pins: dict[str, int] = dict((pins if source is None else source_pins) or {})
 
     def original(self) -> "Layout":
-        return Layout(self.source, self.page_slots, self.dock_slots, library=self.source_library,
-                      pins=self.source_pins, grid=self.grid)
+        return Layout(copy.deepcopy(self.source), self.page_slots, self.dock_slots,
+                      library=copy.deepcopy(self.source_library),
+                      pins=self.source_pins, grid=self.grid, identity=self.source_identity)
+
+    def identity(self, include_bank: bool = True) -> dict[str, Any]:
+        """Local IDs in wire serialization order, separate from untouched device fields."""
+        ids = []
+
+        def visit(nodes: list[Node]) -> None:
+            for node in nodes:
+                ids.append(node.id)
+                for page in node.children:
+                    visit(page)
+
+        for nodes in [self.dock, *self.pages, self.library or [], self.bank if include_bank else []]:
+            visit(nodes)
+        return {"version": 1, "ids": ids, "counters": dict(self._counter)}
+
+    def _restore_identity(self, identity: dict[str, Any]) -> None:
+        try:
+            ids, counters = identity["ids"], identity["counters"]
+            if (identity["version"] != 1 or not isinstance(ids, list) or len(ids) != len(self.nodes)
+                    or any(not isinstance(nid, str) or not nid for nid in ids) or len(set(ids)) != len(ids)
+                    or not isinstance(counters, dict)
+                    or any(not isinstance(k, str) or type(v) is not int or v < 0 for k, v in counters.items())):
+                raise ValueError("invalid identity sidecar")
+        except (KeyError, TypeError, ValueError) as e:
+            raise LayoutError("saved draft identity is invalid; call read again") from e
+        nodes = list(self.nodes.values())
+        for node, nid in zip(nodes, ids):
+            node.id = nid
+        self.nodes = {node.id: node for node in nodes}
+        self._counter = dict(counters)
+
+    def current_snapshot(self) -> dict[str, Any]:
+        """An undo step owns its editable state and local allocation identities."""
+        return copy.deepcopy({"state": self.to_state(), "library": self.to_library(), "bank": self.to_bank(),
+                              "pins": self.pins, "identity": self.identity(), "grid": self.grid.to_dict()})
+
+    def baseline(self) -> dict[str, Any]:
+        return {"source": self.source, "source_library": self.source_library, "source_pins": self.source_pins,
+                "source_identity": self.source_identity}
+
+    def snapshot(self) -> dict[str, Any]:
+        return {**self.current_snapshot(), **copy.deepcopy(self.baseline())}
+
+    @classmethod
+    def from_snapshot(cls, snap: dict[str, Any]) -> "Layout":
+        return cls(snap["state"], source=snap["source"], library=snap.get("library"),
+                   source_library=snap.get("source_library"), bank=snap.get("bank"),
+                   pins=snap.get("pins"), source_pins=snap.get("source_pins"),
+                   grid=Grid(**snap["grid"]) if "grid" in snap else Grid(),
+                   identity=snap.get("identity"), source_identity=snap.get("source_identity"))
 
     def refold(self, folder: Node, items: list[Node] | None = None) -> None:
         """Lay a folder's items (or the given ones) out in full folder pages."""
@@ -252,6 +319,8 @@ class Layout:
 
     def _new_id(self, prefix: str) -> str:
         n = self._counter.get(prefix, 0) + 1
+        while f"{prefix}{n}" in self.nodes:
+            n += 1
         self._counter[prefix] = n
         return f"{prefix}{n}"
 
@@ -680,10 +749,17 @@ class Layout:
             "apply_token": self.token(),
         }
 
+    def library_structure(self) -> list[Any] | None:
+        if self.library is None:
+            return None
+        return sorted((node_structure(node) for node in self.library), key=json.dumps)
+
     def token(self) -> str:
         """Short hash of the exact state that would be written."""
-        blob = plistlib.dumps({"state": self.to_state(), "library": self.to_library() or [],
-                               "pins": {k: v for k, v in sorted(self.pins.items())}},
+        pins = [[(node.id, self.pins[node.id]) for node in page if node.id in self.pins] for page in self.pages]
+        blob = plistlib.dumps({"device": self.approval_device or "",
+                               "state": self.to_state(), "library": self.to_library() or [],
+                               "pins": pins, "grid": self.grid.to_dict()},
                               fmt=plistlib.FMT_BINARY, sort_keys=True)
         return "apply-" + hashlib.sha256(blob).hexdigest()[:10]
 
@@ -713,29 +789,40 @@ def _lcs(a: list[str], b: list[str]) -> set[str]:
     return out
 
 
+def widget_wire_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    """Project a single widget's exported element identity onto its root-archive alias."""
+    fields = dict(raw)
+    if "uniqueIdentifier" not in fields and fields.get("userSelectedElementIdentifier") and "elements" not in fields:
+        fields["uniqueIdentifier"] = fields["userSelectedElementIdentifier"]
+    return fields
+
+
 def widget_configuration(raw: dict[str, Any]) -> str:
     """Compare every exported widget field, including configuration and stack elements.
 
     USB may attach an empty iconLists which the root archive omits. Private device
     configuration that is never exported cannot be verified by this fingerprint.
     """
-    fields = {k: v for k, v in raw.items() if k != "iconLists" or v}
+    fields = {k: v for k, v in widget_wire_fields(raw).items() if k != "iconLists" or v}
     return plistlib.dumps(fields, fmt=plistlib.FMT_BINARY, sort_keys=True).hex()
+
+
+def node_structure(node: Node) -> Any:
+    """Device-visible identity, independent of IDs allocated when parsing a draft."""
+    if node.kind == "folder":
+        return [node.name, [[node_structure(child) for child in page] for page in node.children]]
+    if node.kind == "widget":
+        return "widget:" + widget_configuration(node.raw)
+    if node.bundle_id:
+        wire = node.raw.get("displayIdentifier") or node.bundle_id
+        if wire != node.bundle_id:
+            return {"bundle": node.bundle_id, "display": wire}
+        return node.bundle_id
+    return {"opaque": plistlib.dumps(node.raw, fmt=plistlib.FMT_BINARY, sort_keys=True).hex()}
 
 
 def structure(state: list[Any], library: list[Any] | None = None) -> str:
     """Comparable layout fingerprint, including all exported widget configuration."""
     lay = Layout(state, library=library)
-
-    def key(n: Node) -> Any:
-        if n.kind == "folder":
-            return [n.name, [shape(p) for p in n.children]]
-        if n.kind == "widget":  # generated model ids are positional
-            return "widget:" + widget_configuration(n.raw)
-        return n.id
-
-    def shape(nodes: list[Node]) -> list[Any]:
-        return [key(n) for n in nodes]
-
-    lib = None if lay.library is None else sorted(shape(lay.library))
-    return json.dumps({"layout": [shape(lay.dock)] + [shape(p) for p in lay.pages], "library": lib})
+    pages = [[node_structure(node) for node in page] for page in [lay.dock, *lay.pages]]
+    return json.dumps({"layout": pages, "library": lay.library_structure()})

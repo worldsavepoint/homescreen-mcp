@@ -12,21 +12,26 @@ import copy
 import asyncio
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import uuid
 import plistlib
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
+from collections import Counter
+from collections.abc import Set
 from pathlib import Path
 from typing import Any, Callable
 
 from . import colors
-from .device import Source, require_writable
-from .model import Grid, Layout, LayoutError, Node, structure, widget_configuration
+from .device import DISK_MARK, ObservedPins, Source, disk_pins, require_writable
+from .model import Grid, Layout, LayoutError, Node, is_folder, is_widget, node_structure, structure, widget_configuration
 
 KEEP_READS = 10
 MAX_UNDO = 200
 OPERATION_TIMEOUT = 30.0
+_MISSING = object()  # Older drafts did not record the source's placement observation.
 
 
 def _sync_directory(path: Path) -> None:
@@ -41,20 +46,60 @@ def _exclusive_file(path: Path, data: bytes) -> None:
     """Create a private file without overwriting another operation's recovery data."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as stream:
-        stream.write(data)
+        if stream.write(data) != len(data):
+            raise OSError("incomplete local file write")
         stream.flush()
         os.fsync(stream.fileno())
     _sync_directory(path.parent)
+
+
+def _publish_exclusive(path: Path, data: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        _exclusive_file(temporary, data)
+        os.link(temporary, path)
+        _sync_directory(path.parent)
+    finally:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def _previous_file(path: Path):
+    """Keep the old inode until all updates in the transaction succeed."""
+    previous = path.with_name(f".{path.name}.{uuid.uuid4().hex}.previous")
+    linked = False
+    try:
+        os.link(path, previous, follow_symlinks=False)
+        linked = True
+    except FileNotFoundError:
+        pass
+    try:
+        yield
+    except BaseException:
+        if linked:
+            os.replace(previous, path)
+        else:
+            path.unlink(missing_ok=True)
+        _sync_directory(path.parent)
+        raise
+    finally:
+        if linked:
+            # Removing a private rollback link is housekeeping after the commit.
+            with suppress(OSError):
+                previous.unlink(missing_ok=True)
 
 
 def _private_replace(path: Path, data: bytes) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         _exclusive_file(temporary, data)
-        os.replace(temporary, path)
-        _sync_directory(path.parent)
+        with _previous_file(path):
+            os.replace(temporary, path)
+            _sync_directory(path.parent)
     finally:
-        temporary.unlink(missing_ok=True)
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
 
 
 def _stamp() -> str:
@@ -83,12 +128,11 @@ def _unpack_pins(data: bytes) -> list[dict[str, int]] | None:
 
 
 # ---- gaps (pinned cells) --------------------------------------------------------------
-# In the dict format a pinned item is named by its identifier: bundle id for apps, the icon's
-# uniqueIdentifier for widgets and folders.
+# Dictionary-format anchors refer to the serialized display ID or the widget/folder instance ID.
 
 def pin_key(node: Node) -> str | None:
     if node.kind in ("app", "webclip"):
-        return node.bundle_id or node.id
+        return node.raw.get("displayIdentifier") or node.bundle_id or node.id
     if node.kind == "widget":
         return node.raw.get("uniqueIdentifier") or node.raw.get("userSelectedElementIdentifier")
     if node.kind == "folder":
@@ -97,9 +141,56 @@ def pin_key(node: Node) -> str | None:
 
 
 def memory_key(node: Node) -> str | None:
-    """How a gap is remembered across phone reads. Phone folders come back without ids, so
-    folders are remembered by name."""
-    return f"folder:{node.name}" if node.kind == "folder" else pin_key(node)
+    """Folders can omit UUIDs on readback; their name and ordered contents identify gaps."""
+    if node.kind == "folder":
+        return "folder-content:" + json.dumps(node_structure(node), separators=(",", ":"))
+    return node.bundle_id or pin_key(node)
+
+
+def _memory_keys(nodes: list[Node], saved: dict[str, Any] | None = None,
+                 bound_ids: Set[str] = frozenset(), typed_apps: bool = False) -> dict[str, str | None]:
+    keys = {node.id: memory_key(node) for node in nodes}
+    counts = Counter(keys.values())
+    for node in nodes:
+        key = keys[node.id]
+        wire = pin_key(node)
+        if node.bundle_id and typed_apps:
+            keys[node.id] = "app:" + json.dumps([node.bundle_id, wire], separators=(",", ":"))
+        elif node.kind == "widget" and typed_apps and wire:
+            keys[node.id] = "widget:" + json.dumps(wire)
+        elif node.kind == "folder":
+            instance = "folder-instance:" + json.dumps([key, wire], separators=(",", ":")) if wire else None
+            if counts[key] > 1 or node.id in bound_ids or (saved is not None and instance in saved):
+                keys[node.id] = instance
+    return keys
+
+
+def _instance_ids(lay: Layout, memory: dict[str, Any]) -> set[str]:
+    """Find the local folder IDs required by page-scoped instance memory."""
+    pages = memory.get("pages", [])
+    owners = set()
+    for nodes, page in zip(lay.pages, pages if isinstance(pages, list) else []):
+        if isinstance(page, dict):
+            for nid, key in _memory_keys(nodes, page).items():
+                if lay.nodes[nid].kind == "folder" and key in page and key.startswith("folder-instance:"):
+                    owners.add(nid)
+    return owners
+
+
+def memory_pins(lay: Layout, previous: dict[str, Any] | None = None,
+                bound_ids: Set[str] = frozenset(), *, typed: bool | None = None) -> dict[str, Any]:
+    pages = []
+    saved_pages = (previous or {}).get("pages", [])
+    if typed is None:
+        typed = any(n.bundle_id and pin_key(n) != n.bundle_id for page in lay.pages for n in page)
+    for index, page in enumerate(lay.pages):
+        saved = saved_pages[index] if isinstance(saved_pages, list) and index < len(saved_pages) else {}
+        keys = _memory_keys(page, saved, bound_ids, typed)
+        pages.append({keys[n.id]: lay.pins[n.id] for n in page if n.id in lay.pins and keys[n.id]})
+    result = {"version": 2, "grid": lay.grid.to_dict(), "pages": pages}
+    if typed:
+        result["app_keys"] = "bundle-display-v1"
+    return result
 
 
 def pins_by_page(lay: Layout) -> list[dict[str, int]]:
@@ -108,57 +199,276 @@ def pins_by_page(lay: Layout) -> list[dict[str, int]]:
     for page in lay.pages:
         d = {}
         for n in page:
+            if n.id in lay.pins and n.kind == "folder" and not n.raw.get("uniqueIdentifier"):
+                n.raw["uniqueIdentifier"] = str(uuid.uuid4()).upper()
+        counts = Counter(pin_key(n) for n in page)
+        for n in page:
             if n.id not in lay.pins:
                 continue
-            if n.kind == "folder" and not n.raw.get("uniqueIdentifier"):
-                n.raw["uniqueIdentifier"] = str(uuid.uuid4()).upper()
             key = pin_key(n)
-            if key:
-                d[key] = lay.pins[n.id]
+            if not key:
+                raise LayoutError(f"{n.kind} {n.name!r} has no wire identifier for its pin; use ordinary page order")
+            if counts[key] != 1:
+                raise LayoutError("ambiguous pin identifier on a layout page")
+            d[key] = lay.pins[n.id]
         out.append(d)
     return out
 
 
-def node_pins(lay: Layout, keyed: dict[str, int], by_memory: bool = False) -> dict[str, int]:
-    """{identifier or memory key: cell} -> {node id: cell}, keeping only pins that fit their page."""
+def node_pins(lay: Layout, keyed: dict[str, Any] | list[dict[str, int]], by_memory: bool = False,
+              strict: bool = False) -> dict[str, int]:
+    """Resolve wire pins. Reads may discard stale gaps; write comparison must reject them."""
+    if isinstance(keyed, ObservedPins):
+        try:
+            keyed.validate([{pin_key(n) for n in page} for page in lay.pages], lay.grid)
+        except LayoutError:
+            if strict:
+                raise
+            lay.pins = {}
+            return lay.pins
+        keyed = keyed.pages(len(lay.pages))
+    saved_grid = lay.grid
+    typed_apps = False
+    if by_memory and isinstance(keyed, dict) and any(type(value) is not int for value in keyed.values()):
+        try:
+            if type(keyed["version"]) is not int or keyed["version"] != 2:
+                raise ValueError("unsupported gap memory version")
+            if "app_keys" in keyed:
+                if keyed["app_keys"] != "bundle-display-v1":
+                    raise ValueError("unsupported gap memory app keys")
+                typed_apps = True
+            dimensions = keyed["grid"]
+            if not isinstance(dimensions, dict) or not {"cols", "rows"} <= dimensions.keys():
+                raise ValueError("missing gap memory dimensions")
+            saved_grid = Grid(**dimensions)
+            if any(type(value) is not int or value <= 0 for value in saved_grid.to_dict().values()):
+                raise ValueError("invalid gap memory grid")
+            keyed = keyed["pages"]
+            if not isinstance(keyed, list):
+                raise ValueError("invalid gap memory pages")
+        except (KeyError, TypeError, ValueError) as e:
+            raise LayoutError("invalid saved pin memory") from e
+    scoped = isinstance(keyed, list)
+    if scoped and any(not isinstance(page, dict) for page in keyed):
+        raise LayoutError("pins must identify items on each page")
+    if strict and scoped and any(keyed[len(lay.pages):]):
+        raise LayoutError("pin identifiers do not match the layout's page items")
+
+    def owners(nodes: list[Node], values: dict[str, Any]):
+        keys = _memory_keys(nodes, values, typed_apps=typed_apps) if by_memory and scoped else {
+            n.id: (memory_key(n) if by_memory else pin_key(n)) for n in nodes}
+        if not by_memory or typed_apps:
+            return keys, Counter(keys.values())
+
+        # Qualify each historical key against every possible owner, even when another
+        # alias of that owner is also present. Page-scoped and flat files use the same rule.
+        names = Counter(n.name for n in nodes if n.kind == "folder")
+        candidates = {}
+        for n in nodes:
+            aliases = {keys[n.id]}
+            if n.bundle_id:
+                aliases.add(pin_key(n))
+            if not scoped and n.kind == "folder" and names[n.name] == 1:
+                aliases.add(f"folder:{n.name}")
+                aliases.add("folder-content:" + json.dumps(
+                    [n.name, [[child.id for child in page] for page in n.children]], separators=(",", ":")))
+            candidates[n.id] = {key for key in aliases if key in values}
+        counts = Counter(key for aliases in candidates.values() for key in aliases)
+        if strict and any(count > 1 for count in counts.values()):
+            raise LayoutError("ambiguous pin identifier on a layout page")
+        for nid, aliases in candidates.items():
+            unique = [key for key in aliases if counts[key] == 1]
+            keys[nid] = unique[0] if len(unique) == 1 else None
+        return keys, counts
+
     wanted: dict[str, int] = {}
-    for page in lay.pages:
+    global_owners = None if scoped else owners([n for page in lay.pages for n in page], keyed)
+    matched_global = set()
+    for index, page in enumerate(lay.pages):
+        values = (keyed[index] if index < len(keyed) else {}) if scoped else keyed
+        keys, identities = global_owners or owners(page, values)
+        matched = set()
+        invalid = False
         for n in page:
-            key = memory_key(n) if by_memory else pin_key(n)
-            if key and key in keyed:
-                wanted[n.id] = int(keyed[key])
+            key = keys[n.id]
+            if key and key in values:
+                if identities[key] != 1:
+                    if strict:
+                        raise LayoutError("ambiguous pin identifier on a layout page")
+                    continue
+                cell = values[key]
+                if type(cell) is not int or not 0 <= cell < saved_grid.slots:
+                    if strict:
+                        raise LayoutError(f"invalid pin cell for {n.name!r} on the loaded grid")
+                    invalid = True
+                    continue
+                row, column = divmod(cell, saved_grid.cols)
+                width, height = lay.dims(n)
+                if (column + width > min(saved_grid.cols, lay.grid.cols)
+                        or row + height > min(saved_grid.rows, lay.grid.rows)):
+                    if strict:
+                        raise LayoutError("saved pin footprint does not fit the loaded grid")
+                    invalid = True
+                    continue
+                wanted[n.id] = row * lay.grid.cols + column
+                matched.add(key)
+        if strict and scoped and matched != set(values):
+            raise LayoutError("pin identifiers do not match the layout's page items")
+        if invalid:
+            for n in page:
+                wanted.pop(n.id, None)
+        matched_global.update(matched)
+    if strict and not scoped and matched_global != set(keyed):
+        raise LayoutError("pin identifiers do not match the layout's page items")
     lay.pins = wanted
     for page in lay.pages:  # a page whose remembered gaps no longer fit loses them
         if any(n.id in wanted for n in page) and lay.place(page)[1]:
+            if strict:
+                raise LayoutError(f"pins do not fit the loaded grid: {lay.place(page)[1]}")
             for n in page:
                 wanted.pop(n.id, None)
     return wanted
 
 
-def placed_structure(state: list[Any], library: list[Any] | None, keyed_pins: dict[str, int] | None,
-                     grid: Grid | None = None) -> str:
+def _retains_pins(requested: Layout, observed: Layout, memory: dict[str, Any] | None = None) -> bool:
+    instances = _instance_ids(requested, memory or {})
+    for index, page in enumerate(requested.pages):
+        for owner in page:
+            if owner.id not in requested.pins:
+                continue
+            cell = requested.pins[owner.id]
+            others = observed.pages[index] if index < len(observed.pages) else []
+            shape = node_structure(owner)
+            matches = [node for node in others if node_structure(node) == shape]
+            if owner.kind == "folder":
+                wire = pin_key(owner)
+                same_wire = [node for node in others if wire and pin_key(node) == wire]
+                if same_wire:
+                    matches = [node for node in same_wire if node_structure(node) == shape]
+                elif owner.id in instances or sum(node_structure(node) == shape for node in page) != 1:
+                    return False
+            if len(matches) != 1 or observed.pins.get(matches[0].id) != cell:
+                return False
+    return True
+
+
+def placed_structure(state: list[Any], library: list[Any] | None,
+                     keyed_pins: dict[str, Any] | list[dict[str, int]] | None,
+                     grid: Grid | None = None, by_memory: bool = False) -> str:
     """Like model.structure, but each page lists its items in grid order (row by row) after
     gaps are applied. iOS reorders a page's list by position when it has gaps, so list order
     alone would report a correct write as a mismatch."""
     lay = Layout(state, library=library, grid=grid)
-    if keyed_pins:
-        node_pins(lay, keyed_pins)
+    if keyed_pins is not None:
+        node_pins(lay, keyed_pins, by_memory=by_memory, strict=True)
+
     pages = []
     for page in lay.pages:
         pos, _ = lay.place(page)
         order = sorted(page, key=lambda n: (pos[n.id][0], pos[n.id][1]) if n.id in pos else (99, 0))
-        pages.append([[("widget:" + widget_configuration(n.raw)) if n.kind == "widget" else n.id,
-                       pos.get(n.id, (0, 0))[:2]] if n.kind != "folder" else
-                      [n.name, [[c.id for c in fp] for fp in n.children]] for n in order])
-    return json.dumps({"dock": [n.id for n in lay.dock], "pages": pages,
-                       "library": None if library is None else sorted(n.id for n in lay.library or [])},
+        pages.append([[node_structure(n), pos.get(n.id, (0, 0))[:2]] for n in order])
+    return json.dumps({"dock": [node_structure(n) for n in lay.dock], "pages": pages,
+                       "library": lay.library_structure()},
                       default=list)
 
 
 def _widgets(state: list[Any]) -> list[dict[str, Any]]:
     """Every top-level widget dict in a list-format state (widgets can't be in folders)."""
     return [x for page in state for x in page
-            if isinstance(x, dict) and (x.get("gridSize") or x.get("elementType") == "widget")]
+            if isinstance(x, dict) and is_widget(x)]
+
+
+def same_reported_pins(first: dict[str, int] | None, second: dict[str, int] | None) -> bool:
+    if isinstance(first, ObservedPins) != isinstance(second, ObservedPins):
+        return False
+    if isinstance(first, ObservedPins):
+        first, second = first.archive, second.archive
+    if first is None or second is None:
+        return first is second
+    return plistlib.dumps(first, fmt=plistlib.FMT_BINARY) == plistlib.dumps(second, fmt=plistlib.FMT_BINARY)
+
+
+def _anchor_owners(lay: Layout) -> list[dict[str, Any]]:
+    return [{pin_key(n): [index, node_structure(n), lay.pins[n.id]]
+             for index, n in enumerate(page) if n.id in lay.pins}
+            for page in lay.pages]
+
+
+def _folder_owners(lay: Layout, *, ordered: bool):
+    """Each wire's full occurrence list, even when two different pages reuse it."""
+    wires = {}
+    ambiguous = set()
+    for index, page in enumerate([lay.dock, *lay.pages]):
+        folders = [(offset, n, memory_key(n)) for offset, n in enumerate(page) if n.kind == "folder"]
+        shapes = Counter(shape for _, _, shape in folders)
+        for offset, node, shape in folders:
+            wire = pin_key(node)
+            if wire:
+                wires.setdefault(wire, Counter())[(index, offset if ordered else None, shape)] += 1
+                if shapes[shape] > 1:
+                    ambiguous.add(wire)
+    return wires, ambiguous
+
+
+def _compatible_folder_ids(before: Layout, after: Layout, bound_ids: Set[str] = frozenset(), *,
+                           ordered: bool = True) -> bool:
+    old, ambiguous = _folder_owners(before, ordered=ordered)
+    new, _ = _folder_owners(after, ordered=ordered)
+    required = ambiguous | {pin_key(before.nodes[nid]) for nid in bound_ids}
+    return required <= new.keys() and all(old[wire] == new[wire] for wire in old.keys() & new.keys())
+
+
+def _restore_archive_app_ids(state, library, reference):
+    """A bare archive string reports the display ID. Retain a known unambiguous bundle alias."""
+    def leaves(items):
+        for item in items:
+            if isinstance(item, dict):
+                if is_folder(item):
+                    for page in item["iconLists"]:
+                        yield from leaves(page)
+                elif not is_widget(item):
+                    yield item
+
+    aliases = {}
+    ref_state, ref_library = reference
+    for page in [*ref_state, ref_library or []]:
+        for item in leaves(page):
+            wire, bundle = item.get("displayIdentifier"), item.get("bundleIdentifier")
+            if wire and bundle:
+                aliases[wire] = bundle if aliases.get(wire, bundle) == bundle else None
+    for page in [*state, library or []]:
+        for item in leaves(page):
+            if item.get(DISK_MARK) and (bundle := aliases.get(item.get("displayIdentifier"))):
+                item["bundleIdentifier"] = bundle
+
+
+@dataclass
+class _SourceObservation:
+    state: list[Any]
+    library: list[Any] | None
+    pins: Any
+    page_identity: Any
+    layout: Layout
+
+    def same_layout(self, other: "_SourceObservation") -> bool:
+        return structure(self.state, self.library) == structure(other.state, other.library)
+
+    def same_placement(self, other: "_SourceObservation") -> bool:
+        return (same_reported_pins(self.pins, other.pins)
+                and self.page_identity == other.page_identity
+                and _anchor_owners(self.layout) == _anchor_owners(other.layout))
+
+
+def _source_shape_receipt(body: dict[str, Any], device: str, grid: Grid, pages: list[int]) -> dict[str, Any]:
+    evidence = {"body": body, "device": device, "grid": grid.to_dict(), "widget_pages": pages}
+    digest = hashlib.sha256(plistlib.dumps(evidence, fmt=plistlib.FMT_BINARY)).hexdigest()
+    return {"widget_pages": pages, "sha256": digest}
+
+
+def _overflow_widget_pages(lay: Layout) -> list[int]:
+    return [i for i, page in enumerate(lay.pages)
+            if any(n.kind == "widget" for n in page) and not any(n.id in lay.pins for n in page)
+            and lay.place(page)[1]]
 
 
 def _safe(s: str) -> str:
@@ -181,24 +491,37 @@ class Session:
             os.close(fd)
         self._draft_key = device
         self.layout: Layout | None = None
+        self._draft_error: str | None = None
         self.device_id: str | None = device
         self.info: dict[str, Any] = {}
         self.grid = Grid()
+        self._observed_placement = _MISSING
+        self._page_identity = _MISSING
+        self._placement_revision = ""
+        self._draft_digest: bytes | None = None
         self.usage: dict[str, Any] | None = None  # Screen Time opens, loaded on request
-        self._undo: list[tuple[Any, ...]] = []
-        self._redo: list[tuple[Any, ...]] = []
+        self._undo: list[dict[str, Any]] = []
+        self._redo: list[dict[str, Any]] = []
+        self._history_baseline: dict[str, Any] | None = None
         self._load_draft()
 
     # ---- persistence ------------------------------------------------------------
 
     @contextmanager
-    def _exclusive(self):
+    def _exclusive(self, *, refresh: bool = False):
         fd = os.open(self.dir / ".session.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as e:
                 raise LayoutError("another Session operation holds the local data lock; try again after it finishes") from e
+            if not refresh:
+                try:
+                    digest = hashlib.sha256(self.draft_path.read_bytes()).digest()
+                except FileNotFoundError:
+                    digest = None
+                if digest != self._draft_digest:
+                    raise LayoutError("the saved draft changed in another session; reopen it or read the device again")
             yield
         finally:
             os.close(fd)
@@ -213,14 +536,18 @@ class Session:
 
     def _clear_pending(self) -> None:
         if self._pending_path.exists():
-            self._pending_path.unlink()
-            _sync_directory(self.dir)
+            with _previous_file(self._pending_path):
+                self._pending_path.unlink()
+                _sync_directory(self.dir)
 
-    async def _assert_identity(self) -> None:
+    async def _assert_identity(self) -> dict[str, Any]:
         info = await asyncio.wait_for(self.source.info(), OPERATION_TIMEOUT)
         actual = info.get("UniqueDeviceID")
         if not isinstance(actual, str) or not actual or actual != self.device_id:
             raise LayoutError("device identity changed or is unavailable; explicitly read the intended device again")
+        if Grid.from_metrics(info.get("icon_metrics")) != self.grid:
+            raise LayoutError("device grid changed; explicitly read the intended device again")
+        return info
 
     @property
     def draft_path(self) -> Path:
@@ -236,93 +563,147 @@ class Session:
 
     def _save_draft(self) -> None:
         assert self.layout is not None
-        blob = {"device": self.device_id, "info": self.info, "source": self.layout.source, "state": self.layout.to_state(),
-                "source_library": self.layout.source_library, "library": self.layout.to_library(),
-                "bank": self.layout.to_bank(), "pins": self.layout.pins, "source_pins": self.layout.source_pins,
-                "grid": self.grid.to_dict()}
+        blob = {"device": self.device_id, "info": self.info, **self.layout.snapshot()}
+        blob["placement_revision"] = self._placement_revision
+        if self._page_identity is not _MISSING:
+            blob["source_page_identity"] = self._page_identity
+        if isinstance(self._observed_placement, ObservedPins):
+            blob["source_placement"] = self._observed_placement.archive
+        elif self._observed_placement is not _MISSING:
+            blob["source_pins_reported"] = self._observed_placement is not None
+            if self._observed_placement is not None:
+                blob["source_pin_map"] = self._observed_placement
         blob = {k: v for k, v in blob.items() if v is not None}  # plists have no null
-        _private_replace(self.draft_path, plistlib.dumps(blob, fmt=plistlib.FMT_BINARY))
+        data = plistlib.dumps(blob, fmt=plistlib.FMT_BINARY)
+        _private_replace(self.draft_path, data)
+        self._draft_digest = hashlib.sha256(data).digest()
 
     def _load_draft(self) -> None:
         if self.draft_path.exists():
-            blob = plistlib.loads(self.draft_path.read_bytes())
+            data = self.draft_path.read_bytes()
+            self._draft_digest = hashlib.sha256(data).digest()
+            blob = plistlib.loads(data)
+            self._page_identity = blob.get("source_page_identity", _MISSING)
+            self._placement_revision = blob.get("placement_revision", "")
             self.device_id = blob["device"]
             self.info = blob.get("info", {})
             self.grid = Grid(**blob["grid"]) if "grid" in blob else Grid()
-            self.layout = Layout(blob["state"], source=blob["source"], library=blob.get("library"),
-                                 source_library=blob.get("source_library"), bank=blob.get("bank"),
-                                 pins=blob.get("pins"), source_pins=blob.get("source_pins"), grid=self.grid)
+            if "source_placement" in blob:
+                self._observed_placement = disk_pins(blob["source_placement"])
+            elif "source_pins_reported" in blob:
+                self._observed_placement = blob["source_pin_map"] if blob["source_pins_reported"] else None
+            try:
+                lay = Layout.from_snapshot(blob)
+                original = lay.original()  # validate source identity independently
+                for view in (lay, original):
+                    if set(view.pins) - view.nodes.keys():
+                        raise LayoutError("saved draft pin identity is unavailable; call read again")
+                if "identity" not in blob or "source_identity" not in blob:
+                    # Legacy enumeration IDs cannot prove ownership after reordering.
+                    for view in (lay, original):
+                        owners = Counter(pin_key(node) for node in view.nodes.values())
+                        for nid in view.pins:
+                            node = view.nodes[nid]
+                            wire = node.raw.get("uniqueIdentifier") or (
+                                node.raw.get("displayIdentifier") if node.kind == "widget" else None)
+                            stable = (node.bundle_id == nid if node.kind in ("app", "webclip") else
+                                      wire is not None and nid == f"{node.kind}:{wire}")
+                            # A numeric wire suffix can collide with a generated ID from
+                            # another node before the legacy draft was reordered.
+                            prefix, _, suffix = nid.partition(":")
+                            if prefix in {"app", "webclip", "widget", "folder", "other"} and suffix.isdecimal():
+                                stable = False
+                            stable &= owners[pin_key(node)] == 1
+                            if not stable:
+                                raise LayoutError("saved draft pin identity is ambiguous; call read again")
+                lay.approval_device = self.device_id
+                self.layout = lay
+            except LayoutError as e:
+                self._draft_error = str(e)
 
     def require(self) -> Layout:
         if self.layout is None:
-            raise LayoutError("no layout loaded yet; call read first")
+            raise LayoutError(self._draft_error or "no layout loaded yet; call read first")
         return self.layout
 
     def edited(self) -> None:
-        self._save_draft()
+        with self._exclusive():
+            self._save_draft()
 
     # ---- edits with undo ----------------------------------------------------------
 
-    def _snap(self) -> tuple[Any, ...]:
-        lay = self.require()
-        return (copy.deepcopy(lay.to_state()), copy.deepcopy(lay.to_library()), copy.deepcopy(lay.to_bank()),
-                dict(lay.pins))
+    def _snap(self) -> dict[str, Any]:
+        return self.require().snapshot()
 
-    def _load_snap(self, snap: tuple[Any, ...]) -> None:
+    def _history_snapshot(self) -> dict[str, Any]:
         lay = self.require()
-        self.layout = Layout(snap[0], lay.page_slots, lay.dock_slots, source=lay.source,
-                             library=snap[1], source_library=lay.source_library, bank=snap[2],
-                             pins=snap[3], source_pins=lay.source_pins, grid=lay.grid)
+        baseline = lay.baseline()
+        if baseline != self._history_baseline:
+            self._history_baseline = copy.deepcopy(baseline)
+        return {**lay.current_snapshot(), **self._history_baseline}
 
     def edit(self, fn: Callable[[Layout], Any]) -> Any:
         """Run fn on the draft as one undoable step. If it raises, the draft is left untouched."""
-        before = self._snap()
-        try:
-            out = fn(self.require())
-            self._check_placement()
-        except Exception:
-            self._load_snap(before)
-            raise
-        self._undo.append(before)
-        del self._undo[:-MAX_UNDO]
-        self._redo.clear()
-        self._save_draft()
-        return out
+        with self._exclusive():
+            snapshot = self._history_snapshot()
+            before = copy.deepcopy(self.require())
+            try:
+                out = fn(self.require())
+                self._check_placement()
+                self._prepare_widget_pins(self.require())
+                self.require().approval_device = self.device_id
+                self._save_draft()
+            except BaseException:
+                self.layout = before
+                raise
+            self._undo.append(snapshot)
+            del self._undo[:-MAX_UNDO]
+            self._redo.clear()
+            return out
 
-    def _check_placement(self) -> None:
-        if str(self.info.get("ProductVersion", "")).split(".", 1)[0] != "16":
+    def _check_placement(self, target: Layout | None = None, baseline: Layout | None = None,
+                         info: dict[str, Any] | None = None) -> None:
+        if str((self.info if info is None else info).get("ProductVersion", "")).split(".", 1)[0] != "16":
             return
-        lay = self.require()
-        if any(lay.source_pins.get(node) != cell for node, cell in lay.pins.items()):
+        lay = target or self.require()
+        original = baseline or lay.original()
+        if not _retains_pins(lay, original):
             raise LayoutError("iOS 16 does not preserve fixed icon positions; use ordinary page order")
         leading_widgets = set()
-        for page in lay.original().pages:
+        for page in original.pages:
             for node in page:
                 if node.kind != "widget":
                     break
-                leading_widgets.add(node.id)
+                leading_widgets.add(node_structure(node))
         for page in lay.pages:
             folder_seen = False
             for node in page:
                 folder_seen |= node.kind == "folder"
-                if folder_seen and node.id in leading_widgets:
+                if folder_seen and node.kind == "widget" and node_structure(node) in leading_widgets:
                     raise LayoutError("iOS 16 keeps these widgets ahead of folders; place the folder after the widgets")
 
+    def _step_history(self, steps: list[dict[str, Any]], reverse: list[dict[str, Any]]) -> bool:
+        with self._exclusive():
+            if not steps:
+                return False
+            before = self.require()
+            snapshot = self._history_snapshot()
+            try:
+                self.layout = Layout.from_snapshot(copy.deepcopy(steps[-1]))
+                self.layout.approval_device = self.device_id
+                self._save_draft()
+            except BaseException:
+                self.layout = before
+                raise
+            steps.pop()
+            reverse.append(snapshot)
+            return True
+
     def undo(self) -> bool:
-        if not self._undo:
-            return False
-        self._redo.append(self._snap())
-        self._load_snap(self._undo.pop())
-        self._save_draft()
-        return True
+        return self._step_history(self._undo, self._redo)
 
     def redo(self) -> bool:
-        if not self._redo:
-            return False
-        self._undo.append(self._snap())
-        self._load_snap(self._redo.pop())
-        self._save_draft()
-        return True
+        return self._step_history(self._redo, self._undo)
 
     def load_usage(self, days: int = 30) -> dict[str, Any]:
         from . import usage
@@ -350,32 +731,100 @@ class Session:
     # ---- read -------------------------------------------------------------------
 
     # ---- widget element ids -------------------------------------------------------------
-    # A widget's link to its configuration is its element id (userSelectedElementIdentifier over
-    # USB). iOS can drop it, so every id ever seen is remembered per widget (by displayIdentifier)
-    # and put back on write.
-
     @property
     def _widget_ids_path(self) -> Path:
         return self._dev_dir("widgets") / "element-ids.json"
 
-    def _remember_widget_ids(self, state: list[Any]) -> None:
-        import json
-        known = json.loads(self._widget_ids_path.read_text()) if self._widget_ids_path.exists() else {}
-        for w in _widgets(state):
-            if w.get("displayIdentifier") and w.get("userSelectedElementIdentifier"):
-                known[w["displayIdentifier"]] = w["userSelectedElementIdentifier"]
-        self._widget_ids_path.write_text(json.dumps(known, indent=1, sort_keys=True))
+    @staticmethod
+    def _widget_key(widget: dict[str, Any], wire: str | None = None) -> str:
+        config = {k: v for k, v in widget.items() if k not in ("uniqueIdentifier", "userSelectedElementIdentifier")}
+        if wire:
+            config["uniqueIdentifier"] = wire
+        return hashlib.sha256(bytes.fromhex(widget_configuration(config))).hexdigest()
 
-    def _restore_widget_ids(self, state: list[Any]) -> list[Any]:
-        import json
-        if not self._widget_ids_path.exists():
-            return state
-        known = json.loads(self._widget_ids_path.read_text())
-        state = copy.deepcopy(state)
-        for w in _widgets(state):
-            if not w.get("userSelectedElementIdentifier") and known.get(w.get("displayIdentifier")):
-                w["userSelectedElementIdentifier"] = known[w["displayIdentifier"]]
-        return state
+    def _widget_memory(self) -> tuple[dict[str, str | None], dict[str, str | None]]:
+        path = self._widget_ids_path
+        if path.exists():
+            stored = json.loads(path.read_text())
+            if isinstance(stored, dict) and isinstance(stored.get("instances"), dict):
+                if stored.get("version") == 3 and isinstance(stored.get("owners"), dict):
+                    return stored["instances"], stored["owners"]
+                if stored.get("version") == 2:
+                    # Old wire+configuration keys remain usable. Configuration-only entries
+                    # gain owner evidence once the element is actually observed again.
+                    return stored["instances"], {}
+        return {}, {}
+
+    def _remember_widget_ids(self, state: list[Any]) -> None:
+        known, owners = self._widget_memory()
+        widgets = _widgets(state)
+        counts = Counter(self._widget_key(widget) for widget in widgets)
+        for widget in widgets:
+            if not widget.get("displayIdentifier"):
+                continue
+            element = widget.get("userSelectedElementIdentifier")
+            wire = widget.get("uniqueIdentifier")
+            config = self._widget_key(widget)
+            owner = wire or element
+            prior = owners.get(config)
+            if not wire and element and prior and known.get(self._widget_key(widget, prior)) == element:
+                owner = prior  # This element was previously exported with the recorded wire ID.
+            if counts[config] > 1:
+                owners[config] = None
+            elif owner:
+                # A wire-only observation cannot identify the owner of a legacy element.
+                if config not in owners and config in known and not element:
+                    owners[config] = None
+                else:
+                    owners[config] = owner if owners.get(config, owner) == owner else None
+            if isinstance(element, str) and element:
+                for key in {config, self._widget_key(widget, wire)}:
+                    known[key] = element if known.get(key, element) == element else None
+        if known or owners:
+            _private_replace(self._widget_ids_path, json.dumps(
+                {"version": 3, "instances": known, "owners": owners}).encode())
+
+    def _recover_widget_ids(self, widgets: list[dict[str, Any]]) -> None:
+        known, owners = self._widget_memory()
+        keys = [self._widget_key(widget, widget.get("uniqueIdentifier")) for widget in widgets]
+        configs = Counter(self._widget_key(widget) for widget in widgets)
+        counts = Counter(keys)
+        claimed = Counter(value for widget in widgets
+                          for value in {widget.get("uniqueIdentifier"), widget.get("userSelectedElementIdentifier")}
+                          if value)
+        candidates = []
+        for widget, key in zip(widgets, keys):
+            wire = widget.get("uniqueIdentifier")
+            if widget.get("userSelectedElementIdentifier") or counts[key] != 1:
+                continue
+            if not wire and (configs[key] != 1 or not owners.get(key)):
+                continue
+            element = known.get(key)
+            if element and claimed[element] == int(wire == element):
+                candidates.append((widget, element))
+        selected = Counter(element for _, element in candidates)
+        for widget, element in candidates:
+            if selected[element] == 1:
+                widget["userSelectedElementIdentifier"] = element
+
+    def _prepare_widget_pins(self, lay: Layout) -> None:
+        widgets = [node for node in lay.nodes.values() if node.kind == "widget"]
+        if not any(node.id in lay.pins and not pin_key(node) for node in widgets):
+            return
+        raw = [copy.deepcopy(node.raw) for node in widgets]
+        self._recover_widget_ids(raw)
+        for node, recovered in zip(widgets, raw):
+            if node.id in lay.pins and not pin_key(node):
+                node.raw = recovered
+                if not pin_key(node):
+                    raise LayoutError(f"widget {node.name!r} has no known wire identifier; use ordinary page order")
+
+    def _prepared_layout(self, lay: Layout) -> tuple[Layout, list[dict[str, int]]]:
+        """Prepare an isolated snapshot so wire ids never change draft ids, pins or history."""
+        prepared = copy.deepcopy(lay)
+        self._prepare_widget_pins(prepared)
+        pins = pins_by_page(prepared)
+        return prepared, pins
 
     # ---- web clip memory -----------------------------------------------------------------
     # Web clips kept off the Home Screen aren't installed apps, so the installed-app list can't
@@ -407,8 +856,10 @@ class Session:
         here = {n.id for n in Layout(state, library=library).nodes.values()}
         return library + [dict(w) for i, w in sorted(self._known_webclips().items()) if i not in here]
 
-    async def _read_source(self) -> tuple[list[Any], list[Any] | None]:
+    async def _read_source(self, reference=None) -> tuple[list[Any], list[Any] | None]:
         state, library = await asyncio.wait_for(self.source.read(), OPERATION_TIMEOUT)
+        if reference is not None:
+            _restore_archive_app_ids(state, library, reference)
         self._remember_widget_ids(state)
         self._remember_webclips(state, library)
         return state, self._with_webclips(state, library)
@@ -421,23 +872,44 @@ class Session:
     def _gaps_path(self) -> Path:
         return self._dev_dir("gaps") / "pins.json"
 
-    def _remember_gaps(self, lay: Layout) -> None:
-        mem = {}
-        for page in lay.pages:
-            for n in page:
-                key = memory_key(n)
-                if key and n.id in lay.pins:
-                    mem[key] = lay.pins[n.id]
-        self._gaps_path.write_text(json.dumps(mem, indent=1, sort_keys=True))
+    @property
+    def _placement_revision_path(self) -> Path:
+        return self._gaps_path.with_name("revision")
 
-    def _layout_from(self, state: list[Any], library: list[Any] | None) -> Layout:
+    def _saved_placement_revision(self) -> str:
+        try:
+            return self._placement_revision_path.read_text()
+        except FileNotFoundError:
+            return ""
+
+    def _gap_memory(self) -> dict[str, Any]:
+        if not self._gaps_path.exists():
+            return {}
+        try:
+            memory = json.loads(self._gaps_path.read_bytes())
+            if not isinstance(memory, dict):
+                raise ValueError("invalid gap memory")
+            return memory
+        except (UnicodeDecodeError, ValueError) as e:
+            raise LayoutError("invalid saved pin memory; read again") from e
+
+    def _remember_gaps(self, lay: Layout, previous: dict[str, Any] | None = None) -> None:
+        _private_replace(self._gaps_path, json.dumps(memory_pins(lay, previous), indent=1, sort_keys=True).encode())
+
+    def _layout_from(self, state: list[Any], library: list[Any] | None, *, recover_memory: bool = False) -> Layout:
         """A Layout with gaps: from the source when it can report them, else from memory."""
         lay = Layout(state, library=library, grid=self.grid)
         reported = getattr(self.source, "pins", None)
         if reported is not None:
             node_pins(lay, reported)
-        elif self._gaps_path.exists():
-            node_pins(lay, json.loads(self._gaps_path.read_text()), by_memory=True)
+        if self._gaps_path.exists() and (reported is None or recover_memory):
+            memory_layout = lay if reported is None else Layout(state, library=library, grid=self.grid)
+            try:
+                node_pins(memory_layout, self._gap_memory(), by_memory=True)
+            except LayoutError:
+                if not recover_memory:
+                    raise
+                self._remember_gaps(lay)
         return Layout(state, library=library, pins=lay.pins, grid=self.grid)
 
     @property
@@ -445,7 +917,7 @@ class Session:
         return getattr(self.source, "pins", None) is not None
 
     async def read(self) -> dict[str, Any]:
-        with self._exclusive():
+        with self._exclusive(refresh=True):
             return await self._read_locked()
 
     async def _read_locked(self) -> dict[str, Any]:
@@ -458,8 +930,17 @@ class Session:
         verified = await asyncio.wait_for(self.source.info(), OPERATION_TIMEOUT)
         if verified.get("UniqueDeviceID") != device_id:
             raise LayoutError("device identity changed during read; no layout was loaded")
+        if Grid.from_metrics(verified.get("icon_metrics")) != grid:
+            raise LayoutError("device grid changed during read; no layout was loaded")
         Layout(state, library=library, grid=grid)  # validate the shape before committing identity
-        previous = self.device_id, self.info, self.grid, self.layout, self._undo, self._redo
+        clear_pending = False
+        if self._pending_path.exists():
+            pending = json.loads(self._pending_path.read_text())
+            clear_pending = pending.get("device_id") == device_id
+        previous = (self.device_id, self.info, self.grid, self.layout, self._undo, self._redo,
+                    self._observed_placement, self._page_identity, self._draft_digest, self._placement_revision)
+        if self.layout is not None and device_id == self.device_id:
+            _restore_archive_app_ids(state, library, (self.layout.source, self.layout.source_library))
         try:
             self.device_id = device_id
             self.info = {k: v for k, v in info.items() if k in ("DeviceName", "ProductType", "ProductVersion")}
@@ -471,16 +952,22 @@ class Session:
             _private_replace(reads / f"{_stamp()}.plist", _pack(state, library))
             for old in sorted(reads.glob("*.plist"))[:-KEEP_READS]:
                 old.unlink()
-            self.layout = self._layout_from(state, library)
-            self._undo, self._redo = [], []
-            self._save_draft()
-            if self._pending_path.exists():
-                pending = json.loads(self._pending_path.read_text())
-                if pending.get("device_id") == self.device_id:
+            with _previous_file(self._gaps_path), _previous_file(self.draft_path):
+                self.layout = self._layout_from(state, library, recover_memory=True)
+                self.layout.approval_device = device_id
+                self._placement_revision = self._saved_placement_revision()
+                self._observed_placement = copy.deepcopy(getattr(self.source, "pins", None))
+                self._page_identity = copy.deepcopy(getattr(self.source, "page_identity", {}))
+                self._save_draft()
+                if clear_pending:
                     self._clear_pending()
+            self._undo, self._redo = [], []
+            self._history_baseline = None
         except BaseException:
-            self.device_id, self.info, self.grid, self.layout, self._undo, self._redo = previous
+            (self.device_id, self.info, self.grid, self.layout, self._undo, self._redo,
+             self._observed_placement, self._page_identity, self._draft_digest, self._placement_revision) = previous
             raise
+        self._draft_error = None
         return {"device": {k: v for k, v in info.items() if k != "UniqueDeviceID"},
                 **self.layout.summary()["counts"]}
 
@@ -513,14 +1000,38 @@ class Session:
 
     # ---- write ------------------------------------------------------------------
 
+    async def _observe(self, reference) -> _SourceObservation:
+        state, library = await self._read_source(reference)
+        pins = copy.deepcopy(getattr(self.source, "pins", None))
+        layout = Layout(state, library=library, grid=self.grid)
+        if pins is not None:
+            node_pins(layout, pins, strict=True)
+        return _SourceObservation(state, library, pins, copy.deepcopy(getattr(self.source, "page_identity", {})),
+                                  layout)
+
     def _backup(self, state: list[Any], library: list[Any] | None, label: str,
-                pins: list[dict[str, int]] | None = None) -> Path:
+                pins: list[dict[str, int]] | None = None, *, observed: Layout | None = None) -> Path:
         if not self.device_id:
             raise LayoutError("device identity is required for a backup")
         p = self._dev_dir("backups") / f"{_stamp()}-{label}-{uuid.uuid4().hex}.plist"
         blob = plistlib.loads(_pack(state, library, pins))
-        blob["provenance"] = {"version": 1, "device_id": self.device_id}
-        _exclusive_file(p, plistlib.dumps(blob, fmt=plistlib.FMT_BINARY))
+        provenance = {"version": 1, "device_id": self.device_id, "grid": self.grid.to_dict()}
+        if observed is not None:
+            provenance["pin_keys"] = "wire-v1"
+            bound = _instance_ids(observed, self._gap_memory())
+            if bound:
+                provenance["folder_instances"] = [[pin_key(n) for n in page if n.id in bound and n.id in observed.pins]
+                                                  for page in observed.pages]
+        pages = _overflow_widget_pages(observed) if observed is not None else []
+        if pages:
+            provenance["source_shape"] = _source_shape_receipt(blob, self.device_id, self.grid, pages)
+        blob["provenance"] = provenance
+        data = plistlib.dumps(blob, fmt=plistlib.FMT_BINARY)
+        _publish_exclusive(p, data)
+        if pages:
+            receipt_dir = self._dev_dir("observed-backups")
+            _publish_exclusive(receipt_dir / p.name, hashlib.sha256(data).digest())
+            _sync_directory(receipt_dir.parent)
         # The device and backups directories may have been created by this call.
         _sync_directory(p.parent.parent)
         _sync_directory(self.dir)
@@ -529,45 +1040,101 @@ class Session:
     async def _write_verified(self, target: list[Any], target_lib: list[Any] | None,
                               label: str, pins: list[dict[str, int]] | None = None,
                               expected: tuple[list[Any], list[Any] | None] | None = None,
-                              expected_pins: dict[str, int] | None = None) -> dict[str, Any]:
+                              expected_pins: Any = _MISSING, prepared: Layout | None = None,
+                              backup_instances: Set[str] = frozenset()) -> dict[str, Any]:
+        # Invalid requested pins must fail before a backup, pending marker or source write.
+        want_pins = pins or []
+        if self._placement_revision != self._saved_placement_revision():
+            raise LayoutError("the device placement changed in another session; read the device again")
+        reference = expected
+        if reference is None and self.layout is not None:
+            reference = (self.layout.source, self.layout.source_library)
         await self._assert_identity()
-        current, current_lib = await self._read_source()
-        baseline = expected if expected is not None else (current, current_lib)
-        baseline_pins = copy.deepcopy(getattr(self.source, "pins", None))
-        if structure(current, current_lib) != structure(*baseline):
-            raise LayoutError("the phone's layout changed since it was read; read again and redo the edits")
-        if baseline_pins is not None and expected_pins is not None and baseline_pins != expected_pins:
-            raise LayoutError("the phone's exported gaps changed since it was read; read again and redo the edits")
-        backup = self._backup(current, current_lib, label,
-                              pins_by_page(self._layout_from(current, current_lib)))
-        target = self._restore_widget_ids(target)
+        current = await self._observe(reference)
+        previous_memory = self._gap_memory()
+        original = self.require().original() if expected is not None else current.layout
+        bound_ids = _instance_ids(original, previous_memory)
+        if expected is not None:
+            if structure(current.state, current.library) != structure(*expected):
+                raise LayoutError("the phone's layout changed since it was read; read again and redo the edits")
+            if expected_pins is not _MISSING and not same_reported_pins(current.pins, expected_pins):
+                raise LayoutError("the phone's exported gaps changed since it was read; read again and redo the edits")
+            if not _compatible_folder_ids(original, current.layout, bound_ids):
+                raise LayoutError("the phone's layout changed since it was read; read again and redo the edits")
+            if current.pins is not None and _anchor_owners(current.layout) != _anchor_owners(original):
+                raise LayoutError("the phone's exported gaps changed since it was read; read again and redo the edits")
+            if self._page_identity is not _MISSING and self._page_identity != current.page_identity:
+                raise LayoutError("the phone's page identifiers changed since it was read; read again and redo the edits")
+        saved, saved_pins = self._prepared_layout(self._layout_from(current.state, current.library))
+        target = copy.deepcopy(target)
+        self._recover_widget_ids(_widgets(target))
         if target_lib is not None:
             target_lib = self._with_webclips(target, target_lib)
-        # The final read is checked under the same cross-process lock as the write.
-        final, final_lib = await self._read_source()
-        if structure(final, final_lib) != structure(*baseline):
+        requested = Layout(target, library=target_lib, grid=self.grid)
+        node_pins(requested, want_pins, strict=True)
+        # Both reads must describe the same page owners and coordinate frame.
+        final = await self._observe((current.state, current.library))
+        if (not current.same_layout(final) or not _compatible_folder_ids(current.layout, final.layout)
+                or not _compatible_folder_ids(original, final.layout, bound_ids)):
             raise LayoutError("the phone's layout changed during the final prewrite read; read again")
-        if getattr(self.source, "pins", None) != baseline_pins:
+        if not current.same_placement(final):
             raise LayoutError("the phone's exported gaps changed during the final prewrite read; read again")
-        await self._assert_identity()
-        # Match the library comparison to the source's layout format.
+        prepared_write = None
+        prepare_write = getattr(self.source, "prepare_write", None)
+        if prepare_write is not None:
+            target_lib, prepared_write = await asyncio.wait_for(
+                prepare_write(target, target_lib, want_pins, self.grid), OPERATION_TIMEOUT)
+        info = await self._assert_identity()
+        self._check_placement(requested, saved, info)
+        check_write = getattr(self.source, "check_write", None)
+        if check_write is not None:
+            check_write(want_pins, target_lib)
+        check_frame = getattr(self.source, "check_archive_frame", None)
+        if check_frame:
+            check_frame(target, self.grid)
+        # A list-only reader and writer represent the empty App Library as unavailable.
+        if current.library is None and not target_lib:
+            target_lib = None
+        if prepared is not None:
+            requested_memory = memory_pins(prepared, previous_memory, bound_ids)
+        else:
+            requested_memory = memory_pins(requested, previous_memory, backup_instances)
+        backup = self._backup(saved.to_state(), saved.to_library(), label, saved_pins, observed=saved)
         lib_known = target_lib is not None
-        _exclusive_file(self._pending_path, json.dumps({"device_id": self.device_id,
-                        "backup": backup.name, "status": "pending"}).encode())
+        _publish_exclusive(self._pending_path, json.dumps({"device_id": self.device_id,
+                           "backup": backup.name, "status": "pending"}).encode())
         write_error = None
         try:
-            await asyncio.wait_for(self.source.write(target, target_lib, pins), OPERATION_TIMEOUT)
+            operation = (prepared_write() if prepared_write is not None
+                         else self.source.write(target, target_lib, want_pins, self.grid))
+            await asyncio.wait_for(operation, OPERATION_TIMEOUT)
         except Exception as e:
             write_error = str(e) or type(e).__name__
         verification_note = "Readback compares the layout fields returned by the selected source."
         try:
-            after, after_lib = await self._read_source()
+            after, after_lib = await self._read_source((target, target_lib))
             await self._assert_identity()
-            want_pins = {k: v for page in pins or [] for k, v in page.items()}
             got_pins = getattr(self.source, "pins", None)
-            # Use requested pin locations when the source returns no pin map.
-            got_pins = want_pins if got_pins is None else got_pins
-            ok = (placed_structure(after, after_lib if lib_known else None, got_pins, self.grid)
+            unreported = got_pins is None
+            observed = Layout(after, library=after_lib, grid=self.grid)
+            if not _compatible_folder_ids(requested, observed, _instance_ids(requested, requested_memory), ordered=False):
+                raise LayoutError("readback changed a folder's owner")
+            if unreported:
+                # Retain requested gaps under the no-pin-map contract. Match folders by
+                # exported content without adding outgoing UUIDs to the returned state.
+                if write_error is not None:
+                    submitted = prepared if prepared is not None else requested
+                    obligations = bound_ids if prepared is not None else backup_instances
+                    proposed = memory_pins(submitted, previous_memory, obligations, typed=True)["pages"]
+                    prior = memory_pins(saved, previous_memory, typed=True)["pages"]
+                    if {i: p for i, p in enumerate(proposed) if p} != {i: p for i, p in enumerate(prior) if p}:
+                        raise LayoutError("write failed and the source did not report the changed fixed positions")
+                got_pins = requested_memory
+            node_pins(observed, got_pins, by_memory=unreported, strict=True)
+            if not _retains_pins(requested, observed, requested_memory):
+                raise LayoutError("readback did not retain every requested fixed position")
+            ok = (placed_structure(after, after_lib if lib_known else None, got_pins, self.grid,
+                                   by_memory=unreported)
                   == placed_structure(target, target_lib, want_pins, self.grid))
         except Exception as e:
             return {"ok": False, "status": "unknown", "backup": backup.name,
@@ -600,17 +1167,31 @@ class Session:
                 res["hidden_webclips"] = surfaced
                 res["hint"] = ("iOS put web clips it had never reported into free spots. They're "
                                "remembered now: move them to the App Library and apply again.")
-        if ok:
-            # remember the gaps that were just written (the phone won't report them back)
-            written = Layout(after, library=after_lib, grid=self.grid)
-            node_pins(written, {k: v for page in pins or [] for k, v in page.items()})
-            self._remember_gaps(written)
-        self.layout = self._layout_from(after, after_lib)
-        self._undo.clear()
-        self._redo.clear()
-        self._save_draft()
-        if ok:
-            self._clear_pending()
+        if not ok:
+            return res
+        written = Layout(after, library=after_lib, grid=self.grid)
+        node_pins(written, got_pins, by_memory=unreported, strict=True)
+        adopted = Layout(after, library=after_lib, pins=written.pins, grid=self.grid)
+        adopted.approval_device = self.device_id
+        previous = (self.layout, self._observed_placement, self._page_identity,
+                    self._draft_digest, self._placement_revision)
+        try:
+            with (_previous_file(self._gaps_path), _previous_file(self.draft_path),
+                  _previous_file(self._placement_revision_path)):
+                self._placement_revision = uuid.uuid4().hex
+                _private_replace(self._placement_revision_path, self._placement_revision.encode())
+                self._remember_gaps(written, requested_memory)
+                self.layout = adopted
+                self._observed_placement = copy.deepcopy(getattr(self.source, "pins", None))
+                self._page_identity = copy.deepcopy(getattr(self.source, "page_identity", {}))
+                self._save_draft()
+                self._clear_pending()
+        except BaseException:
+            (self.layout, self._observed_placement, self._page_identity, self._draft_digest,
+             self._placement_revision) = previous
+            raise
+        self._undo, self._redo = [], []
+        self._history_baseline = None
         return res
 
     async def apply(self, token: str) -> dict[str, Any]:
@@ -627,9 +1208,10 @@ class Session:
         problems = lay.validate()
         if problems:
             raise LayoutError(f"draft has problems, not applying: {problems}")
-        return await self._write_verified(lay.to_state(), lay.to_library(), "before-apply", pins_by_page(lay),
+        prepared, pins = self._prepared_layout(lay)
+        return await self._write_verified(prepared.to_state(), prepared.to_library(), "before-apply", pins,
                                           (lay.source, lay.source_library),
-                                          {k: v for page in pins_by_page(lay.original()) for k, v in page.items()})
+                                          self._observed_placement, prepared)
 
     def backups(self) -> list[str]:
         return sorted(p.name for p in self._dev_dir("backups").glob("*.plist"))
@@ -638,6 +1220,8 @@ class Session:
         require_writable()
         with self._exclusive():
             self._require_known()
+            if self._draft_error:
+                raise LayoutError(self._draft_error)
             return await self._restore_locked(name)
 
     async def _restore_locked(self, name: str) -> dict[str, Any]:
@@ -648,18 +1232,89 @@ class Session:
         try:
             blob = plistlib.loads(data)
             provenance = blob.get("provenance") if isinstance(blob, dict) else None
-            if not isinstance(provenance, dict) or provenance.get("version") != 1:
+            if (not isinstance(provenance, dict) or type(provenance.get("version")) is not int
+                    or provenance["version"] != 1):
                 raise LayoutError("backup has no trusted device identity provenance; legacy backups cannot be restored")
             if not self.device_id or provenance.get("device_id") != self.device_id:
                 raise LayoutError("backup device identity does not match this Session's device")
             state, library = _unpack(data)
             if not isinstance(state, list) or (library is not None and not isinstance(library, list)):
                 raise ValueError("invalid layout payload")
-            problems = Layout(state, library=library, grid=self.grid).validate()
+            restored = Layout(state, library=library, grid=self.grid)
+            pins = _unpack_pins(data)
+            if pins is not None and (not isinstance(pins, list) or any(not isinstance(page, dict) for page in pins)):
+                raise LayoutError("backup pins must identify items on each page")
+            key_format = provenance.get("pin_keys")
+            if "pin_keys" in provenance and key_format != "wire-v1":
+                raise LayoutError("backup pin identifier format is unsupported")
+            dimensions = provenance.get("grid")
+            old_grid = None
+            if dimensions is not None:
+                if not isinstance(dimensions, dict) or not {"cols", "rows"} <= dimensions.keys():
+                    raise LayoutError("backup grid dimensions must be positive integers")
+                old_grid = Grid(**dimensions)
+                if any(type(value) is not int or value <= 0 for value in old_grid.to_dict().values()):
+                    raise LayoutError("backup grid dimensions must be positive integers")
+            if pins and any(pins):
+                if old_grid is None:
+                    raise LayoutError("pinned backup has no saved grid dimensions; use a backup with grid provenance")
+                mapped = []
+                for index, page_pins in enumerate(pins):
+                    page = restored.pages[index] if index < len(restored.pages) else []
+                    nodes = {}
+                    for node in page:
+                        aliases = {pin_key(node)}
+                        if key_format is None and node.bundle_id:
+                            aliases.add(node.bundle_id)
+                        for key in aliases - {None}:
+                            nodes.setdefault(key, []).append(node)
+                    mapped_page = {}
+                    for key, cell in page_pins.items():
+                        if key not in nodes or type(cell) is not int or not 0 <= cell < old_grid.slots:
+                            raise LayoutError("backup pin is outside its saved grid or does not identify an item on its page")
+                        if len(nodes[key]) != 1:
+                            raise LayoutError("ambiguous pin identifier on a backup page")
+                        row, column = divmod(cell, old_grid.cols)
+                        node = nodes[key][0]
+                        wire = pin_key(node)
+                        if wire in mapped_page:
+                            raise LayoutError("ambiguous pin identifier on a backup page")
+                        width, height = restored.dims(node)
+                        if (column + width > min(old_grid.cols, self.grid.cols)
+                                or row + height > min(old_grid.rows, self.grid.rows)):
+                            raise LayoutError("backup pin footprint does not fit the saved or loaded grid")
+                        mapped_page[wire] = row * self.grid.cols + column
+                    mapped.append(mapped_page)
+                pins = mapped
+                node_pins(restored, pins, strict=True)
+            bound = set()
+            if "folder_instances" in provenance:
+                pages = provenance["folder_instances"]
+                if not isinstance(pages, list) or len(pages) != len(restored.pages):
+                    raise LayoutError("backup folder instance does not identify a pinned folder on its page")
+                for page, wires in zip(restored.pages, pages):
+                    owners = {pin_key(n): n.id for n in page if n.kind == "folder" and n.id in restored.pins}
+                    if not isinstance(wires, list) or any(not isinstance(w, str) or w not in owners for w in wires):
+                        raise LayoutError("backup folder instance does not identify a pinned folder on its page")
+                    bound.update(owners[w] for w in wires)
+            problems = restored.validate()
+            observed_pages = []
+            receipt = provenance.get("source_shape")
+            if receipt and old_grid == self.grid:
+                pages = _overflow_widget_pages(restored)
+                body = {k: v for k, v in blob.items() if k != "provenance"}
+                record = self._dev_dir("observed-backups") / name
+                if (receipt == _source_shape_receipt(body, self.device_id, self.grid, pages)
+                        and record.is_file() and not record.is_symlink()
+                        and record.read_bytes() == hashlib.sha256(data).digest()):
+                    observed_pages = pages
+            for index, page in enumerate(restored.pages):
+                if index not in observed_pages:
+                    problems += [f"page {index + 1}: {problem}" for problem in restored.place(page)[1]]
             if problems:
                 raise LayoutError(f"backup layout has problems, not restoring: {problems}")
         except LayoutError:
             raise
         except (ValueError, TypeError, KeyError, plistlib.InvalidFileException) as e:
             raise LayoutError("backup identity or layout data is invalid") from e
-        return await self._write_verified(*_unpack(data), "before-restore", _unpack_pins(data))
+        return await self._write_verified(state, library, "before-restore", pins, backup_instances=bound)
