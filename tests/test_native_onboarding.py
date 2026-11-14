@@ -229,7 +229,7 @@ actor Gate {
     fatalError("WebKit language fixture timed out: " + script)
    }
    func choose(_ code: String) async throws {
-    _ = try await web.callAsyncJavaScript("const picker=document.querySelector('#language-select');picker.value=code;await picker.onchange({target:picker});return true",
+    _ = try await web.callAsyncJavaScript("await chooseLanguage(code);return true",
      arguments:["code":code],in:nil,in:.page)
     for _ in 0..<100 where l.preference != code { try await Task.sleep(nanoseconds:10_000_000) }
     assert(l.preference == code)
@@ -238,6 +238,142 @@ actor Gate {
    let capability = try await web.evaluateJavaScript("window.screenOrganizerHost.languageSync || ''") as! String
    assert(capability == "native-origin")
    try await waitFor("calls.some(c=>c[0]==='de' && c[1]==='native')")
+   if let scenario = CommandLine.arguments.dropFirst(4).first {
+    func native(_ code: String) { l.setPreference(code); coordinator.synchronizeLanguage(web) }
+    func enqueuePicker(_ code: String) {
+     web.callAsyncJavaScript("await chooseLanguage(code); return true",arguments:["code":code],in:nil,in:.page) { _ in }
+    }
+    func drain() async throws {
+     for _ in 0..<3 { _ = try await web.evaluateJavaScript("true") }
+    }
+    func expect(_ code: String, hostCalls: [String]) async throws {
+     try await waitFor("ScreenOrganizerI18n.preference === '\(code)' && !ScreenOrganizerI18n.pending")
+     try await drain()
+     coordinator.synchronizeLanguage(web)
+     try await drain()
+     let state = try await web.evaluateJavaScript("""
+      [ScreenOrganizerI18n.preference, localStorage.getItem('screenOrganizer.language'), document.documentElement.lang,
+       document.querySelector('#language-select').value, document.querySelector('#consent-language-select').value]
+      """) as! [String]
+     let host = try await web.evaluateJavaScript("calls.filter(c=>c[1]==='native').map(c=>c[0])") as! [String]
+     let draft = try await web.evaluateJavaScript("document.querySelector('#folder-name').value") as! String
+     let actual = [l.preference, defaults.string(forKey:"screenOrganizer.language")!] + state
+     assert(actual == Array(repeating:code,count:7), "\(scenario): \(actual)")
+     assert(host == hostCalls, "\(scenario): \(host)")
+     assert(draft == "Kept draft")
+    }
+    try await drain()
+    _ = try await web.evaluateJavaScript("calls.length=0;document.querySelector('#folder-name').value='Kept draft'")
+    let expectedPickers: [String]
+    switch scenario {
+    case "browser-first", "failure-after-commit", "same-owner":
+     expectedPickers = scenario == "same-owner" ? ["pt","fr"] : ["fr"]
+     if scenario == "failure-after-commit" {
+      _ = try await web.evaluateJavaScript("afterNextHost=()=>{throw Error('Completion failed')};true")
+     }
+     enqueuePicker(scenario == "same-owner" ? "pt" : "fr")
+     native("pt")
+     try await expect("pt",hostCalls:["pt"])
+     if scenario == "same-owner" {
+      try await choose("fr")
+      try await expect("fr",hostCalls:["pt"])
+     }
+    case "unreadable-owner":
+     expectedPickers = ["fr"]
+     _ = try await web.evaluateJavaScript("""
+      afterNextHost=()=>{
+        const api=ScreenOrganizerI18n, prior=Object.getOwnPropertyDescriptor(api,'preference');
+        Object.defineProperty(api,'preference',{configurable:true,get(){
+          Object.defineProperty(api,'preference',prior); return undefined;
+        }});
+      };true
+      """)
+     enqueuePicker("fr")
+     native("pt")
+     try await waitFor("document.documentElement.lang==='pt'")
+     try await drain()
+     coordinator.synchronizeLanguage(web)
+     try await expect("fr",hostCalls:["pt","fr"])
+    case "host-first", "newer-picker":
+     expectedPickers = scenario == "newer-picker" ? ["fr","es"] : ["fr"]
+     _ = try await web.evaluateJavaScript("holdCatalog('pt');true")
+     native("pt")
+     try await waitFor("typeof releaseCatalog === 'function'")
+     try await choose("fr")
+     if scenario == "newer-picker" {
+      _ = try await web.evaluateJavaScript("window.finishHost=releaseCatalog;releaseCatalog=null;holdCatalog('es');true")
+      enqueuePicker("es")
+      try await waitFor("typeof releaseCatalog === 'function'")
+      _ = try await web.evaluateJavaScript("finishHost();true")
+      try await drain()
+     }
+     _ = try await web.evaluateJavaScript("releaseCatalog();true")
+     try await expect(scenario == "newer-picker" ? "es" : "fr",hostCalls:["pt"])
+    case "failure-before-commit", "retry":
+     expectedPickers = scenario == "retry" ? [] : ["fr"]
+     _ = try await web.evaluateJavaScript("beforeNextHost=()=>{throw Error('Delivery failed')};true")
+     if scenario == "failure-before-commit" { enqueuePicker("fr") }
+     native("pt")
+     try await waitFor("calls.some(c=>c[0]==='pt' && c[1]==='native')")
+     try await drain()
+     if scenario == "retry" {
+      let beforeRetry = try await web.evaluateJavaScript("ScreenOrganizerI18n.preference") as! String
+      assert(beforeRetry == "de" && l.preference == "pt")
+      coordinator.synchronizeLanguage(web)
+      try await expect("pt",hostCalls:["pt","pt"])
+     } else { try await expect("fr",hostCalls:["pt"]) }
+    case "unrendered-native", "native-before-message":
+     expectedPickers = ["fr"]
+     _ = try await web.evaluateJavaScript("afterNextHost=()=>new Promise(r=>window.finishHost=r);true")
+     enqueuePicker("fr")
+     native("pt")
+     if scenario == "native-before-message" { l.setPreference("es") }
+     try await waitFor("typeof finishHost === 'function'")
+     if scenario == "unrendered-native" {
+      assert(l.preference == "fr")
+      l.setPreference("es")
+     }
+     _ = try await web.evaluateJavaScript("finishHost();true")
+     try await expect("es",hostCalls:["pt","es"])
+    case "picker-during-read":
+     expectedPickers = ["fr","de"]
+     _ = try await web.evaluateJavaScript("afterNextHost=()=>new Promise(r=>window.finishHost=r);true")
+     enqueuePicker("fr")
+     native("pt")
+     try await waitFor("typeof finishHost === 'function'")
+     // Start a real cached picker while WebKit reads the crossed delivery's winner.
+     _ = try await web.evaluateJavaScript("""
+      const api=ScreenOrganizerI18n, prior=Object.getOwnPropertyDescriptor(api,'preference');
+      Object.defineProperty(api,'preference',{configurable:true,get(){
+        Object.defineProperty(api,'preference',prior); const value=prior.get.call(api);
+        chooseLanguage('de'); return value;
+      }});
+      finishHost();true
+      """)
+     try await expect("de",hostCalls:["pt"])
+    case "navigation":
+     expectedPickers = []
+     _ = try await web.evaluateJavaScript("afterNextHost=()=>new Promise(()=>{});true")
+     enqueuePicker("fr")
+     native("pt")
+     try await waitFor("document.documentElement.lang==='pt'")
+     assert(l.preference == "fr")
+     l.setPreference("es")
+     coordinator.installBootstrap(config.userContentController)
+     let replacement = fixture.replacingOccurrences(of:"<body>",with:"<body id='next-document'>")
+     web.loadHTMLString(replacement,baseURL:origin)
+     try await waitFor("document.body.id==='next-document' && window.fixtureReady === true && calls.some(c=>c[1]==='native')")
+     _ = try await web.evaluateJavaScript("document.querySelector('#folder-name').value='Kept draft'")
+     try await expect("es",hostCalls:["es"])
+    default: fatalError(scenario)
+    }
+    let pickers = try await web.evaluateJavaScript("pickerNotifications") as! [String]
+    assert(pickers == expectedPickers, scenario)
+    let traffic = try await web.evaluateJavaScript("JSON.stringify(unexpectedRequests)") as! String
+    assert(traffic == "[]")
+    config.userContentController.removeScriptMessageHandler(forName:"screenOrganizer")
+    break
+   }
    for coalesced in [true,false] {
     _ = try await web.evaluateJavaScript("calls.length=0")
     try await choose("fr")
@@ -570,7 +706,7 @@ time.sleep(60)
     assert result.returncode == 0, result.stderr
 
 
-def test_webkit_delivers_genuine_native_language_after_browser_round_trip(native_binary, catalogs, tmp_path):
+def run_webkit_language(native_binary, catalogs, tmp_path, *scenario):
     web = ROOT / "homescreen/web"
     # All resources are embedded, including the production picker and locale engine.
     files = {path.name: json.loads(path.read_text()) for path in catalogs.glob("*.json")}
@@ -580,8 +716,14 @@ def test_webkit_delivers_genuine_native_language_after_browser_round_trip(native
     window.calls = [];
     window.unexpectedRequests = [];
     const files = CATALOG_DATA;
+    let heldCatalog, releaseCatalog;
+    const holdCatalog = code => heldCatalog = '/static/locales/' + code + '.json';
     window.fetch = async (url, options = {}) => {
       if ((options.method || 'GET') === 'GET' && Object.hasOwn(files, url)) {
+        if (url === heldCatalog) {
+          heldCatalog = null;
+          await new Promise(resolve => releaseCatalog = resolve);
+        }
         return {ok: true, json: async () => files[url]};
       }
       unexpectedRequests.push(String(url));
@@ -590,9 +732,25 @@ def test_webkit_delivers_genuine_native_language_after_browser_round_trip(native
     """.replace("CATALOG_DATA", data)
     record_calls = """
     const selectLocale = ScreenOrganizerI18n.setLocale;
-    ScreenOrganizerI18n.setLocale = (...args) => {
+    const pickerNotifications = [];
+    ScreenOrganizerI18n.onTransition(({phase, source}) => {
+      if (phase === 'settle' && source === 'picker') pickerNotifications.push(ScreenOrganizerI18n.preference);
+    });
+    let beforeNextHost, afterNextHost;
+    ScreenOrganizerI18n.setLocale = async (...args) => {
       calls.push(args);
-      return selectLocale(...args);
+      if (args[1] !== 'native') return selectLocale(...args);
+      const before = beforeNextHost, after = afterNextHost;
+      beforeNextHost = afterNextHost = null;
+      before?.();
+      const value = await selectLocale(...args);
+      if (after) await after();
+      return value;
+    };
+    const chooseLanguage = code => {
+      const picker = document.querySelector('#language-select');
+      picker.value = code;
+      return picker.onchange({target: picker});
     };
     """
     scripts = {
@@ -608,6 +766,19 @@ def test_webkit_delivers_genuine_native_language_after_browser_round_trip(native
         html = html.replace(f'<script src="/static/{name}"></script>', f"<script>{script}</script>")
     fixture = tmp_path / "language.html"
     fixture.write_text(html)
-    result = subprocess.run([str(native_binary), "language-origin", str(catalogs), str(fixture)],
+    result = subprocess.run([str(native_binary), "language-origin", str(catalogs), str(fixture), *scenario],
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_webkit_delivers_genuine_native_language_after_browser_round_trip(native_binary, catalogs, tmp_path):
+    run_webkit_language(native_binary, catalogs, tmp_path)
+
+
+@pytest.mark.parametrize("scenario", [
+    "browser-first", "host-first", "newer-picker", "same-owner", "failure-before-commit",
+    "failure-after-commit", "retry", "unreadable-owner", "unrendered-native", "native-before-message",
+    "picker-during-read", "navigation",
+])
+def test_webkit_reconciles_crossed_language_choices(native_binary, catalogs, tmp_path, scenario):
+    run_webkit_language(native_binary, catalogs, tmp_path, scenario)

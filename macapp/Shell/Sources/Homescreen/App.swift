@@ -213,6 +213,8 @@ struct WebView: NSViewRepresentable {
         private var bootstrapPreference: String?
         private var synchronizedPreference: String?
         private var languageRevision = 0
+        private var pickerRevision = 0
+        private var deliveryPending = false
 
         init(origin: URL, localization: Localization, consent: LaunchConsent, openSetup: @escaping () -> Void) {
             self.origin = origin
@@ -232,7 +234,7 @@ struct WebView: NSViewRepresentable {
         }
 
         func synchronizeLanguage(_ web: WKWebView) {
-            guard let current = web.url, NavigationPolicy.destination(current, origin: origin) == .embedded,
+            guard !web.isLoading, let current = web.url, NavigationPolicy.destination(current, origin: origin) == .embedded,
                   synchronizedPreference != localization.preference else { return }
             let preference = localization.preference
             // Track requests before awaiting JavaScript so a quick return to the previous
@@ -240,12 +242,43 @@ struct WebView: NSViewRepresentable {
             synchronizedPreference = preference
             languageRevision += 1
             let revision = languageRevision
+            let pickerAtDispatch = pickerRevision
+            deliveryPending = true
             web.callAsyncJavaScript("if (window.ScreenOrganizerI18n) { await window.ScreenOrganizerI18n.setLocale(preference, 'native'); return true; } return false;",
-                arguments: ["preference": preference], in: nil, in: .page) { [weak self] result in
-                    guard self?.languageRevision == revision else { return }
+                arguments: ["preference": preference], in: nil, in: .page) { [weak self, weak web] result in
+                    guard let self, let web, languageRevision == revision else { return }
+                    if pickerRevision != pickerAtDispatch {
+                        reconcileLanguage(in: web, revision: revision)
+                        return
+                    }
+                    deliveryPending = false
                     if case .success(let value) = result, value as? Bool == true { return }
-                    self?.synchronizedPreference = nil
+                    synchronizedPreference = nil
                 }
+        }
+
+        private func reconcileLanguage(in web: WKWebView, revision: Int) {
+            // A picker commit and a host call crossed. Read the document's winner
+            // without starting another language change over a newer pending picker.
+            let pickerAtRead = pickerRevision
+            web.evaluateJavaScript("window.ScreenOrganizerI18n?.preference") { [weak self, weak web] value, _ in
+                guard let self, let web, languageRevision == revision else { return }
+                if synchronizedPreference != localization.preference {
+                    synchronizeLanguage(web)
+                    return
+                }
+                if pickerRevision != pickerAtRead {
+                    reconcileLanguage(in: web, revision: revision)
+                    return
+                }
+                deliveryPending = false
+                guard let value = value as? String, let owner = localization.recognizedPreference(value) else {
+                    synchronizedPreference = nil
+                    return
+                }
+                synchronizedPreference = owner
+                if localization.preference != owner { localization.setPreference(owner) }
+            }
         }
 
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -257,10 +290,20 @@ struct WebView: NSViewRepresentable {
             case .setLanguage(let preference):
                 guard let owner = localization.recognizedPreference(preference) else { return }
                 // The picker commits its choice before notifying this coordinator.
-                languageRevision += 1
+                pickerRevision += 1
+                if deliveryPending, synchronizedPreference != localization.preference, let web = message.webView {
+                    synchronizeLanguage(web)
+                    return
+                }
                 synchronizedPreference = owner
                 localization.setPreference(owner)
             }
+        }
+
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            languageRevision += 1
+            deliveryPending = false
+            synchronizedPreference = nil
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
