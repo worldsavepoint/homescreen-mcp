@@ -375,11 +375,12 @@ struct MCPClientManager {
         record = next
     }
 
-    private func markConflict(_ record: inout MCPRegistrationRecord, journal: MCPRegistrationJournal) throws -> Never {
+    private func markConflict(_ record: inout MCPRegistrationRecord, journal: MCPRegistrationJournal,
+                              code: MCPClientOperationCode = .recoveryConflict) throws -> Never {
         if journal.client == .codex, record.phase != .conflicted {
             try savePhase(.conflicted, record: &record, journal: journal)
         }
-        throw MCPClientOperationCode.recoveryConflict
+        throw code
     }
 
     private func changedEntry(_ entry: MCPOwnedEntry, record: inout MCPRegistrationRecord,
@@ -411,6 +412,7 @@ struct MCPClientManager {
             permitted = try store.client == .codex && record.prior == .absent && current.version != nil &&
                 matchesBootstrap(current.entry, record: record)
             if permitted {
+                if record.bootstrapExpected == nil { record.bootstrapExpected = record.intended }
                 record.observed = current.entry
                 record.bootstrapVersion = current.version
                 try savePhase(.bootstrapObserved, record: &record, journal: journal)
@@ -436,6 +438,12 @@ struct MCPClientManager {
             catch MCPCodexWriteError.changedEntry(let entry) {
                 if entry == record.prior { try journal.clear(); return }
                 try markConflict(&record, journal: journal)
+            } catch MCPCodexWriteError.terminalVersionRefusal(let code) {
+                try savePhase(.conflicted, record: &record, journal: journal)
+                let fresh = try await store.read()
+                guard fresh.file == record.file, fresh.entry == record.prior else { throw code }
+                try journal.clear()
+                return
             } catch MCPCodexWriteError.rejectedBeforePersistence { throw MCPClientOperationCode.commandFailed }
         } else {
             if current.entry != .absent {
@@ -567,6 +575,8 @@ struct MCPClientManager {
                         throw MCPClientOperationCode.commandFailed
                     } catch MCPCodexWriteError.changedEntry(let entry) {
                         try changedEntry(entry, record: &record, journal: journal)
+                    } catch MCPCodexWriteError.terminalVersionRefusal(let code) {
+                        try markConflict(&record, journal: journal, code: code)
                     }
                     try savePhase(.acknowledged, record: &record, journal: journal)
                 } else {

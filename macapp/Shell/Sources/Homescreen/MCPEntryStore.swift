@@ -8,13 +8,34 @@ enum MCPOwnedEntry: Equatable, Codable {
 
     init(_ object: Any?) throws {
         guard let object else { self = .absent; return }
-        guard object is [String: Any] else { throw MCPClientOperationCode.snapshotReadFailed }
-        self = .present(String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self))
+        let dictionary = try Self.dictionary(object)
+        self = .present(String(decoding: try JSONSerialization.data(withJSONObject: dictionary, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self))
+    }
+
+    private static func dictionary(_ object: Any) throws -> NSDictionary {
+        guard let dictionary = object as? NSDictionary else { throw MCPClientOperationCode.snapshotReadFailed }
+        // Merging touches the owned root and its environment as Swift dictionaries.
+        // Distinct Unicode scalar spellings can collapse to one Swift key.
+        for fields in [dictionary, dictionary["env"] as? NSDictionary].compactMap({ $0 }) {
+            guard let keys = fields.allKeys as? [String], Set(keys).count == fields.count else {
+                throw MCPClientOperationCode.snapshotReadFailed
+            }
+        }
+        return dictionary
+    }
+
+    static func == (left: Self, right: Self) -> Bool {
+        switch (left, right) {
+        case (.absent, .absent): return true
+        case let (.present(a), .present(b)): return a.utf8.elementsEqual(b.utf8)
+        default: return false
+        }
     }
 
     func object() throws -> [String: Any]? {
         guard case .present(let json) = self else { return nil }
-        guard let value = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any] else {
+        let dictionary = try Self.dictionary(JSONSerialization.jsonObject(with: Data(json.utf8)))
+        guard let value = dictionary as? [String: Any] else {
             throw MCPClientOperationCode.snapshotReadFailed
         }
         return value
@@ -37,6 +58,8 @@ struct MCPUserSnapshot {
 
 enum MCPCodexWriteError: Error {
     case rejectedBeforePersistence
+    case versionRefused
+    case terminalVersionRefusal(MCPClientOperationCode)
     case changedEntry(MCPOwnedEntry)
 }
 
@@ -202,20 +225,25 @@ struct MCPEntryStore {
 
     @discardableResult func replaceCodex(_ snapshot: MCPUserSnapshot, with desired: MCPOwnedEntry, retryUnrelated: Bool = true) async throws -> String {
         do { return try await write(snapshot, desired) }
-        catch MCPClientOperationCode.versionConflict {
-            guard retryUnrelated else { throw MCPClientOperationCode.recoveryConflict }
-            let fresh = try await read()
-            guard fresh.file == snapshot.file else { throw MCPClientOperationCode.recoveryConflict }
+        catch MCPCodexWriteError.versionRefused {
+            guard retryUnrelated else { throw MCPCodexWriteError.terminalVersionRefusal(.recoveryConflict) }
+            let fresh: MCPUserSnapshot
+            do { fresh = try await read() }
+            catch { throw MCPCodexWriteError.terminalVersionRefusal(error as? MCPClientOperationCode ?? .snapshotReadFailed) }
+            guard fresh.file == snapshot.file else { throw MCPCodexWriteError.terminalVersionRefusal(.recoveryConflict) }
             guard fresh.entry == snapshot.entry else { throw MCPCodexWriteError.changedEntry(fresh.entry) }
-            guard fresh.version != snapshot.version else { throw MCPClientOperationCode.recoveryConflict }
+            guard fresh.version != nil, fresh.version != snapshot.version else { throw MCPCodexWriteError.terminalVersionRefusal(.recoveryConflict) }
             do { return try await write(fresh, desired) }
-            catch MCPClientOperationCode.versionConflict { throw MCPClientOperationCode.recoveryConflict }
+            catch MCPCodexWriteError.versionRefused { throw MCPCodexWriteError.terminalVersionRefusal(.recoveryConflict) }
         }
     }
 
     private func write(_ snapshot: MCPUserSnapshot, _ prior: MCPOwnedEntry) async throws -> String {
         guard let version = snapshot.version else { throw MCPClientOperationCode.recoveryConflict }
-        if let writeOverride { return try await writeOverride(snapshot, prior) }
+        if let writeOverride {
+            do { return try await writeOverride(snapshot, prior) }
+            catch MCPClientOperationCode.versionConflict { throw MCPCodexWriteError.versionRefused }
+        }
         let edit: [String: Any] = ["keyPath": "mcp_servers." + MCPClientRegistration.serverID,
                                    "mergeStrategy": "replace", "value": try prior.object() as Any? ?? NSNull()]
         let result = try await rpc("config/batchWrite", ["edits": [edit], "expectedVersion": version, "filePath": snapshot.file])

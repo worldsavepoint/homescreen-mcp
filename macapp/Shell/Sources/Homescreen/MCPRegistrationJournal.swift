@@ -65,9 +65,13 @@ class MCPRegistrationJournal {
         guard record.server == MCPClientRegistration.serverID, record.client == client.rawValue, record.scope == "user",
               record.file.hasPrefix("/"), try record.intended.object() != nil else { throw MCPClientOperationCode.recoveryFailed }
         _ = try record.prior.object()
-        _ = try record.bootstrapExpected?.object()
+        let bootstrapExpected = try record.bootstrapExpected?.object()
         _ = try record.observed?.object()
         if client == .codex, record.phase == .adding { record.phase = .versionedWritePending }
+        if client == .codex, record.phase == .bootstrapObserved, bootstrapExpected == nil {
+            // Legacy writers reused this phase immediately before dispatching undo.
+            record.phase = .bootstrapUndoPending
+        }
         return record
     }
 

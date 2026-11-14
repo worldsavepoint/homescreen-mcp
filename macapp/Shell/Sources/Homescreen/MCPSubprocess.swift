@@ -72,6 +72,104 @@ final class MCPChildCancellation: @unchecked Sendable {
     }
 }
 
+/// Inspect only the members used to authorize a Codex write. Foundation has
+/// already validated the JSON grammar, but its dictionaries discard duplicates.
+private struct CodexWriteReplyMembers {
+    private enum Section {
+        case envelope, error, reason, result
+
+        var controls: Set<String> {
+            switch self {
+            case .envelope: return ["id", "method", "error", "result"]
+            case .error: return ["code", "message", "data"]
+            case .reason: return ["config_write_error_code"]
+            case .result: return ["status", "filePath", "version"]
+            }
+        }
+    }
+
+    private let bytes: Data
+    private var index: Data.Index
+
+    init(_ line: Data) {
+        bytes = line
+        index = line.startIndex
+    }
+
+    mutating func validate() throws {
+        try inspect(.envelope)
+    }
+
+    private mutating func whitespace() {
+        while index < bytes.endIndex {
+            switch bytes[index] {
+            case 9, 10, 13, 32: index += 1
+            default: return
+            }
+        }
+    }
+
+    private mutating func consume(_ byte: UInt8) -> Bool {
+        whitespace()
+        guard index < bytes.endIndex, bytes[index] == byte else { return false }
+        index += 1
+        return true
+    }
+
+    private mutating func string() throws -> Range<Data.Index> {
+        let start = index
+        guard consume(0x22) else { throw MCPClientOperationCode.invalidResponse }
+        while index < bytes.endIndex {
+            let byte = bytes[index]
+            index += 1
+            if byte == 0x22 { return start..<index }
+            if byte == 0x5c { index += 1 }
+        }
+        throw MCPClientOperationCode.invalidResponse
+    }
+
+    private mutating func inspect(_ section: Section) throws {
+        guard consume(0x7b) else { throw MCPClientOperationCode.invalidResponse }
+        let controls = section.controls
+        var unused = controls
+        if consume(0x7d) { return }
+        repeat {
+            whitespace()
+            let key = try string()
+            let name = try JSONSerialization.jsonObject(with: bytes[key], options: .fragmentsAllowed) as? String
+            guard let name, consume(0x3a) else { throw MCPClientOperationCode.invalidResponse }
+            if controls.contains(name), unused.remove(name) == nil { throw MCPClientOperationCode.invalidResponse }
+            whitespace()
+            guard index < bytes.endIndex else { throw MCPClientOperationCode.invalidResponse }
+            if bytes[index] == 0x7b {
+                switch (section, name) {
+                case (.envelope, "error"): try inspect(.error)
+                case (.envelope, "result"): try inspect(.result)
+                case (.error, "data"): try inspect(.reason)
+                default: try skipValue()
+                }
+            } else { try skipValue() }
+        } while consume(0x2c)
+        guard consume(0x7d) else { throw MCPClientOperationCode.invalidResponse }
+    }
+
+    private mutating func skipValue() throws {
+        var depth = 0
+        while index < bytes.endIndex {
+            switch bytes[index] {
+            case 0x22: _ = try string()
+            case 0x7b, 0x5b: depth += 1; index += 1
+            case 0x7d, 0x5d:
+                if depth == 0 { return }
+                depth -= 1
+                index += 1
+            case 0x2c where depth == 0: return
+            default: index += 1
+            }
+        }
+    }
+}
+
 struct MCPChildIO {
     let cancellation: MCPChildCancellation
     let input: FileHandle
@@ -124,6 +222,10 @@ struct MCPChildIO {
                       number == NSNumber(value: id), message["method"] == nil else {
                     throw MCPClientOperationCode.invalidResponse
                 }
+                if codexBatchWrite {
+                    var members = CodexWriteReplyMembers(line)
+                    try members.validate()
+                }
                 if let failure = message["error"] {
                     guard !mcp, let error = failure as? [String: Any], message["result"] == nil else {
                         throw MCPClientOperationCode.invalidResponse
@@ -136,7 +238,7 @@ struct MCPChildIO {
                         if code == -32600, let data = error["data"] as? [String: Any] {
                             switch data["config_write_error_code"] as? String {
                             case "configValidationError", "configRequirementReadonly": throw MCPCodexWriteError.rejectedBeforePersistence
-                            case "configVersionConflict": throw MCPClientOperationCode.versionConflict
+                            case "configVersionConflict": throw MCPCodexWriteError.versionRefused
                             default: break
                             }
                         }
