@@ -314,6 +314,36 @@ def test_failed_send_with_matching_order_and_unchanged_anchors_can_verify(tmp_pa
 
 
 @pytest.mark.parametrize("flat", [False, True])
+def test_dense_legacy_memory_checks_a_bounded_number_of_saved_keys(flat):
+    from homescreen.model import Layout
+    from homescreen.session import node_pins
+
+    class CountedPins(dict):
+        lookups = 0
+
+        def __iter__(self):
+            for key in super().__iter__():
+                self.lookups += 1
+                yield key
+
+        def __contains__(self, key):
+            self.lookups += 1
+            return super().__contains__(key)
+
+    grid = Grid()
+    pages = [[app_with_wire(f"a{page}-{cell}", f"wire{page}-{cell}") for cell in range(grid.slots)]
+             for page in range(4)]
+    layout = Layout([[], *pages], grid=grid)
+    per_page = [{node.id: cell for cell, node in enumerate(page)} for page in layout.pages]
+    expected = {key: cell for pins in per_page for key, cell in pins.items()}
+    saved = [CountedPins(expected)] if flat else [CountedPins(pins) for pins in per_page]
+    memory = saved[0] if flat else {"version": 2, "grid": grid.to_dict(), "pages": saved}
+
+    assert node_pins(layout, memory, by_memory=True, strict=True) == expected
+    assert sum(pins.lookups for pins in saved) <= 5 * len(expected)
+
+
+@pytest.mark.parametrize("flat", [False, True])
 @pytest.mark.parametrize("where", ["same-page", "other-page", "distinct"])
 def test_legacy_alias_claims_are_counted_across_apps_and_widgets(tmp_path, flat, where):
     from fake_phone import widget

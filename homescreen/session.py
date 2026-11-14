@@ -272,7 +272,7 @@ def node_pins(lay: Layout, keyed: dict[str, Any] | list[dict[str, int]], by_memo
                 aliases.add(f"folder:{n.name}")
                 aliases.add("folder-content:" + json.dumps(
                     [n.name, [[child.id for child in page] for page in n.children]], separators=(",", ":")))
-            candidates[n.id] = aliases.intersection(values)
+            candidates[n.id] = {key for key in aliases if key in values}
         counts = Counter(key for aliases in candidates.values() for key in aliases)
         if strict and any(count > 1 for count in counts.values()):
             raise LayoutError("ambiguous pin identifier on a layout page")
