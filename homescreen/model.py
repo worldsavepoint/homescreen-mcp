@@ -735,10 +735,20 @@ class Layout:
             "apply_token": self.token(),
         }
 
+    def pin_intents(self) -> set[str]:
+        """Explicit owners and coordinates within each Home Screen page."""
+        return {json.dumps([index, divmod(self.pins[node.id], self.grid.cols), node_structure(node)])
+                for index, page in enumerate(self.pages) for node in page if node.id in self.pins}
+
+    def library_structure(self) -> list[Any] | None:
+        if self.library is None:
+            return None
+        return sorted((node_structure(node) for node in self.library), key=json.dumps)
+
     def token(self) -> str:
         """Short hash of the exact state that would be written."""
         blob = plistlib.dumps({"state": self.to_state(), "library": self.to_library() or [],
-                               "pins": {k: v for k, v in sorted(self.pins.items())}},
+                               "pins": sorted(self.pin_intents()), "grid": self.grid.to_dict()},
                               fmt=plistlib.FMT_BINARY, sort_keys=True)
         return "apply-" + hashlib.sha256(blob).hexdigest()[:10]
 
@@ -786,19 +796,19 @@ def widget_configuration(raw: dict[str, Any]) -> str:
     return plistlib.dumps(fields, fmt=plistlib.FMT_BINARY, sort_keys=True).hex()
 
 
+def node_structure(node: Node) -> Any:
+    """Device-visible identity, independent of IDs allocated when parsing a draft."""
+    if node.kind == "folder":
+        return [node.name, [[node_structure(child) for child in page] for page in node.children]]
+    if node.kind == "widget":
+        return "widget:" + widget_configuration(node.raw)
+    if node.bundle_id:
+        return node.bundle_id
+    return {"opaque": plistlib.dumps(node.raw, fmt=plistlib.FMT_BINARY, sort_keys=True).hex()}
+
+
 def structure(state: list[Any], library: list[Any] | None = None) -> str:
     """Comparable layout fingerprint, including all exported widget configuration."""
     lay = Layout(state, library=library)
-
-    def key(n: Node) -> Any:
-        if n.kind == "folder":
-            return [n.name, [shape(p) for p in n.children]]
-        if n.kind == "widget":  # generated model ids are positional
-            return "widget:" + widget_configuration(n.raw)
-        return n.id
-
-    def shape(nodes: list[Node]) -> list[Any]:
-        return [key(n) for n in nodes]
-
-    lib = None if lay.library is None else sorted(shape(lay.library))
-    return json.dumps({"layout": [shape(lay.dock)] + [shape(p) for p in lay.pages], "library": lib})
+    pages = [[node_structure(node) for node in page] for page in [lay.dock, *lay.pages]]
+    return json.dumps({"layout": pages, "library": lay.library_structure()})

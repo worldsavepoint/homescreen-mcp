@@ -77,6 +77,18 @@ def _item_in(x: Any, names: dict[str, str]) -> Any:
     return x
 
 
+def _validate_page_ids(archive: dict[str, Any], count: int) -> None:
+    ids = archive.get("listUniqueIdentifiers")
+    if (not isinstance(ids, list) or len(ids) != count or
+            any(not isinstance(pid, str) or not pid for pid in ids) or len(set(ids)) != len(ids)):
+        raise LayoutError("exported pin metadata has invalid page identifiers")
+
+
+def _check_list_write(pins: list[dict[str, int]] | None) -> None:
+    if pins and any(pins):
+        raise LayoutError("list-format writes cannot send fixed positions; use ordinary page order")
+
+
 def _fix_list_ids(d: dict[str, Any], n: int) -> None:
     """listUniqueIdentifiers has one UUID per page; keep it in step with the page count."""
     if "listUniqueIdentifiers" in d:
@@ -180,11 +192,8 @@ class ObservedPins(dict):
         meta = self.archive.get("listMetadata", {})
         if not isinstance(meta, dict):
             raise LayoutError("invalid exported pin metadata")
-        if not meta:
-            return
-        if (not isinstance(ids, list) or len(ids) != len(page_keys)
-                or any(not isinstance(pid, str) or not pid for pid in ids) or len(set(ids)) != len(ids)):
-            raise LayoutError("exported pin metadata has invalid page identifiers")
+        if meta or "listUniqueIdentifiers" in self.archive:
+            _validate_page_ids(self.archive, len(page_keys))
         for pid, page in meta.items():
             if pid not in ids or not isinstance(page, dict):
                 raise LayoutError("exported pin metadata does not identify a layout page")
@@ -223,6 +232,8 @@ def model_to_disk(state: list[Any], library: list[Any] | None, base: dict[str, A
     """Rebuild the dict format; keys we don't touch (today view, ids) come from base. pins
     (per page) replace the gaps when given. grid supplies their page dimensions, with
     iPhone defaults when omitted."""
+    if "listUniqueIdentifiers" in base:
+        _validate_page_ids(base, len(base["iconLists"]))
     out = dict(base)
     out["buttonBar"] = [_item_out(x) for x in state[0]]
     out["iconLists"] = [[_item_out(x) for x in page] for page in state[1:]]
@@ -352,12 +363,20 @@ class PhoneSource:
             return raw, None
         return raw, library_from_installed(raw, await self.installed_apps())
 
+    def check_write(self, pins: list[dict[str, int]] | None) -> None:
+        if self._last_dict is not None:
+            if "listUniqueIdentifiers" in self._last_dict:
+                _validate_page_ids(self._last_dict, len(self._last_dict["iconLists"]))
+        elif self.write_mode == "list":
+            _check_list_write(pins)
+
     pins: dict[str, int] | None = None  # ordinary USB list reads do not report gaps
 
     @_bounded
     async def write(self, state: list[Any], library: list[Any] | None,
                     pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> None:
         require_writable()
+        self.check_write(pins)
         if self._last_dict is not None:
             payload: Any = model_to_disk(state, library, self._last_dict, pins, grid)
         elif self.write_mode == "list":
@@ -571,11 +590,19 @@ class FileSource:
         self.pins = disk_pins(raw) if is_dict_format(raw) else None
         return disk_to_model(raw) if is_dict_format(raw) else (raw, None)
 
+    def check_write(self, pins: list[dict[str, int]] | None) -> None:
+        if self.pins is None:
+            _check_list_write(pins)
+
     async def write(self, state: list[Any], library: list[Any] | None,
                     pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> None:
         require_writable()
         raw = plistlib.loads(self.path.read_bytes())
-        out = model_to_disk(state, library, raw, pins if pins is not None else [], grid) if is_dict_format(raw) else state
+        if is_dict_format(raw):
+            out = model_to_disk(state, library, raw, pins if pins is not None else [], grid)
+        else:
+            _check_list_write(pins)
+            out = state
         self.path.write_bytes(plistlib.dumps(out, fmt=plistlib.FMT_BINARY))
 
     async def icon_png(self, bundle_id: str) -> bytes | None:

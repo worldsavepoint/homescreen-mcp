@@ -20,7 +20,7 @@ Drafts, backups, icon caches, category caches and generated previews live under 
 
 Home Screen Organizer sends the dictionary form: `buttonBar`, `iconLists` and `ignored`. App Library contents are inferred from installed apps, including offloaded apps, minus apps on the Home Screen and hidden/system-only apps. App and folder data and unknown fields are retained as items move.
 
-**Widgets:** configuration is associated with an element ID exported as `userSelectedElementIdentifier`. The engine sends it back as `uniqueIdentifier` and remembers IDs across reads. Readback compares exported widget settings and element identifiers.
+**Widgets:** configuration is associated with an element ID exported as `userSelectedElementIdentifier`. For a single widget, the engine supplies a missing `uniqueIdentifier` from that element ID. It can recover a missing element ID when the widget’s exported configuration and instance evidence identify one owner. Readback compares exported widget settings and element identifiers.
 
 **Web clips:** the engine remembers clips observed in each device’s layout reads and includes off-screen clips in `ignored`. If a new clip appears after a write, the result names it under `hidden_webclips`. Move the clip to the App Library and apply again.
 
@@ -36,7 +36,7 @@ The import preserves existing device values by omitting Today View and page-ID k
 
 iOS stores pinned empty cells in `listMetadata` → `fixedLocations`, keyed by page ID. Dictionary-format reads expose that position data; ordinary USB list reads use the engine's remembered pins. Create the desired spacing by dropping an app on its target empty position in the editor. The engine remembers those pins per device and sends them with the corresponding page IDs.
 
-Pins and remembered gaps retain page ownership, including separate copies of the same app on different pages. Remembered coordinates retain their saved grid; a later Read maps their row and column to the current grid and clears a page's remembered gaps if they no longer fit. Older gap files migrate keys that identify a single item.
+Pins and remembered gaps retain page ownership, including separate copies of the same app on different pages. Remembered coordinates retain their saved grid; a later Read maps their row and column to the current grid and clears a page's remembered gaps if they no longer fit. Older gap files migrate keys that identify a single item. A list-format writer supports ordinary page order. Use a dictionary-format writer to apply fixed positions. If the saved gap file is unreadable, Read recovers the current layout using ordinary page order.
 
 On iOS 16, use sequential app order and keep folders after widgets originally read at a page’s start. New fixed positions are rejected with placement guidance. On iOS 17, 18, 26 and 27, the engine uses fixed-position editing. See [version-family layout modes](COMPATIBILITY.md).
 
@@ -44,11 +44,11 @@ On iOS 16, use sequential app order and keep folders after widgets originally re
 
 Validation checks page, Dock and folder capacities; item duplication or loss; nested folders or widgets inside folders; and an empty App Bank. A standard iPhone 4×6 page has 24 slots; small, medium and large widgets occupy 4, 8 and 16 slots; the Dock holds 4 apps; folders hold 9 items per page. iPad capacities follow the device’s icon metrics.
 
-Apply requires the token from the latest layout comparison. The session refreshes device identity and layout, saves a backup with provenance, writes the draft and reads back the result. Restore checks that backup provenance matches the selected device and also saves a backup before writing. An interrupted or mismatching operation requires a fresh **Read** before continuing.
+The Apply token covers the current grid, page order and page-local pin coordinates. The session refreshes device identity and layout, saves a backup with provenance, writes the draft and reads back the result. Restore checks that backup provenance matches the selected device and also saves a backup before writing. An interrupted or mismatching operation requires a fresh **Read** before continuing.
 
 Read checks that both device-info observations agree on the effective page, Dock and folder capacities. Apply and Restore check those capacities against the loaded draft before backup/write and after readback. A changed frame requires Read; a change detected after writing leaves the result unknown and pending. Unavailable metrics retain the standard iPhone fallback.
 
-Drafts and undo history retain local node identities separately from device identifiers, so rearranging or renaming folders preserves pin ownership. Older drafts with ambiguous pin identities require Read; their saved draft remains intact until that Read succeeds. Unknown write outcomes preserve the reviewed draft and history.
+Source comparisons use app bundle IDs, including the number of copies in the App Library. Drafts and undo history retain local node identities separately from device identifiers, so rearranging or renaming folders preserves pin ownership. Older drafts with ambiguous pin identities require Read; their saved draft remains intact until that Read succeeds. Unknown write outcomes preserve the reviewed draft and history.
 
 Since 1.2.1, pinned backups require saved grid dimensions for Restore. Trusted unpinned legacy backups remain supported. Restore maps saved pin coordinates to the loaded grid and checks every item's footprint before writing.
 
