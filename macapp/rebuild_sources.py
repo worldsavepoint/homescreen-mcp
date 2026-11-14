@@ -178,7 +178,7 @@ def local_selections(original, edited, shipped):
     if before.keys() != after.keys() or any(v[0] != after[k][0] for k, v in before.items()):
         raise ValueError("The local lock must retain the release component names and versions")
     changed = {k: {"upstreamWheel": v[1], "wheel": after[k][1]} for k, v in before.items() if v != after[k]}
-    if not changed or not changed.keys() <= set(shipped):
+    if not changed.keys() <= set(shipped):
         raise ValueError("Select an edited frozen runtime component")
     return changed
 
@@ -191,19 +191,48 @@ def refreeze(root, arch, wheelhouse, lock, output):
     volume = json.loads((root / relative_name(manifest["architectures"][arch]["inventory"])).read_bytes())
     project = root / "project"
     original = project / ("requirements-build.lock" if arch == "arm64" else "build/dependencies/x86_64/requirements-build.lock")
+    lock = lock or original
     changed = local_selections(original, lock, volume["owners"])
-    wheels = wheelhouse.resolve()
+    if changed and wheelhouse is None:
+        raise ValueError("Supply the wheelhouse containing your modified components")
+    wheels = wheelhouse.resolve() if wheelhouse is not None else None
     for wheel, value in entries(lock):
         owner = canonical(wheel.split("-")[0])
         if owner in changed and sha256(wheels / wheel) != value:
             raise ValueError("Edited wheel does not match its local lock")
     output.mkdir(parents=True)
     with tempfile.TemporaryDirectory() as temporary:
+        if wheels is None:
+            wheels = Path(temporary) / "wheels"
+            wheels.mkdir()
+        # A package index or find-links directory may also have the original wheel under
+        # the same filename. Direct local references select the trusted replacement bytes.
+        effective_lock = Path(temporary) / "local-download.lock"
+        from source_inputs import read_locks
+        packages, _ = read_locks()
+        lines = []
+        for filename, value in entries(lock):
+            name, version = filename.split("-")[:2]
+            owner = canonical(name)
+            if owner in changed:
+                requirement = f"{name} @ {(wheels / filename).as_uri()}"
+            elif (wheels / filename).is_file() and sha256(wheels / filename) == value:
+                requirement = f"{name} @ {(wheels / filename).as_uri()}"
+            elif owner == "chardet":
+                # An offline wheelhouse may contain both platform and pure-Python candidates.
+                locations = [Path(s) for s in os.environ.get("PIP_FIND_LINKS", "").split() if s]
+                cached = next((path / filename for path in locations if (path / filename).is_file()
+                               and sha256(path / filename) == value), None)
+                requirement = f"{name} @ {cached.resolve().as_uri() if cached else packages[owner]['download']}"
+            else:
+                requirement = f"{name}=={version}"
+            lines.extend(["# " + filename, f"{requirement} --hash=sha256:{value}"])
+        effective_lock.write_text("\n".join(lines) + "\n")
         settings = Path(temporary) / "rebuild.json"
         settings.write_text(json.dumps({"upstreamCommit": manifest["commit"], "components": changed}))
         env = {**os.environ, "HOMESCREEN_BUILD_ARCH": arch, "HOMESCREEN_BUILD_PYTHON": sys.executable,
                "HOMESCREEN_SOURCE_CACHE": str(root / "sources")}
-        subprocess.run([str(project / "macapp/build.sh"), "--local-build", output.resolve(), lock.resolve(),
+        subprocess.run([str(project / "macapp/build.sh"), "--local-build", output.resolve(), effective_lock,
                         wheels, settings], env=env, check=True)
 
 
@@ -224,8 +253,9 @@ def main():
         wheel.add_argument("--" + name, type=Path, required=True)
     local = commands.add_parser("refreeze")
     local.add_argument("--arch", required=True, choices=("arm64", "x86_64"))
-    for name in ("wheelhouse", "lock", "output"):
-        local.add_argument("--" + name, type=Path, required=True)
+    local.add_argument("--wheelhouse", type=Path)
+    local.add_argument("--lock", type=Path)
+    local.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "component":
         editable(args.root, canonical(args.owner), args.arch, args.output)

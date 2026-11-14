@@ -246,7 +246,7 @@ def capture(analysis, pyz, executable, collection, root, output, wheel_dir, arch
             for owner, values in replacements.items():
                 owners[owner].update(modified=True, upstreamWheel=values["upstreamWheel"])
             (output / "LOCAL-BUILD.json").write_bytes(json_bytes({
-                "upstreamCommit": local["upstreamCommit"], "arch": arch, "components": owners,
+                "upstreamCommit": local["upstreamCommit"], "arch": arch, "components": owners, "projectFiles": project_files,
                 "engine": public["engine"], "editableOverlayHashes": public["overlays"]}))
             notice = (b"Locally modified build. LOCAL-BUILD.json records the actual selected wheels.\n"
                       + notice.replace(b"Download the matching Corresponding Source", b"Download the original release source"))

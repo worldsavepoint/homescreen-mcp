@@ -72,7 +72,8 @@ else
   "$VENV/bin/python" -m pip download --require-hashes --only-binary=:all: "${WHEEL_LINKS[@]}" --dest "$WHEELS" -r "$LOCK"
 fi
 "$VENV/bin/python" "$ROOT/macapp/wheelhouse.py" --install-lock "$VENV/requirements.lock" "$LOCK"
-"$VENV/bin/python" -m pip install --require-hashes --only-binary=:all: --no-index --find-links "$WHEELS" -r "$VENV/requirements.lock"
+# The staged directory contains the only eligible bytes for the same name and version.
+env -u PIP_FIND_LINKS PIP_CONFIG_FILE=/dev/null "$VENV/bin/python" -m pip install --require-hashes --only-binary=:all: --no-index --find-links "$WHEELS" -r "$VENV/requirements.lock"
 "$VENV/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 12), "Build lock requires Python 3.12"'
 "$VENV/bin/python" -m pip install --no-deps --no-build-isolation "$ROOT"
 "$VENV/bin/python" -m pip check

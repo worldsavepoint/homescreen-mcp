@@ -38,6 +38,8 @@ The generated `local-requirements.lock` records the hash of your edited wheel. I
 
 ## Refreeze a modified Python package
 
+For an edit to the project’s own Python, Swift or web sources, run `"$PYTHON" project/macapp/rebuild_sources.py refreeze --arch "$ARCH" --output "$PWD/modified-build"`. This also builds the original project from the unpacked source archive.
+
 For a pure-Python component such as h11, run the `component` command with `h11`, edit its Python source, then run the same `wheel` command with that editable directory. Refreeze the engine and Swift app using the resulting local lock.
 
 ```sh
@@ -71,4 +73,4 @@ Use `MANIFEST.json` to locate upstream archives by their input names. The source
 - For Rust libraries, extract the owner's Python source and run `python3.12 project/macapp/rebuild_sources.py cargo-vendor --output "$PWD/cargo-vendor" > cargo-config.toml`. Install that file as `.cargo/config.toml` in the editable workspace. Run the owner’s original maturin or Cargo recipe in locked offline mode. The registry archives and checksum data come from the original workspaces’ Cargo locks. The `wheel-recipe/` inputs contain upstream generation and wheel workflows.
 - For Intel cryptography, follow `project/macapp/prepare_intel.sh` with the recorded OpenSSL source and static configure/link flags. For other native extensions follow the component's `pyproject.toml`, C/Cython build scripts and wheel recipe. The `overlays/` directories retain generated or changed editable package files from each actual wheel. Each path is relative to its installed owner.
 
-The Swift shell and the macOS integration sources are in `project/macapp/Shell/`. Build the app on the corresponding native architecture using `project/macapp/build.sh`. macOS frameworks and ordinary development tools are supplied by the system and its toolchain.
+The Swift shell and the macOS integration sources are in `project/macapp/Shell/`. Build the app from this archive on the corresponding native architecture with the `refreeze` command above. macOS frameworks and ordinary development tools are supplied by the system and its toolchain.

@@ -235,3 +235,10 @@ def test_official_freeze_exports_clean_commit_and_excludes_ignored_files(tmp_pat
     (tree / "module.py").write_text("edited")
     with pytest.raises(ValueError, match="clean release"):
         export_project(tree, tmp_path / "invalid")
+
+
+def test_local_project_can_be_refrozen_with_unmodified_dependency_lock(tmp_path):
+    from rebuild_sources import local_selections
+    lock = tmp_path / "original.lock"
+    lock.write_text("# h11-0.16.0-py3-none-any.whl\nh11==0.16.0 --hash=sha256:" + "a" * 64 + "\n")
+    assert local_selections(lock, lock, {"h11"}) == {}
