@@ -273,6 +273,7 @@
   "error.folderItem": "Ordner und Widgets können nicht in einem Ordner platziert werden.",
   "error.moveWidgets": "Verschiebe oder entferne zuerst die Widgets auf dieser Seite.",
   "error.usage": "App-Nutzungsdaten sind nicht verfügbar.",
+  "error.writeFormat": "Verwende bei diesem Schreibformat die normale Reihenfolge auf der Seite.",
   "error.position": "Diese Position ist nicht verfügbar. Wähle einen anderen Platz.",
   "error.backup": "Diese Sicherung kann nicht wiederhergestellt werden. Prüfe die Details.",
   "error.ios16": "Diese iOS-Version erfordert für diese Objekte die normale Seitenreihenfolge.",

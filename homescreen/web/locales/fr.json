@@ -273,6 +273,7 @@
   "error.folderItem": "Les dossiers et widgets ne peuvent pas être placés dans un dossier.",
   "error.moveWidgets": "Déplacez ou supprimez d’abord les widgets de cette page.",
   "error.usage": "Les données d’utilisation des apps sont indisponibles.",
+  "error.writeFormat": "Avec ce format d’écriture, utilisez l’ordre normal des icônes sur la page.",
   "error.position": "Cet emplacement est indisponible. Choisissez-en un autre.",
   "error.backup": "Cette sauvegarde ne peut pas être restaurée. Consultez les détails.",
   "error.ios16": "Cette version d’iOS exige l’ordre de page normal pour ces éléments.",

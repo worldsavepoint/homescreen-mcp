@@ -68,6 +68,9 @@ function errorKey(message, code) {
   if (message === "move or remove the widgets on this page first") return "error.moveWidgets";
   if (/^another Session operation/.test(message)) return "error.busy";
   if (/^(no layout loaded|device identity|a pending write|the phone's|token doesn't match)/.test(message)) return "error.readAgain";
+  if (message === "invalid saved pin memory; read again" ||
+      message === "exported pin metadata has invalid page identifiers") return "error.readAgain";
+  if (message === "list-format writes cannot send fixed positions; use ordinary page order") return "error.writeFormat";
   if (/^device grid changed(?: during read; no layout was loaded|; explicitly read the intended device again)$/.test(message) ||
       /^saved draft (?:identity is invalid|pin identity is unavailable|pin identity is ambiguous); call read again$/.test(message)) return "error.readAgain";
   if (/^iOS 16 /.test(message)) return "error.ios16";

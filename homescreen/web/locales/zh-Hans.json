@@ -273,6 +273,7 @@
   "error.folderItem": "无法将文件夹和小组件放入文件夹。",
   "error.moveWidgets": "请先移动或移除此页的小组件。",
   "error.usage": "应用使用数据不可用。",
+  "error.writeFormat": "使用此写入格式时，请按常规顺序排列页面上的图标。",
   "error.position": "此位置不可用。请选择其他位置。",
   "error.backup": "无法恢复此备份。请查看详细信息。",
   "error.ios16": "此 iOS 版本要求这些项目使用普通页面顺序。",

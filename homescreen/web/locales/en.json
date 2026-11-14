@@ -273,6 +273,7 @@
   "error.folderItem": "Folders and widgets cannot be placed inside a folder.",
   "error.moveWidgets": "Move or remove the widgets on this page first.",
   "error.usage": "App usage data is unavailable.",
+  "error.writeFormat": "Use ordinary page order with this write format.",
   "error.position": "This position is unavailable. Choose another spot.",
   "error.backup": "This backup cannot be restored. Review its details.",
   "error.ios16": "This iOS version requires ordinary page order for these items.",

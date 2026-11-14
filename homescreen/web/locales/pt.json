@@ -273,6 +273,7 @@
   "error.folderItem": "Pastas e widgets não podem ser colocados dentro de uma pasta.",
   "error.moveWidgets": "Primeiro mova ou remova os widgets desta página.",
   "error.usage": "Os dados de uso de apps não estão disponíveis.",
+  "error.writeFormat": "Com este formato de gravação, use a ordem normal dos ícones na página.",
   "error.position": "Esta posição não está disponível. Escolha outro espaço.",
   "error.backup": "Não é possível restaurar este backup. Veja os detalhes.",
   "error.ios16": "Esta versão do iOS exige a ordem normal da página para estes itens.",

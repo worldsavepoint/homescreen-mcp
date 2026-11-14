@@ -273,6 +273,7 @@
   "error.folderItem": "No se pueden colocar carpetas ni widgets dentro de una carpeta.",
   "error.moveWidgets": "Primero mueve o elimina los widgets de esta página.",
   "error.usage": "Los datos de uso de apps no están disponibles.",
+  "error.writeFormat": "Usa el orden normal de los iconos en la página con este formato de escritura.",
   "error.position": "Esta posición no está disponible. Elige otro espacio.",
   "error.backup": "No se puede restaurar esta copia. Revisa sus detalles.",
   "error.ios16": "Esta versión de iOS requiere el orden de página normal para estos elementos.",

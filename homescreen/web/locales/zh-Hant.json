@@ -273,6 +273,7 @@
   "error.folderItem": "無法將檔案夾和小工具放入檔案夾。",
   "error.moveWidgets": "請先移動或移除此頁的小工具。",
   "error.usage": "App 使用資料無法取得。",
+  "error.writeFormat": "使用此寫入格式時，請按一般順序排列頁面上的圖示。",
   "error.position": "此位置無法使用。請選擇其他位置。",
   "error.backup": "無法回復此備份。請查看詳細資訊。",
   "error.ios16": "此 iOS 版本要求這些項目使用一般頁面順序。",

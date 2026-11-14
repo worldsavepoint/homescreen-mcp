@@ -49,24 +49,37 @@ def test_localization_resources_follow_manifest_and_shared_display_names(tmp_pat
     assert command("check-localization", app).returncode == 0
 
 
-@pytest.mark.parametrize("italian_registered", [False, True])
-def test_additional_registered_locale_is_packaged_without_code_changes(tmp_path, italian_registered):
+@pytest.mark.parametrize("italian_registered,contribution", [
+    (False, None), (True, None), (True, ("en-x-test-1", [])), (True, ("it-IT", ["it"])),
+])
+def test_additional_registered_locale_is_packaged_without_code_changes(tmp_path, italian_registered, contribution):
     locales = tmp_path / "catalogs"
     shutil.copytree(LOCALES, locales)
     manifest = json.loads((locales / "manifest.json").read_text())
-    if italian_registered:
-        if not any(language["code"] == "it" for language in manifest["languages"]):
-            manifest["languages"].append({"code": "it", "name": "Italiano", "aliases": ["it", "en-x-test-1"]})
-            shutil.copyfile(locales / "en.json", locales / "it.json")
     from tools.check_translations import canonical_locales
 
     registered = set(canonical_locales(manifest["languages"]).values())
-    index = 1
-    while (code := f"en-x-test-{index}") in registered:
-        index += 1
-    manifest["languages"].append({"code": code, "name": "Test translation", "aliases": [code]})
+
+    def add_locale(code, name, aliases):
+        manifest["languages"].append({"code": code, "name": name, "aliases": aliases})
+        shutil.copyfile(locales / "en.json", locales / f"{code}.json")
+        registered.update([code, *aliases])
+
+    def unused_private_code():
+        index = 1
+        while (code := f"en-x-test-{index}") in registered:
+            index += 1
+        return code
+
+    if contribution:
+        code, aliases = contribution
+        if registered.isdisjoint([code, *aliases]):
+            add_locale(code, "Contributed translation", [code, *aliases])
+    if italian_registered and "it" not in registered:
+        add_locale("it", "Italiano", ["it", unused_private_code()])
+    code = unused_private_code()
+    add_locale(code, "Test translation", [code])
     (locales / "manifest.json").write_text(json.dumps(manifest))
-    shutil.copyfile(locales / "en.json", locales / f"{code}.json")
     validation = subprocess.run([sys.executable, str(ROOT / "tools/check_translations.py"),
                                  "--locales", str(locales)], capture_output=True, text=True)
     assert validation.returncode == 0, validation.stderr
