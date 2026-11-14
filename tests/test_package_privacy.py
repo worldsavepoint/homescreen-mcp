@@ -155,3 +155,42 @@ def test_malformed_archive_diagnostic(tmp_path, missing):
     assert result.returncode != 0
     assert result.stderr and b"Traceback" not in result.stderr
     assert bytes(tmp_path) not in result.stderr
+
+
+@pytest.mark.parametrize("format", ["bootstrap", "pyc", "xml", "binary", "xml-data"])
+@pytest.mark.parametrize("suffix", ["", "/src", "-other"])
+def test_serialized_root_values(tmp_path, format, suffix):
+    import plistlib
+    import py_compile
+    from PyInstaller.archive.writers import CArchiveWriter
+    from macapp.check_package_paths import ENGINE, check_archive
+
+    root = tmp_path / "private"
+    value = str(root) + suffix
+    path = native_zip(tmp_path)
+    source = tmp_path / "fixture.py"
+    source.write_text(f"def nested(): return ({value!r}, 'next')\n")
+    if format == "bootstrap":
+        engine = tmp_path / "engine"
+        CArchiveWriter(str(engine), [("archive.pyz", str(tmp_path / "modules.pyz"), False, "z"),
+                                     ("bootstrap", str(source), True, "s")], "Python")
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.write(engine, ENGINE)
+    elif format == "pyc":
+        pyc = tmp_path / "module.pyc"
+        py_compile.compile(str(source), str(pyc), "fixture.py", doraise=True)
+        nested = io.BytesIO()
+        with zipfile.ZipFile(nested, "w", zipfile.ZIP_DEFLATED) as library:
+            library.write(pyc, "module.pyc")
+        with zipfile.ZipFile(path, "a") as archive:
+            archive.writestr("library.zip", nested.getvalue())
+    else:
+        payload = [{"item": value.encode() if format == "xml-data" else value}]
+        with zipfile.ZipFile(path, "a") as archive:
+            archive.writestr("Info.plist", plistlib.dumps(payload, fmt=plistlib.FMT_BINARY
+                                                          if format == "binary" else plistlib.FMT_XML))
+    if suffix == "-other":
+        check_archive(path, [root])
+    else:
+        with pytest.raises(ValueError, match="build path"):
+            check_archive(path, [root])

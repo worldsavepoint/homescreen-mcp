@@ -2,11 +2,21 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 from tempfile import NamedTemporaryFile
 
 RECORD = ".build-paths.json"
+
+
+def runner_roots():
+    actions = os.environ.get("GITHUB_ACTIONS") == "true"
+    hosted = actions and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+    roots = [] if hosted else [Path.home()]
+    if actions and (temp := os.environ.get("RUNNER_TEMP")):
+        roots.append(Path(temp))
+    return roots
 
 
 def digest(path):
@@ -15,8 +25,8 @@ def digest(path):
 
 
 def write_record(folder, roots, inputs=()):
-    paths = sorted({str(form) for root in roots for form in (root.absolute(), root.resolve())})
-    data = {"roots": paths, "inputs": {file.relative_to(folder).as_posix(): digest(file) for file in inputs}}
+    paths = sorted({str(form) for root in [*roots, *runner_roots()] for form in (root.absolute(), root.resolve())})
+    data = {"version": 2, "roots": paths, "inputs": {file.relative_to(folder).as_posix(): digest(file) for file in inputs}}
     with NamedTemporaryFile("w", dir=folder, delete=False) as stream:
         json.dump(data, stream)
     Path(stream.name).replace(folder / RECORD)
@@ -25,6 +35,8 @@ def write_record(folder, roots, inputs=()):
 def read_roots(folder, inputs=()):
     try:
         record = json.loads((folder / RECORD).read_text())
+        if record.get("version") != 2:
+            raise ValueError
         roots = [Path(value) for value in record["roots"]]
         if not roots or any(not root.is_absolute() or root.parent == root for root in roots):
             raise ValueError

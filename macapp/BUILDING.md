@@ -196,7 +196,7 @@ or `x86_64`. Install and launch the resulting app as a separate step. After repl
 
 ## Release archives
 
-The build stages the native DMG, ZIP and checksum manifest in `build/release/<arch>`. It checks the ZIP members, nested archives and frozen Python modules for local build paths. Verify the resulting files:
+The build stages the native DMG, ZIP and checksum manifest in `build/release/<arch>`. It checks ZIP members, nested archives, plists and frozen Python modules for local build paths. It mounts the disk image read-only and compares its signed app with the extracted ZIP before installing the verified archives. Verify the resulting files:
 
 ```sh
 cd "build/release/$(uname -m)"

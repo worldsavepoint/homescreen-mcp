@@ -108,6 +108,9 @@ with zipfile.ZipFile(wheel) as archive, tempfile.TemporaryDirectory() as extract
 digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
 (output / "wheels").mkdir(parents=True, exist_ok=True)
 shutil.copy2(wheel, output / "wheels" / wheel.name)
+for previous in (output / "wheels").glob("cryptography-*.whl"):
+    if previous.name != wheel.name and (previous.is_file() or previous.is_symlink()):
+        previous.unlink()
 shutil.copy2(openssl_license, output / "OPENSSL-LICENSE.txt")
 lock = output / "requirements-build.lock"
 temporary = lock.with_suffix(".tmp")

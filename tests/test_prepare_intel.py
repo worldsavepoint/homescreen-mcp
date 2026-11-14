@@ -82,3 +82,38 @@ def test_reused_intel_paths_follow_the_prepared_wheel(tmp_path):
     (reused / "wheels" / wheel.name).write_bytes(b"different")
     with pytest.raises(ValueError):
         read_roots(reused, intel_inputs(reused))
+
+
+def test_preparation_replaces_stale_cryptography_wheels(tmp_path):
+    import sys
+    import zipfile
+    from macapp.build_paths import intel_inputs, read_roots
+
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    command(commands, "lipo", "echo x86_64")
+    command(commands, "otool", 'if [[ "$1" == "-l" ]]; then echo "Load command 0"; echo "cmd LC_BUILD_VERSION"; echo "minos 14.0"; fi')
+    wheels = tmp_path / "new"
+    wheels.mkdir()
+    name = "cryptography-50.0.2-cp312-abi3-macosx_14_0_x86_64.whl"
+    with zipfile.ZipFile(wheels / name, "w") as package:
+        package.writestr("crypto.so", b"fixture")
+        package.writestr("cryptography-50.0.2.dist-info/METADATA", "Name: cryptography\nVersion: 50.0.2\n")
+    output = tmp_path / "cache"
+    target = output / "wheels"
+    target.mkdir(parents=True)
+    (target / name).write_bytes(b"stale")
+    (target / "cryptography-older.whl").write_bytes(b"old tag")
+    (target / "other.whl").write_bytes(b"keep")
+    lock = tmp_path / "pins"
+    lock.write_text("# fixture pins\n")
+    license = tmp_path / "LICENSE"
+    license.write_text("fixture")
+    output_step = SCRIPT.read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    env = {**os.environ, "PATH": str(commands) + ":" + os.environ["PATH"]}
+    subprocess.run([sys.executable, "-", wheels, output, lock, license], input=output_step,
+                   text=True, check=True, env=env, capture_output=True)
+    assert sorted(p.name for p in target.iterdir()) == sorted([name, "other.whl"])
+    assert (target / name).read_bytes() == (wheels / name).read_bytes()
+    subprocess.run([sys.executable, SCRIPT.with_name("build_paths.py"), "intel-record", output, wheels], check=True)
+    assert wheels in read_roots(output, intel_inputs(output))

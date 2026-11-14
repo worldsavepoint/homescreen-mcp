@@ -10,6 +10,7 @@ import plistlib
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import tomllib
@@ -18,9 +19,12 @@ ROOT = Path(__file__).resolve().parents[1]
 ARCHITECTURES = ("arm64", "x86_64")
 
 
+RELEASE_VERSION = r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:alpha|beta|rc)\.(?:0|[1-9]\d*))?"
+
+
 def project_version(tag=None):
     version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
-    if not re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta|rc)\.(0|[1-9]\d*))?", version):
+    if not re.fullmatch(RELEASE_VERSION, version):
         raise ValueError("Set the project version to a SemVer release or alpha/beta/rc version")
     if tag is not None and tag != f"v{version}":
         raise ValueError(f"Release tag must match project version: v{version}")
@@ -79,8 +83,8 @@ def package(build_dir, output_dir, version, arch):
     dmg = build_dir / f"home-screen-organizer-{version}.dmg"
     if not dmg.is_file():
         raise ValueError(f"Build the disk image first: {dmg.name}")
-    from build_paths import read_roots
-    from check_package_paths import check_archive, runner_roots
+    from build_paths import read_roots, runner_roots
+    from check_package_paths import check_archive
 
     if output_dir in (build_dir, *build_dir.parents) or build_dir in output_dir.parents:
         raise ValueError("Choose a separate directory for the release archives")
@@ -96,16 +100,86 @@ def package(build_dir, output_dir, version, arch):
         subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
                         str(app), str(archive)], check=True, capture_output=True)
         check_archive(archive, [*roots, staged])
+        verify_image(disk_image, archive, Path(folder))
         lines = []
         for asset in (disk_image, archive):
             with asset.open("rb") as stream:
                 digest = hashlib.file_digest(stream, "sha256").hexdigest()
             lines.append(f"{digest}  {asset.name}\n")
         (staged / "SHA256SUMS.txt").write_text("".join(lines))
-        install_generation(staged, output_dir)
+        install_generation(staged, output_dir, arch)
 
 
-def install_generation(staged, output):
+def app_contents(app):
+    entries = {}
+    for path in app.rglob("*"):
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            content = os.readlink(path)
+        elif stat.S_ISDIR(mode):
+            content = None
+        elif stat.S_ISREG(mode):
+            with path.open("rb") as stream:
+                content = hashlib.file_digest(stream, "sha256").digest()
+        else:
+            raise ValueError("Check the app file types in the native release")
+        entries[path.relative_to(app)] = (mode, content)
+    return entries
+
+
+def verify_image(image, archive, folder):
+    unpacked = folder / "unpacked"
+    mount = folder / "mount"
+    mount.mkdir()
+    subprocess.run(["ditto", "-x", "-k", archive, unpacked], check=True, capture_output=True)
+    subprocess.run(["hdiutil", "attach", "-readonly", "-nobrowse", "-mountpoint", mount, image],
+                   check=True, capture_output=True)
+    try:
+        app = "Screen Organizer.app"
+        if not (mount / "Applications").is_symlink() or os.readlink(mount / "Applications") != "/Applications":
+            raise ValueError("Check the Applications link in the release image")
+        for location in (unpacked, mount):
+            if (location / app).is_symlink() or not (location / app).is_dir():
+                raise ValueError("Check the app directory in the native release")
+            subprocess.run(["codesign", "--verify", "--deep", "--strict", location / app],
+                           check=True, capture_output=True)
+        if app_contents(unpacked / app) != app_contents(mount / app):
+            raise ValueError("The native ZIP and disk image contain different apps")
+    finally:
+        subprocess.run(["hdiutil", "detach", mount], check=True, capture_output=True)
+
+
+def previous_assets(output, arch):
+    manifest = output / "SHA256SUMS.txt"
+    if not manifest.exists() and not manifest.is_symlink():
+        return set()
+    error = "Check the previous native release manifest"
+    if manifest.is_symlink() or not manifest.is_file():
+        raise ValueError(error)
+    pattern = re.compile(r"(home-screen-organizer-" + RELEASE_VERSION + r"-macos-" + arch + r")\.(zip|dmg)")
+    names = set()
+    bases = set()
+    for row in manifest.read_text().splitlines():
+        checksum, separator, name = row.partition("  ")
+        match = pattern.fullmatch(name)
+        if not separator or not match or not re.fullmatch(r"[0-9a-f]{64}", checksum):
+            raise ValueError(error)
+        path = output / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(error)
+        with path.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != checksum:
+                raise ValueError(error)
+        if name in names:
+            raise ValueError(error)
+        names.add(name)
+        bases.add(match[1])
+    if len(names) != 2 or len(bases) != 1:
+        raise ValueError(error)
+    return names
+
+
+def install_generation(staged, output, arch):
     # Lock the parent directory while preserving sibling files and exchanging generations.
     parent_fd = os.open(output.parent, os.O_RDONLY)
     try:
@@ -113,7 +187,7 @@ def install_generation(staged, output):
         if not output.exists():
             staged.rename(output)
             return
-        current_names = {entry.name for entry in staged.iterdir()}
+        current_names = {entry.name for entry in staged.iterdir()} | previous_assets(output, arch)
         for entry in output.iterdir():
             if entry.name in current_names:
                 continue
@@ -126,6 +200,9 @@ def install_generation(staged, output):
                 os.link(entry, destination)
         # Darwin RENAME_SWAP exchanges two populated directories on the same volume.
         libc = ctypes.CDLL(None, use_errno=True)
+        # Darwin COPYFILE_SECURITY copies the existing directory stat and ACL.
+        if libc.copyfile(os.fsencode(output), os.fsencode(staged), None, 3) != 0:
+            raise OSError(ctypes.get_errno(), "Could not preserve the release directory permissions")
         if libc.renamex_np(os.fsencode(staged), os.fsencode(output), 2) != 0:
             raise OSError(ctypes.get_errno(), "Could not install the verified release")
     finally:

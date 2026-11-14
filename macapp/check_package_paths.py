@@ -1,8 +1,11 @@
 """Check a trusted native release ZIP for local build paths."""
 import argparse
 import io
+from importlib.util import MAGIC_NUMBER
+import marshal
 import os
 from pathlib import Path
+import plistlib
 import re
 import stat
 import struct
@@ -16,15 +19,6 @@ ENGINE = "Screen Organizer.app/Contents/Resources/engine/engine"
 
 class BuildPathError(ValueError):
     pass
-
-
-def runner_roots():
-    actions = os.environ.get("GITHUB_ACTIONS") == "true"
-    hosted = actions and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-    roots = [] if hosted else [Path.home()]
-    if actions and (temp := os.environ.get("RUNNER_TEMP")):
-        roots.append(Path(temp))
-    return roots
 
 
 def check_archive(path, blocked):
@@ -52,13 +46,23 @@ def check_archive(path, blocked):
         elif isinstance(value, CodeType):
             check_value(value.co_filename)
             check_value(value.co_consts)
-        elif isinstance(value, (tuple, frozenset)):
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                check_value(key)
+                check_value(item)
+        elif isinstance(value, (list, tuple, frozenset)):
             for item in value:
                 check_value(item)
 
     def check_payload(name, data, regular):
         check(data)
         if regular:
+            lower = name.lower()
+            if lower.endswith(".pyc") and data.startswith(MAGIC_NUMBER) and any(root in data for root in roots):
+                check_value(marshal.loads(data[16:]))
+            elif (lower.endswith(".plist") or data.startswith(b"bplist00")
+                  or (data.startswith(b"<?xml") and b"<plist" in data[:1024])):
+                check_value(plistlib.loads(data))
             stream = io.BytesIO(data)
             if name.lower().endswith((".zip", ".whl")) or zipfile.is_zipfile(stream):
                 with zipfile.ZipFile(stream) as nested:
@@ -98,6 +102,8 @@ def check_archive(path, blocked):
             check(name.encode())
             data = package.extract(name)
             check_payload(name, data, entry[-1] in ("x", "Z"))
+            if entry[-1] in ("s", "m", "M") and any(root in data for root in roots):
+                check_value(marshal.loads(data))
             if entry[-1] == "z":
                 pyz = package.open_embedded_archive(name)
                 for member in pyz.toc:
@@ -132,6 +138,7 @@ def main():
     parser.add_argument("archive", type=Path)
     parser.add_argument("build_roots", type=Path, nargs="+")
     args = parser.parse_args()
+    from build_paths import runner_roots
     try:
         check_archive(args.archive, [*args.build_roots, *runner_roots()])
     except ValueError as error:
