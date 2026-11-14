@@ -19,11 +19,20 @@ enum MCPClientRegistration {
     }
 
     static func arguments(client: MCPClient, executablePath: String, mode: MCPAccessMode) -> [String] {
+        arguments(client: client, executablePath: executablePath, gates: gates(for: mode))
+    }
+
+    fileprivate static func gates(for mode: MCPAccessMode) -> [String: String] {
+        mode == .readOnly ? ["HOMESCREEN_READ_ONLY":"1"] : ["HOMESCREEN_READ_ONLY":"0", "HOMESCREEN_ALLOW_APPLY":"1"]
+    }
+
+    fileprivate static func arguments(client: MCPClient, executablePath: String, gates: [String: String]) -> [String] {
         var arguments = ["mcp", "add"]
         if client == .codex { arguments += [serverID] }
         else { arguments += ["--scope", "user"] }
-        arguments += ["--env", "HOMESCREEN_READ_ONLY=\(mode == .readOnly ? "1" : "0")"]
-        if mode == .applyEnabled { arguments += ["--env", "HOMESCREEN_ALLOW_APPLY=1"] }
+        for name in ["HOMESCREEN_READ_ONLY", "HOMESCREEN_ALLOW_APPLY"] {
+            if let value = gates[name] { arguments += ["--env", name + "=" + value] }
+        }
         // Claude's --env is variadic; the transport option ends that argument group.
         if client == .claudeCode { arguments += ["--transport", "stdio", serverID] }
         return arguments + ["--", executablePath, "mcp"]
@@ -346,56 +355,88 @@ struct MCPClientManager {
         return try current == MCPOwnedEntry(value)
     }
 
+    private func matchesBootstrap(_ entry: MCPOwnedEntry, record: MCPRegistrationRecord) throws -> Bool {
+        // Earlier journals used the final requested gates for the first CLI entry.
+        guard var expected = try (record.bootstrapExpected ?? record.intended).object() else { return false }
+        expected.removeValue(forKey: "environment_id")
+        if try entry == MCPOwnedEntry(expected) { return true }
+        expected["environment_id"] = "local"
+        return try entry == MCPOwnedEntry(expected)
+    }
+
+    private struct JournalSaveFailure: Error {}
+    private struct PriorRestored: Error {}
+
+    private func savePhase(_ phase: MCPRegistrationPhase, record: inout MCPRegistrationRecord,
+                           journal: MCPRegistrationJournal) throws {
+        var next = record
+        next.phase = phase
+        do { try journal.save(next) } catch { throw JournalSaveFailure() }
+        record = next
+    }
+
+    private func markConflict(_ record: inout MCPRegistrationRecord, journal: MCPRegistrationJournal) throws -> Never {
+        if journal.client == .codex, record.phase != .conflicted {
+            try savePhase(.conflicted, record: &record, journal: journal)
+        }
+        throw MCPClientOperationCode.recoveryConflict
+    }
+
+    private func changedEntry(_ entry: MCPOwnedEntry, record: inout MCPRegistrationRecord,
+                              journal: MCPRegistrationJournal) throws -> Never {
+        // Settle this observation before a later read can see a different value.
+        if journal.client == .codex, entry == record.prior {
+            do { try journal.clear() } catch { throw JournalSaveFailure() }
+            throw PriorRestored()
+        }
+        try markConflict(&record, journal: journal)
+    }
+
     private func restore(_ record: inout MCPRegistrationRecord, journal: MCPRegistrationJournal, store: MCPEntryStore) async throws {
         if record.phase == .committed { try journal.clear(); return }
-        guard record.phase != .conflicted else { throw MCPClientOperationCode.recoveryConflict }
         let current = try await store.read()
         guard current.file == record.file else { throw MCPClientOperationCode.recoveryConflict }
-        // An acknowledged write retires the bootstrap snapshot, even if a later
-        // edit recreates that snapshot's exact content fingerprint.
-        if record.phase == .acknowledged && current.entry != record.intended {
-            record.phase = .conflicted
-            try journal.save(record)
-            throw MCPClientOperationCode.recoveryConflict
-        }
         if current.entry == record.prior { try journal.clear(); return }
         let permitted: Bool
         switch record.phase {
-        case .prepared, .committed, .conflicted: permitted = false
-        case .acknowledged: permitted = true // Checked above, before treating the prior entry as restored.
-        case .bootstrapObserved:
-            permitted = current.entry == record.observed && record.bootstrapVersion != nil && current.version == record.bootstrapVersion
+        case .prepared, .committed, .conflicted, .bootstrapUndoPending: permitted = false
+        case .acknowledged: permitted = current.entry == record.intended
+        case .versionedWritePending:
+            // A content hash can recur after an applied write and an external edit.
+            permitted = current.entry == record.intended && current.entry != record.observed
+        case .bootstrapObserved, .versionedWriteRejected:
+            permitted = store.client == .codex && record.prior == .absent && current.entry == record.observed &&
+                record.bootstrapVersion != nil && current.version == record.bootstrapVersion
         case .bootstrapping:
-            guard store.client == .codex, record.prior == .absent, var initial = try record.intended.object() else {
-                throw MCPClientOperationCode.recoveryConflict
+            permitted = try store.client == .codex && record.prior == .absent && current.version != nil &&
+                matchesBootstrap(current.entry, record: record)
+            if permitted {
+                record.observed = current.entry
+                record.bootstrapVersion = current.version
+                try savePhase(.bootstrapObserved, record: &record, journal: journal)
+                try await restore(&record, journal: journal, store: store)
+                return
             }
-            initial.removeValue(forKey: "environment_id")
-            permitted = try current.entry == record.intended || current.entry == MCPOwnedEntry(initial)
         case .removing: permitted = current.entry == .absent
         case .adding:
-            let unchangedBootstrap = store.client == .codex && record.bootstrapVersion != nil &&
-                current.version == record.bootstrapVersion && current.entry == record.observed
-            permitted = try unchangedBootstrap || (current.entry == .absent && store.client == .claudeCode) ||
-                matches(current.entry, intended: record.intended, client: store.client)
+            permitted = try store.client == .claudeCode && (current.entry == .absent || matches(current.entry, intended: record.intended, client: store.client))
         case .observed, .restoring: permitted = current.entry == record.observed ||
                 (record.phase == .restoring && store.client == .claudeCode && current.entry == .absent)
         case .restoreRemoved: permitted = current.entry == .absent
         }
-        guard permitted else { throw MCPClientOperationCode.recoveryConflict }
+        guard permitted else { try markConflict(&record, journal: journal) }
         if store.client == .claudeCode, case .present(let json) = record.prior {
             try checkLaunchEnvelope(["mcp", "add-json", "--scope", "user", MCPClientRegistration.serverID, json], store: store)
         }
-        let exactBootstrap = record.phase == .bootstrapObserved ||
-            (record.phase == .adding && record.bootstrapVersion != nil && current.entry == record.observed)
-        if exactBootstrap {
-            record.phase = .bootstrapObserved
-        } else {
-            record.observed = current.entry
-            record.phase = .restoring
-        }
-        try journal.save(record)
+        let strictBootstrap = record.phase == .bootstrapObserved || record.phase == .versionedWriteRejected
+        record.observed = current.entry
+        try savePhase(strictBootstrap ? .bootstrapUndoPending : .restoring, record: &record, journal: journal)
         if store.client == .codex {
-            try await store.replaceCodex(current, with: record.prior, retryUnrelated: !exactBootstrap)
+            do { try await store.replaceCodex(current, with: record.prior, retryUnrelated: !strictBootstrap) }
+            catch MCPCodexWriteError.changedEntry(let entry) {
+                if entry == record.prior { try journal.clear(); return }
+                try markConflict(&record, journal: journal)
+            } catch MCPCodexWriteError.rejectedBeforePersistence { throw MCPClientOperationCode.commandFailed }
         } else {
             if current.entry != .absent {
                 guard try !isRemote(current.entry) else { throw MCPClientOperationCode.remoteConflict }
@@ -403,14 +444,17 @@ struct MCPClientManager {
             }
             let removed = try await store.read()
             guard removed.file == record.file, removed.entry == .absent else { throw MCPClientOperationCode.recoveryConflict }
-            record.phase = .restoreRemoved
-            try journal.save(record)
+            try savePhase(.restoreRemoved, record: &record, journal: journal)
             if case .present(let json) = record.prior {
                 try await store.command(["mcp", "add-json", "--scope", "user", MCPClientRegistration.serverID, json])
             }
         }
         let after = try await store.read()
-        guard after.file == record.file, after.entry == record.prior else { throw MCPClientOperationCode.recoveryFailed }
+        guard after.file == record.file else { throw MCPClientOperationCode.recoveryConflict }
+        guard after.entry == record.prior else {
+            if store.client == .codex { try markConflict(&record, journal: journal) }
+            throw MCPClientOperationCode.recoveryFailed
+        }
         try journal.clear()
     }
 
@@ -462,7 +506,7 @@ struct MCPClientManager {
                 guard previous.code == .success else { return result(previous.code, previous) }
                 if previous.configuration == .configured, previous.scope == .user, snapshot.entry == .absent { return result(.snapshotReadFailed, previous) }
             }
-            let env = mode == .readOnly ? ["HOMESCREEN_READ_ONLY": "1"] : ["HOMESCREEN_READ_ONLY": "0", "HOMESCREEN_ALLOW_APPLY": "1"]
+            let env = MCPClientRegistration.gates(for: mode)
             let base = try MCPOwnedEntry(["command": enginePath, "args": ["mcp"], "env": env])
             let intended = try mergedEntry(client: client, prior: snapshot.entry, enginePath: enginePath, gates: env)
             var add = MCPClientRegistration.arguments(client: client, executablePath: enginePath, mode: mode)
@@ -482,22 +526,25 @@ struct MCPClientManager {
                     guard beforeRemove.file == snapshot.file, beforeRemove.entry == snapshot.entry else {
                         throw MCPClientOperationCode.recoveryConflict
                     }
-                    record.phase = .removing
-                    try journal.save(record)
+                    try savePhase(.removing, record: &record, journal: journal)
                     awaitingPostimage = true
                     try await store.command(["mcp", "remove", "--scope", "user", MCPClientRegistration.serverID])
                     awaitingPostimage = false
                 }
                 var before = try await store.read()
-                guard before.file == snapshot.file, before.entry == (client == .claudeCode ? .absent : snapshot.entry) else {
-                    throw MCPClientOperationCode.recoveryConflict
+                guard before.file == snapshot.file else { throw MCPClientOperationCode.recoveryConflict }
+                guard before.entry == (client == .claudeCode ? .absent : snapshot.entry) else {
+                    try markConflict(&record, journal: journal)
                 }
                 if client == .codex && before.version == nil {
-                    // The CLI creates the missing base file. Its add command omits the
-                    // executor, so pin it with a versioned edit of the new entry.
+                    // The CLI may omit the executor. Keep Apply disabled until the
+                    // versioned write installs both the local executor and final gates.
                     guard before.entry == .absent else { throw MCPClientOperationCode.recoveryConflict }
-                    record.phase = .bootstrapping
-                    try journal.save(record)
+                    var gates = MCPClientRegistration.gates(for: .readOnly)
+                    if mode == .applyEnabled { gates["HOMESCREEN_ALLOW_APPLY"] = "0" }
+                    record.bootstrapExpected = try MCPOwnedEntry(["command": enginePath, "args": ["mcp"], "env": gates])
+                    add = MCPClientRegistration.arguments(client: client, executablePath: enginePath, gates: gates)
+                    try savePhase(.bootstrapping, record: &record, journal: journal)
                     var commandError: Error?
                     do { try await store.command(add) } catch { commandError = error }
                     before = try await store.read()
@@ -506,20 +553,24 @@ struct MCPClientManager {
                         guard let revision = before.version else { throw MCPClientOperationCode.recoveryConflict }
                         record.observed = before.entry
                         record.bootstrapVersion = revision
-                        record.phase = .bootstrapObserved
-                        try journal.save(record)
+                        try savePhase(.bootstrapObserved, record: &record, journal: journal)
                     }
                     if let commandError { throw commandError }
-                    guard before.entry == base || before.entry == intended else { throw MCPClientOperationCode.invalidResponse }
+                    guard try matchesBootstrap(before.entry, record: record) else { throw MCPClientOperationCode.invalidResponse }
                 }
-                record.phase = .adding
-                try journal.save(record)
                 let acknowledged: String?
                 if client == .codex {
-                    acknowledged = try await store.replaceCodex(before, with: intended)
-                    record.phase = .acknowledged
-                    try journal.save(record)
+                    try savePhase(.versionedWritePending, record: &record, journal: journal)
+                    do { acknowledged = try await store.replaceCodex(before, with: intended) }
+                    catch MCPCodexWriteError.rejectedBeforePersistence {
+                        try savePhase(.versionedWriteRejected, record: &record, journal: journal)
+                        throw MCPClientOperationCode.commandFailed
+                    } catch MCPCodexWriteError.changedEntry(let entry) {
+                        try changedEntry(entry, record: &record, journal: journal)
+                    }
+                    try savePhase(.acknowledged, record: &record, journal: journal)
                 } else {
+                    try savePhase(.adding, record: &record, journal: journal)
                     awaitingPostimage = true
                     try await store.command(add)
                     acknowledged = nil
@@ -528,19 +579,17 @@ struct MCPClientManager {
                 awaitingPostimage = false
                 guard written.file == snapshot.file else { throw MCPClientOperationCode.recoveryConflict }
                 if let acknowledged, written.version != acknowledged, written.entry != intended {
-                    record.phase = .conflicted
-                    try journal.save(record)
-                    throw MCPClientOperationCode.recoveryConflict
+                    try changedEntry(written.entry, record: &record, journal: journal)
                 }
                 record.observed = written.entry
-                record.phase = .observed
-                try journal.save(record)
+                try savePhase(.observed, record: &record, journal: journal)
                 guard try matches(written.entry, intended: intended, client: client), let raw = try written.entry.object(), localMode(raw) == mode, raw["command"] as? String == enginePath,
                       raw["args"] as? [String] == ["mcp"] else { throw MCPClientOperationCode.invalidResponse }
                 var verification = await effectiveQuery(store)
                 if client == .codex && verification.code == .success {
                     let context = try await store.read(effective: true)
-                    guard context.file == written.file, context.entry == written.entry else { throw MCPClientOperationCode.recoveryConflict }
+                    guard context.file == written.file else { throw MCPClientOperationCode.recoveryConflict }
+                    guard context.entry == written.entry else { try changedEntry(context.entry, record: &record, journal: journal) }
                     annotate(&verification, snapshot: context)
                 } else { annotate(&verification, snapshot: written) }
                 guard verification.code == .success else { throw verification.code }
@@ -548,14 +597,17 @@ struct MCPClientManager {
                         (verification.localEnabled && verification.command == enginePath && verification.arguments == ["mcp"] &&
                          verification.mode == mode) else { throw MCPClientOperationCode.invalidResponse }
                 let final = try await store.read()
-                guard final.file == written.file, final.entry == written.entry else { throw MCPClientOperationCode.recoveryConflict }
-                var commit = record
-                commit.phase = .committed
-                try journal.save(commit)
-                record = commit
+                guard final.file == written.file else { throw MCPClientOperationCode.recoveryConflict }
+                guard final.entry == written.entry else { try changedEntry(final.entry, record: &record, journal: journal) }
+                try savePhase(.committed, record: &record, journal: journal)
                 var success = result(.success, verification)
                 do { try journal.clear() } catch { success.cleanupPending = true }
                 return success
+            } catch is PriorRestored {
+                return result(.recoveryConflict, await query(client: client, executablePath: path), .restored)
+            } catch is JournalSaveFailure {
+                // The rename may have succeeded before the directory sync failed.
+                return result(.snapshotReadFailed, await query(client: client, executablePath: path), .failed)
             } catch {
                 let failure = error as? MCPClientOperationCode ?? .snapshotReadFailed
                 do {
@@ -563,8 +615,7 @@ struct MCPClientManager {
                         let post = try await store.read()
                         guard post.file == record.file else { throw MCPClientOperationCode.recoveryConflict }
                         record.observed = post.entry
-                        record.phase = .observed
-                        try journal.save(record)
+                        try savePhase(.observed, record: &record, journal: journal)
                     }
                     try await restore(&record, journal: journal, store: store)
                 } catch {

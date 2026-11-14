@@ -35,6 +35,11 @@ struct MCPUserSnapshot {
     var effectiveEntry: MCPOwnedEntry? = nil
 }
 
+enum MCPCodexWriteError: Error {
+    case rejectedBeforePersistence
+    case changedEntry(MCPOwnedEntry)
+}
+
 struct MCPEntryStore {
     let client: MCPClient
     let executable: String
@@ -191,7 +196,7 @@ struct MCPEntryStore {
             guard handshake["userAgent"] is String else { throw MCPClientOperationCode.unsupportedClient }
             try io.send(["method": "initialized", "params": [:]])
             try io.send(["id": 2, "method": method, "params": params])
-            return try io.receive(2, mcp: false)
+            return try io.receive(2, mcp: false, codexBatchWrite: method == "config/batchWrite")
         }
     }
 
@@ -200,9 +205,9 @@ struct MCPEntryStore {
         catch MCPClientOperationCode.versionConflict {
             guard retryUnrelated else { throw MCPClientOperationCode.recoveryConflict }
             let fresh = try await read()
-            guard fresh.file == snapshot.file, fresh.entry == snapshot.entry, fresh.version != snapshot.version else {
-                throw MCPClientOperationCode.recoveryConflict
-            }
+            guard fresh.file == snapshot.file else { throw MCPClientOperationCode.recoveryConflict }
+            guard fresh.entry == snapshot.entry else { throw MCPCodexWriteError.changedEntry(fresh.entry) }
+            guard fresh.version != snapshot.version else { throw MCPClientOperationCode.recoveryConflict }
             do { return try await write(fresh, desired) }
             catch MCPClientOperationCode.versionConflict { throw MCPClientOperationCode.recoveryConflict }
         }

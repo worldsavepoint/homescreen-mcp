@@ -112,7 +112,7 @@ struct MCPChildIO {
         }
     }
 
-    mutating func receive(_ id: Int, mcp: Bool) throws -> [String: Any] {
+    mutating func receive(_ id: Int, mcp: Bool, codexBatchWrite: Bool = false) throws -> [String: Any] {
         while true {
             if let newline = pending.firstIndex(of: 10) {
                 let line = pending.prefix(upTo: newline)
@@ -127,6 +127,20 @@ struct MCPChildIO {
                 if let failure = message["error"] {
                     guard !mcp, let error = failure as? [String: Any], message["result"] == nil else {
                         throw MCPClientOperationCode.invalidResponse
+                    }
+                    if codexBatchWrite {
+                        guard let code = error["code"] as? Int, error["message"] is String else {
+                            throw MCPClientOperationCode.invalidResponse
+                        }
+                        if code == -32601 { throw MCPClientOperationCode.unsupportedClient }
+                        if code == -32600, let data = error["data"] as? [String: Any] {
+                            switch data["config_write_error_code"] as? String {
+                            case "configValidationError", "configRequirementReadonly": throw MCPCodexWriteError.rejectedBeforePersistence
+                            case "configVersionConflict": throw MCPClientOperationCode.versionConflict
+                            default: break
+                            }
+                        }
+                        throw MCPClientOperationCode.commandFailed
                     }
                     if error["code"] as? Int == -32601 { throw MCPClientOperationCode.unsupportedClient }
                     if error["message"] as? String == "Configuration was modified since last read. Fetch latest version and retry." {

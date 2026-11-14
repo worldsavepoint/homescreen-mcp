@@ -2,7 +2,8 @@ import Foundation
 import Darwin
 
 enum MCPRegistrationPhase: String, Codable {
-    case prepared, bootstrapping, bootstrapObserved, removing, adding, acknowledged, observed, restoring, restoreRemoved, committed, conflicted
+    case prepared, bootstrapping, bootstrapObserved, versionedWritePending, versionedWriteRejected, bootstrapUndoPending
+    case removing, adding, acknowledged, observed, restoring, restoreRemoved, committed, conflicted
 }
 
 struct MCPRegistrationRecord: Codable {
@@ -13,6 +14,7 @@ struct MCPRegistrationRecord: Codable {
     let prior: MCPOwnedEntry
     let intended: MCPOwnedEntry
     var phase: MCPRegistrationPhase = .prepared
+    var bootstrapExpected: MCPOwnedEntry?
     var observed: MCPOwnedEntry?
     var bootstrapVersion: String?
 }
@@ -59,11 +61,13 @@ class MCPRegistrationJournal {
               st.st_mode & 0o077 == 0, st.st_size <= 4 * MCPChildIO.limit, let data = try handle.readToEnd() else {
             throw MCPClientOperationCode.recoveryFailed
         }
-        let record = try JSONDecoder().decode(MCPRegistrationRecord.self, from: data)
+        var record = try JSONDecoder().decode(MCPRegistrationRecord.self, from: data)
         guard record.server == MCPClientRegistration.serverID, record.client == client.rawValue, record.scope == "user",
               record.file.hasPrefix("/"), try record.intended.object() != nil else { throw MCPClientOperationCode.recoveryFailed }
         _ = try record.prior.object()
+        _ = try record.bootstrapExpected?.object()
         _ = try record.observed?.object()
+        if client == .codex, record.phase == .adding { record.phase = .versionedWritePending }
         return record
     }
 

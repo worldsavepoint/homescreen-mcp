@@ -30,8 +30,11 @@ final class InterruptibleJournal: MCPRegistrationJournal {
         if fault == "after" { throw MCPClientOperationCode.recoveryFailed }
     }
     override func save(_ record: MCPRegistrationRecord) throws {
+        let env = ProcessInfo.processInfo.environment
+        if env["TEST_SAVE_FAIL_BEFORE"] == record.phase.rawValue { throw MCPClientOperationCode.snapshotReadFailed }
         try super.save(record)
-        if ProcessInfo.processInfo.environment["TEST_JOURNAL_EXIT"] == record.phase.rawValue { _exit(85) }
+        if env["TEST_SAVE_FAIL_AFTER"] == record.phase.rawValue { throw MCPClientOperationCode.snapshotReadFailed }
+        if env["TEST_JOURNAL_EXIT"] == record.phase.rawValue { _exit(85) }
     }
 }
 @main struct Harness {
@@ -115,6 +118,9 @@ config = Path(os.environ["TEST_CONFIG_PATH"]) if "TEST_CONFIG_PATH" in os.enviro
 entries = json.loads(store.read_text()) if store.exists() else {"unrelated": {"command": "keep me"}}
 key = "ios-homescreen-mcp"
 target = Path(os.environ["HOME"]) / ".codex/config.toml"
+def trace_mutation(operation):
+    with store.with_suffix(".mutations").open("a") as log:
+        log.write(operation + "\\n")
 if args[:2] == ["app-server", "generate-json-schema"]:
     assert args[2] == "--out"
     out = Path(args[3])
@@ -150,6 +156,18 @@ if args == ["app-server"]:
             continue
         elif method == "config/read":
             assert ready and params["includeLayers"] and params["cwd"] in (None, os.getcwd())
+            marker = store.with_suffix(".read-stage")
+            stage = marker.read_text() if marker.exists() else ""
+            bounce = os.getenv("TEST_BOUNCE")
+            if stage == "written" and params["cwd"]:
+                marker.write_text("effective")
+            return_to_intended = ((bounce == "cas" and stage == "conflict") or
+                (bounce == "effective" and stage == "written" and params["cwd"]) or
+                (bounce in ("final","final-prior") and stage == "effective" and not params["cwd"]))
+            if return_to_intended:
+                if bounce == "final-prior": entries.pop(key)
+                else: entries[key] = {"command":"/external","args":["mcp"],"env":{}}
+                store.write_text(json.dumps(entries))
             effective = dict(entries.get(key, {}))
             origin = {"name":{"type":"project","dotCodexFolder":"/synthetic/.codex"},"version":"p"}
             project = {"command":"/project", "env":{"HOMESCREEN_READ_ONLY":"0","HOMESCREEN_ALLOW_APPLY":"1"}}
@@ -157,6 +175,8 @@ if args == ["app-server"]:
             if os.getenv("TEST_PROJECT") == "remote": project = {"environment_id":"remote-box"}
             if os.getenv("TEST_SYSTEM_EXECUTOR"):
                 effective.setdefault("environment_id", "remote-system")
+            if os.getenv("TEST_SYSTEM_ALLOW"):
+                effective["env"] = {"HOMESCREEN_ALLOW_APPLY":"1", **effective.get("env", {})}
             if params["cwd"] and os.getenv("TEST_PROJECT"): effective.update(project)
             layer = {"name": {"type": "user", "file": str(target), "profile": None}, "disabledReason": None,
                      "version": version(), "config": {"mcp_servers": entries, "privateSetting": "excluded"}}
@@ -167,36 +187,63 @@ if args == ["app-server"]:
             if os.getenv("TEST_LAYER_OMITTED") and not store.exists() and not any(os.getenv(k) for k in ("TEST_BAD_LAYERS","TEST_LAYER_PATH","TEST_LAYER_REDACTED")): result["layers"] = []
             if os.getenv("TEST_SYSTEM_EXECUTOR"):
                 system = {"name":{"type":"system","file":str(target.parent/"fixture-system.toml")},"version":"s"}
-                result["layers"].insert(0, {**system,"disabledReason":None,"config":{"mcp_servers":{key:{"environment_id":"remote-system"}}}})
+                system_entry = {"environment_id":"remote-system"}
+                if os.getenv("TEST_SYSTEM_ALLOW"): system_entry["env"] = {"HOMESCREEN_ALLOW_APPLY":"1"}
+                result["layers"].insert(0, {**system,"disabledReason":None,"config":{"mcp_servers":{key:system_entry}}})
                 if "environment_id" not in entries.get(key,{}):
                     result["origins"]["mcp_servers." + key + ".environment_id"] = system
+            if os.getenv("TEST_CAPTURE_BOOTSTRAP") and key in entries and "environment_id" not in entries[key]:
+                store.with_suffix(".bootstrap").write_text(json.dumps({"user":entries[key], "effective":effective}))
             if os.getenv("TEST_READ_UNSUPPORTED"):
                 print(json.dumps({"id":request["id"],"error":{"code":-32601,"message":"unsupported"}}), flush=True)
                 continue
             if params["cwd"] and os.getenv("TEST_PROJECT") and key in entries:
                 for field in project: result["origins"]["mcp_servers." + key + "." + field] = origin
                 result["layers"].append({**origin,"disabledReason":None,"config":{"mcp_servers":{key:project}}})
+            if return_to_intended:
+                store.write_text(json.dumps({**entries, key:json.loads(store.with_suffix(".intended").read_text())}))
+                marker.write_text("returned")
         elif method == "config/batchWrite":
-            assert ready and params["filePath"] == str(target) and params["expectedVersion"] == version()
-            conflict = store.with_suffix(".conflicted")
-            if os.getenv("TEST_CAS") and not conflict.exists():
-                conflict.touch()
-                if os.environ["TEST_CAS"] == "owned": entries[key]["advanced"] = [1]
-                else: entries["unrelated"] = {"command":"/independent"}
-                store.write_text(json.dumps(entries))
-                print(json.dumps({"id":request["id"],"error":{"code":-32602,"message":"Configuration was modified since last read. Fetch latest version and retry."}}), flush=True)
-                continue
+            assert ready and request["id"] == 2 and params["filePath"] == str(target) and params["expectedVersion"] == version()
             edit, = params["edits"]
             assert edit["keyPath"] == "mcp_servers." + key and edit["mergeStrategy"] == "replace"
             value = edit["value"]
             requested = value is not None and value.get("command") == "/new"
-            if requested and os.getenv("TEST_REJECT_EXECUTOR"):
-                print(json.dumps({"id":request["id"],"error":{"code":-32603,"message":"write rejected"}}),flush=True)
+            trace_mutation("delete" if value is None else "replace")
+            conflict = store.with_suffix(".conflicted")
+            cas = os.getenv("TEST_CAS") if value is not None else os.getenv("TEST_UNDO_CAS")
+            if cas and (not conflict.exists() or cas == "twice"):
+                conflict.touch()
+                if cas == "owned": entries[key]["advanced"] = [1]
+                elif cas == "bounce":
+                    entries[key] = {"command":"/external","args":["mcp"],"env":{}}
+                    store.with_suffix(".read-stage").write_text("conflict")
+                    store.with_suffix(".intended").write_text(json.dumps(value))
+                else: entries["unrelated"] = {"command":"/independent"}
+                store.write_text(json.dumps(entries))
+                print(json.dumps({"id":request["id"],"error":{"code":-32600,"message":"Cambió la revisión",
+                      "data":{"config_write_error_code":"configVersionConflict"}}}), flush=True)
                 continue
+            if requested and os.getenv("TEST_WRITE_REPLY"):
+                if os.getenv("TEST_REVERT_UNRELATED"):
+                    entries["unrelated"] = {"command":"keep me"}
+                    store.write_text(json.dumps(entries))
+                print(os.environ["TEST_WRITE_REPLY"],flush=True)
+                continue
+            previous = entries.get(key)
             if requested and os.getenv("TEST_WRONG_ADD"): value["command"] = "/unexpected-engine"
             if value is None: entries.pop(key, None)
             elif not (requested and os.getenv("TEST_SKIP_ADD")): entries[key] = value
             store.write_text(json.dumps(entries))
+            if value is None and os.getenv("TEST_UNDO_INTERRUPT"):
+                if os.environ["TEST_UNDO_INTERRUPT"] == "recreate":
+                    entries[key] = previous
+                    store.write_text(json.dumps(entries))
+                os.kill(os.getppid(), signal.SIGKILL)
+                sys.exit(0)
+            if requested and os.getenv("TEST_BOUNCE"):
+                store.with_suffix(".read-stage").write_text("written")
+                store.with_suffix(".intended").write_text(json.dumps(value))
             if requested and os.getenv("TEST_INTERRUPT") == "add":
                 os.kill(os.getppid(), signal.SIGKILL)
                 sys.exit(0)
@@ -215,6 +262,14 @@ if args == ["app-server"]:
                 elif external == "implicit": entries[key].pop("environment_id", None)
                 else: entries["unrelated"]["independent"] = True
                 store.write_text(json.dumps(entries))
+                outcome = os.getenv("TEST_AFTER_EDIT")
+                if outcome == "crash":
+                    os.kill(os.getppid(), signal.SIGKILL)
+                    sys.exit(0)
+                if outcome == "eof": sys.exit(0)
+                if outcome == "error":
+                    print(json.dumps({"id":2,"error":{"code":-32603,"message":"write rejected"}}),flush=True)
+                    continue
         else: raise AssertionError(method)
         print(json.dumps({"id":request["id"], "result":result}), flush=True)
     sys.exit(0)
@@ -293,11 +348,15 @@ elif action == "add":
     env = {}
     for index, argument in enumerate(args):
         if argument == "--env":
-            key, value = args[index + 1].split("=", 1)
-            env[key] = value
-    entries["ios-homescreen-mcp"] = {"command": args[separator + 1], "args": args[separator + 2:], "env": env}
+            name, value = args[index + 1].split("=", 1)
+            env[name] = value
+    trace_mutation("add")
+    entries[key] = {"command": args[separator + 1], "args": args[separator + 2:], "env": env}
+    if os.getenv("TEST_CLI_LOCAL"): entries[key]["environment_id"] = "local"
     if os.environ.get("TEST_WRONG_ADD"):
-        entries["ios-homescreen-mcp"]["command"] = "/unexpected-engine"
+        entries[key]["command"] = "/unexpected-engine"
+        if "--scope" not in args:
+            entries[key]["env"] = {"HOMESCREEN_READ_ONLY":"0","HOMESCREEN_ALLOW_APPLY":"1"}
     save()
     interrupt_after("add" if "--scope" in args else "bootstrap")
     if os.environ.get("TEST_PARTIAL_ADD"):
@@ -678,7 +737,8 @@ def test_restart_after_interrupted_mutation(native_mcp_binary,sandbox,tmp_path,c
     assert journal.stat().st_mode & 0o777 == 0o600
     assert journal.parent.stat().st_mode & 0o777 == 0o700
     assert "unrelated" not in journal.read_text() and "keep me" not in journal.read_text()
-    assert json.loads(journal.read_text())["phase"] == ("adding" if phase == "add" else "removing")
+    expected_phase = "versionedWritePending" if client == "codex" else ("adding" if phase == "add" else "removing")
+    assert json.loads(journal.read_text())["phase"] == expected_phase
     if external:
         edited = {**prior,"ios-homescreen-mcp":{"command":"/external","args":["mcp"],"env":{"HOMESCREEN_READ_ONLY":"1"}}}
         store.write_text(json.dumps(edited))
@@ -946,10 +1006,279 @@ def test_bootstrap_preserves_later_edit_to_implicit_executor(native_mcp_binary, 
     assert json.loads(store.read_text())["ios-homescreen-mcp"] == entry
 
 
-def test_first_registration_restores_bootstrap_after_rejected_executor_write(native_mcp_binary, sandbox, tmp_path):
-    result = execute(native_mcp_binary, {**sandbox,"TEST_REJECT_EXECUTOR":"1"}, "register", "codex", fake_client(tmp_path), "/new")
-    assert result["code"] == "commandFailed" and result["recovery"] == "restored"
-    assert "ios-homescreen-mcp" not in json.loads(Path(sandbox["TEST_STORE"]).read_text())
+SERVER_ID = "ios-homescreen-mcp"
+READ_ONLY = {"command":"/new", "args":["mcp"], "env":{"HOMESCREEN_READ_ONLY":"1"}}
+LOCAL = {**READ_ONLY, "environment_id":"local"}
+SENTINEL = {"unrelated":{"command":"keep me"}}
+
+
+def journal_file(sandbox):
+    return Path(sandbox["HOME"]) / "Library/Application Support/homescreen-mcp/registration/codex.json"
+
+
+def mutations(sandbox):
+    path = Path(sandbox["TEST_STORE"]).with_suffix(".mutations")
+    return path.read_text().splitlines() if path.exists() else []
+
+
+def interrupted(binary, env, cli, *args, action="register", status=85):
+    proc = subprocess.run([binary, action, "codex", cli, *args], env=env, capture_output=True, timeout=10)
+    assert proc.returncode == status, proc.stdout
+
+
+def rpc_error(reason="configValidationError", code=-32600):
+    return {"id":2,"error":{"code":code,"message":"Solicitud rechazada", "data":{"config_write_error_code":reason}}}
+
+
+@pytest.mark.parametrize("reason", ["configValidationError","configRequirementReadonly"])
+@pytest.mark.parametrize("crash", [False, True])
+def test_first_registration_restores_bootstrap_after_rejected_executor_write(native_mcp_binary, sandbox, tmp_path, reason, crash):
+    cli = fake_client(tmp_path)
+    env = {**sandbox, "TEST_WRITE_REPLY":json.dumps(rpc_error(reason))}
+    if crash:
+        interrupted(native_mcp_binary, {**env, "TEST_JOURNAL_EXIT":"versionedWriteRejected"}, cli, "/new")
+        assert mutations(sandbox) == ["add", "replace"]
+        assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == "success"
+    else:
+        result = execute(native_mcp_binary, env, "register", "codex", cli, "/new")
+        assert (result["code"], result["recovery"]) == ("commandFailed","restored")
+    assert json.loads(Path(sandbox["TEST_STORE"]).read_text()) == SENTINEL
+    assert mutations(sandbox) == ["add", "replace", "delete"]
+    assert not journal_file(sandbox).exists()
+
+
+@pytest.mark.parametrize("outcome", ["crash", "error", "eof"])
+def test_pre_acknowledgment_bootstrap_aba_survives_recovery(native_mcp_binary, sandbox, tmp_path, outcome):
+    cli = fake_client(tmp_path)
+    env = {**sandbox,"TEST_AFTER_ACK":"implicit","TEST_AFTER_EDIT":outcome}
+    if outcome == "crash":
+        interrupted(native_mcp_binary, env, cli, "/new", status=-9)
+        assert json.loads(journal_file(sandbox).read_text())["phase"] == "versionedWritePending"
+    else:
+        result = execute(native_mcp_binary, env, "register", "codex", cli, "/new")
+        assert result["recovery"] == "failed"
+    store = Path(sandbox["TEST_STORE"])
+    assert json.loads(store.read_text()) == {**SENTINEL, SERVER_ID:READ_ONLY}
+    for _ in range(2):
+        assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == "recoveryConflict"
+        assert json.loads(journal_file(sandbox).read_text())["phase"] == "conflicted"
+        assert json.loads(store.read_text()) == {**SENTINEL, SERVER_ID:READ_ONLY}
+        assert mutations(sandbox) == ["add", "replace"]
+
+
+@pytest.mark.parametrize("reply", [
+    {"id":2,"error":{"code":-32603,"message":"write rejected"}},
+    rpc_error(code=-32603), rpc_error("configLayerReadonly"),
+    {**rpc_error(),"id":1}, {**rpc_error(),"result":{}},
+    {"id":2,"error":{"code":-32600,"data":{"config_write_error_code":"configValidationError"}}},
+    {"id":2,"result":{"status":"ok"}},
+    {"id":2,"error":{"code":-32603,"message":"Configuration was modified since last read. Fetch latest version and retry."}},
+], ids=["generic","wrong-code","unknown-reason","wrong-id","both-branches","missing-message","missing-revision","cas-text"])
+def test_indeterminate_batch_response_preserves_bootstrap(native_mcp_binary, sandbox, tmp_path, reply):
+    cli = fake_client(tmp_path)
+    env = {**sandbox, "TEST_WRITE_REPLY":json.dumps(reply)}
+    result = execute(native_mcp_binary, env, "register", "codex", cli, "/new")
+    assert result["recovery"] == "failed"
+    assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == "recoveryConflict"
+    assert json.loads(journal_file(sandbox).read_text())["phase"] == "conflicted"
+    assert json.loads(Path(sandbox["TEST_STORE"]).read_text()) == {**SENTINEL, SERVER_ID:READ_ONLY}
+    assert mutations(sandbox) == ["add", "replace"]
+
+
+@pytest.mark.parametrize("position", ["before","after"])
+def test_failed_rejection_save_leaves_bootstrap_pending(native_mcp_binary, sandbox, tmp_path, position):
+    cli = fake_client(tmp_path)
+    env = {**sandbox, "TEST_WRITE_REPLY":json.dumps(rpc_error()),
+           "TEST_SAVE_FAIL_" + position.upper():"versionedWriteRejected"}
+    result = execute(native_mcp_binary, env, "register", "codex", cli, "/new")
+    assert result["recovery"] == "failed"
+    assert journal_file(sandbox).is_file()
+    assert json.loads(Path(sandbox["TEST_STORE"]).read_text()) == {**SENTINEL, SERVER_ID:READ_ONLY}
+    assert mutations(sandbox) == ["add","replace"]
+
+
+@pytest.mark.parametrize("stage", ["versionedWritePending","acknowledged","conflicted"])
+def test_failed_forward_phase_save_cannot_send_or_compensate_write(native_mcp_binary, sandbox, tmp_path, stage):
+    cli = fake_client(tmp_path)
+    env = {**sandbox,"TEST_SAVE_FAIL_AFTER":stage,"TEST_AFTER_ACK":"implicit"}
+    result = execute(native_mcp_binary, env, "register", "codex", cli, "/new")
+    assert result["recovery"] == "failed"
+    assert json.loads(journal_file(sandbox).read_text())["phase"] == stage
+    before = ["add"] if stage == "versionedWritePending" else ["add","replace"]
+    assert mutations(sandbox) == before
+    assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == "recoveryConflict"
+    assert json.loads(Path(sandbox["TEST_STORE"]).read_text()) == {**SENTINEL, SERVER_ID:READ_ONLY}
+    assert mutations(sandbox) == before
+
+
+@pytest.mark.parametrize("scenario", ["exhausted","rejected","rejected-original-revision","generic-original-revision"])
+def test_bounded_cas_retry_requires_its_own_receipt(native_mcp_binary, sandbox, tmp_path, scenario):
+    cli = fake_client(tmp_path)
+    env = {**sandbox, "TEST_CAS":"twice" if scenario == "exhausted" else "unrelated"}
+    if scenario != "exhausted":
+        reply = rpc_error(code=-32603) if scenario.startswith("generic") else rpc_error()
+        env["TEST_WRITE_REPLY"] = json.dumps(reply)
+        if scenario.endswith("original-revision"): env["TEST_REVERT_UNRELATED"] = "1"
+    result = execute(native_mcp_binary, env, "register", "codex", cli, "/new")
+    undone = scenario == "rejected-original-revision"
+    assert result["recovery"] == ("restored" if undone else "failed")
+    assert result["code"] == ("recoveryConflict" if scenario == "exhausted" else "commandFailed")
+    assert mutations(sandbox) == ["add","replace","replace"] + (["delete"] if undone else [])
+    unrelated = SENTINEL if scenario.endswith("original-revision") else {"unrelated":{"command":"/independent"}}
+    assert json.loads(Path(sandbox["TEST_STORE"]).read_text()) == (unrelated if undone else {**unrelated, SERVER_ID:READ_ONLY})
+
+
+@pytest.mark.parametrize("recreate", [False,True])
+def test_bootstrap_undo_is_single_use_across_lost_reply(native_mcp_binary, sandbox, tmp_path, recreate):
+    cli = fake_client(tmp_path)
+    env = {**sandbox, "TEST_WRITE_REPLY":json.dumps(rpc_error()), "TEST_UNDO_INTERRUPT":"recreate" if recreate else "deleted"}
+    interrupted(native_mcp_binary, env, cli, "/new", status=-9)
+    journal = journal_file(sandbox)
+    assert json.loads(journal.read_text())["phase"] == "bootstrapUndoPending"
+    for _ in range(2):
+        assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == ("recoveryConflict" if recreate else "success")
+        assert journal.exists() == recreate
+        assert json.loads(Path(sandbox["TEST_STORE"]).read_text()) == ({**SENTINEL, SERVER_ID:READ_ONLY} if recreate else SENTINEL)
+        assert mutations(sandbox) == ["add","replace","delete"]
+
+
+def test_bootstrap_undo_cas_refusal_never_retries(native_mcp_binary, sandbox, tmp_path):
+    cli = fake_client(tmp_path)
+    env = {**sandbox, "TEST_WRITE_REPLY":json.dumps(rpc_error()), "TEST_UNDO_CAS":"unrelated"}
+    result = execute(native_mcp_binary, env, "register", "codex", cli, "/new")
+    assert result["recovery"] == "failed"
+    store = Path(sandbox["TEST_STORE"])
+    assert json.loads(store.read_text()) == {SERVER_ID:READ_ONLY,"unrelated":{"command":"/independent"}}
+    # Restore even the original fingerprint after the CAS refusal.
+    store.write_text(json.dumps({**SENTINEL, SERVER_ID:READ_ONLY}))
+    assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == "recoveryConflict"
+    assert mutations(sandbox) == ["add","replace","delete"]
+
+
+@pytest.mark.parametrize("next_action,existing", [("recover", False), ("register",False), ("recover",True)])
+def test_manually_restored_prior_retires_conflict(native_mcp_binary, sandbox, tmp_path, next_action, existing):
+    cli = fake_client(tmp_path)
+    store = Path(sandbox["TEST_STORE"])
+    if existing:
+        store,prior = seed_user(sandbox, advanced={"flags":[True,1,False,0]})
+    else:
+        prior = SENTINEL
+    result = execute(native_mcp_binary, {**sandbox,"TEST_AFTER_ACK":"owned"}, "register", "codex", cli, "/new")
+    journal = journal_file(sandbox)
+    assert result["recovery"] == "failed" and json.loads(journal.read_text())["phase"] == "conflicted"
+    before = mutations(sandbox)
+    if existing:
+        similar = json.loads(json.dumps(prior))
+        similar[SERVER_ID]["advanced"]["flags"][0] = 1
+        store.write_text(json.dumps(similar))
+        assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == "recoveryConflict"
+    store.write_text(json.dumps(prior))
+    for fault in ["TEST_BAD_LAYERS", "TEST_LAYER_PATH"]:
+        assert execute(native_mcp_binary, {**sandbox,fault:"1"}, "recover", "codex", cli)["code"] != "success"
+        assert journal.exists() and mutations(sandbox) == before
+    if next_action == "recover":
+        assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == "success"
+        assert not journal.exists() and mutations(sandbox) == before
+        assert json.dumps(json.loads(store.read_text()),sort_keys=True) == json.dumps(prior,sort_keys=True)
+    assert execute(native_mcp_binary, sandbox, "register", "codex", cli, "/next")["code"] == "success"
+    assert mutations(sandbox) == before + ["replace"]
+    assert json.loads(store.read_text())["unrelated"] == prior["unrelated"] and not journal.exists()
+
+
+@pytest.mark.parametrize("stage", ["cas","effective","final"])
+def test_observed_ownership_change_remains_a_conflict(native_mcp_binary, sandbox, tmp_path, stage):
+    cli = fake_client(tmp_path)
+    env = {**sandbox, "TEST_BOUNCE":stage}
+    if stage == "cas": env["TEST_CAS"] = "bounce"
+    result = execute(native_mcp_binary, env, "register", "codex", cli, "/new")
+    assert (result["code"],result["recovery"]) == ("recoveryConflict","failed")
+    assert json.loads(journal_file(sandbox).read_text())["phase"] == "conflicted"
+    assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == "recoveryConflict"
+    assert json.loads(Path(sandbox["TEST_STORE"]).read_text()) == {**SENTINEL,SERVER_ID:LOCAL}
+    assert mutations(sandbox) == ["add","replace"]
+
+
+def test_acknowledged_conflict_stays_terminal_when_user_reinstates_intended(native_mcp_binary, sandbox, tmp_path):
+    cli = fake_client(tmp_path)
+    result = execute(native_mcp_binary, {**sandbox,"TEST_AFTER_ACK":"implicit"}, "register", "codex", cli, "/new")
+    assert result["code"] == "recoveryConflict"
+    store = Path(sandbox["TEST_STORE"])
+    store.write_text(json.dumps({**SENTINEL,SERVER_ID:LOCAL}))
+    assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == "recoveryConflict"
+    assert json.loads(store.read_text()) == {**SENTINEL, SERVER_ID:LOCAL}
+    assert mutations(sandbox) == ["add","replace"]
+
+
+def test_verification_observing_exact_prior_retires_without_compensation(native_mcp_binary, sandbox, tmp_path):
+    cli = fake_client(tmp_path)
+    # Another edit reinstates intended just after verification observed exact prior absence.
+    result = execute(native_mcp_binary, {**sandbox, "TEST_BOUNCE":"final-prior"}, "register", "codex", cli, "/new")
+    assert (result["code"], result["recovery"]) == ("recoveryConflict", "restored")
+    assert not journal_file(sandbox).exists()
+    assert json.loads(Path(sandbox["TEST_STORE"]).read_text()) == {**SENTINEL, SERVER_ID:LOCAL}
+    assert mutations(sandbox) == ["add","replace"]
+
+
+@pytest.mark.parametrize("stop", ["success","bootstrap","bootstrapObserved"])
+def test_first_apply_bootstrap_pins_read_only_before_local_executor(native_mcp_binary, sandbox, tmp_path, stop):
+    cli = fake_client(tmp_path)
+    store = Path(sandbox["TEST_STORE"])
+    env = {**sandbox,"TEST_SYSTEM_EXECUTOR":"1","TEST_SYSTEM_ALLOW":"1","TEST_CAPTURE_BOOTSTRAP":"1"}
+    assert not store.exists() and not (Path(env["HOME"])/".codex/config.toml").exists()
+    if stop == "success":
+        result = execute(native_mcp_binary, env, "register", "codex", cli, "/new", "apply")
+        assert result["code"] == "success" and result["query"]["mode"] == "applyEnabled"
+    else:
+        option = "TEST_INTERRUPT" if stop == "bootstrap" else "TEST_JOURNAL_EXIT"
+        interrupted(native_mcp_binary, {**env,option:stop}, cli, "/new", "apply", status=-9 if stop == "bootstrap" else 85)
+        execute(native_mcp_binary, env, "scope", "codex", cli)
+    interim = {**READ_ONLY,"env":{"HOMESCREEN_READ_ONLY":"1","HOMESCREEN_ALLOW_APPLY":"0"}}
+    assert json.loads(store.with_suffix(".bootstrap").read_text()) == {"user":interim, "effective":{**interim,"environment_id":"remote-system"}}
+    if stop == "success":
+        assert json.loads(store.read_text()) == {**SENTINEL, SERVER_ID:{**LOCAL,"env":{"HOMESCREEN_READ_ONLY":"0","HOMESCREEN_ALLOW_APPLY":"1"}}}
+        assert mutations(sandbox) == ["add","replace"]
+    else:
+        assert json.loads(store.read_text()) == {**SENTINEL,SERVER_ID:interim}
+        assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == "success"
+        assert json.loads(store.read_text()) == SENTINEL and mutations(sandbox) == ["add","delete"]
+
+
+@pytest.mark.parametrize("final_matches_cli", [False,True])
+def test_pending_write_cannot_reclaim_cli_postimage(native_mcp_binary, sandbox, tmp_path, final_matches_cli):
+    cli = fake_client(tmp_path)
+    env = {**sandbox, "TEST_JOURNAL_EXIT":"versionedWritePending"}
+    if final_matches_cli: env["TEST_CLI_LOCAL"] = "1"
+    interrupted(native_mcp_binary, env, cli, "/new")
+    journal = journal_file(sandbox)
+    if not final_matches_cli:
+        # Frozen Codex 'adding' records with a bootstrap predate the separate dispatch phase.
+        record = json.loads(journal.read_text())
+        record["phase"] = "adding"
+        record.pop("bootstrapExpected", None)
+        journal.write_text(json.dumps(record))
+    assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == "recoveryConflict"
+    assert json.loads(Path(sandbox["TEST_STORE"]).read_text()) == {**SENTINEL, SERVER_ID:(LOCAL if final_matches_cli else READ_ONLY)}
+    assert mutations(sandbox) == ["add"]
+
+
+@pytest.mark.parametrize("phase", ["bootstrapping","adding"])
+def test_legacy_codex_journal_recovers_known_postimage(native_mcp_binary, sandbox, tmp_path, phase):
+    cli = fake_client(tmp_path)
+    # No bootstrapExpected or observed fields in the older on-disk format.
+    journal = journal_file(sandbox)
+    journal.parent.mkdir(parents=True, mode=0o700)
+    intended = {**LOCAL,"env":{"HOMESCREEN_READ_ONLY":"0","HOMESCREEN_ALLOW_APPLY":"1"}}
+    record = {"client":"codex","scope":"user","server":SERVER_ID,"file":str(Path(sandbox["HOME"])/".codex/config.toml"),
+              "prior":{"absent":{}},"intended":{"present":{"_0":json.dumps(intended,sort_keys=True,separators=(",",":"))}},"phase":phase}
+    journal.write_text(json.dumps(record))
+    journal.chmod(0o600)
+    entry = dict(intended)
+    if phase == "bootstrapping": del entry["environment_id"]
+    store = Path(sandbox["TEST_STORE"])
+    store.write_text(json.dumps({**SENTINEL,SERVER_ID:entry}))
+    assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == "success"
+    assert not journal.exists() and json.loads(store.read_text()) == SENTINEL
+    assert mutations(sandbox) == ["delete"]
 
 
 @pytest.mark.parametrize("cli_error", [False, True])
