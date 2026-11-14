@@ -84,9 +84,11 @@ def _validate_page_ids(archive: dict[str, Any], count: int) -> None:
         raise LayoutError("exported pin metadata has invalid page identifiers")
 
 
-def _check_list_write(pins: list[dict[str, int]] | None) -> None:
+def _check_list_write(pins: list[dict[str, int]] | None, library: list[Any] | None) -> None:
     if pins and any(pins):
         raise LayoutError("list-format writes cannot send fixed positions; use ordinary page order")
+    if library:
+        raise LayoutError("list-format writes cannot keep apps in the App Library")
 
 
 def _fix_list_ids(d: dict[str, Any], n: int) -> None:
@@ -98,7 +100,7 @@ def _fix_list_ids(d: dict[str, Any], n: int) -> None:
 
 def _item_out(x: Any) -> Any:
     if isinstance(x, dict) and x.get(DISK_MARK):
-        return x["bundleIdentifier"]
+        return _leaf_id(x)
     if isinstance(x, dict) and is_folder(x):
         out = {k: v for k, v in x.items() if k != NAME_MARK}
         if x.get(NAME_MARK) and out.get("displayName") == out.get("defaultDisplayName"):
@@ -119,9 +121,9 @@ def _modern(x: Any) -> Any:
     if not isinstance(x, dict):
         return x
     if x.get(DISK_MARK):
-        return x["bundleIdentifier"]
+        return _leaf_id(x)
     if is_widget(x):
-        out = {k: v for k, v in widget_wire_fields(x).items() if k != "iconLists"}
+        out = {k: v for k, v in widget_wire_fields(x).items() if k != "iconLists" or v}
         # Over USB a single widget's uniqueIdentifier isn't exported. Its configuration (which
         # script, which person) hangs off that id, and userSelectedElementIdentifier holds it for
         # configured widgets. Without it SpringBoard saves the widget with no id and the
@@ -219,6 +221,28 @@ def is_dict_format(raw: Any) -> bool:
     return isinstance(raw, dict) and "iconLists" in raw
 
 
+def _archive_metrics(path: Path) -> dict[str, int]:
+    raw = plistlib.loads(path.read_bytes())
+    if not is_dict_format(raw):
+        return {}
+    frames: dict[str, int] = {}
+    meta = raw.get("listMetadata", {})
+    if not isinstance(meta, dict):
+        raise LayoutError("invalid exported pin metadata")
+    if meta:
+        _validate_page_ids(raw, len(raw["iconLists"]))
+    for page_id, page in meta.items():
+        if page_id not in raw["listUniqueIdentifiers"] or not isinstance(page, dict):
+            raise LayoutError("exported pin metadata does not identify a layout page")
+        for field, metric in (("fixedLocationsGridColumns", "homeScreenIconColumns"),
+                              ("fixedLocationsGridRows", "homeScreenIconRows")):
+            if field in page:
+                value = page[field]
+                if type(value) is not int or value <= 0 or frames.setdefault(metric, value) != value:
+                    raise LayoutError("exported page grid dimensions are invalid or inconsistent")
+    return frames
+
+
 def disk_to_model(raw: dict[str, Any], names: dict[str, str] | None = None) -> Layout:
     names = names or {}
     state = [[_item_in(x, names) for x in raw.get("buttonBar", [])]]
@@ -228,7 +252,8 @@ def disk_to_model(raw: dict[str, Any], names: dict[str, str] | None = None) -> L
 
 
 def model_to_disk(state: list[Any], library: list[Any] | None, base: dict[str, Any],
-                  pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> dict[str, Any]:
+                  pins: list[dict[str, int]] | None = None, grid: Grid | None = None, *,
+                  keep_archive_frame: bool = False) -> dict[str, Any]:
     """Rebuild the dict format; keys we don't touch (today view, ids) come from base. pins
     (per page) replace the gaps when given. grid supplies their page dimensions, with
     iPhone defaults when omitted."""
@@ -243,7 +268,10 @@ def model_to_disk(state: list[Any], library: list[Any] | None, base: dict[str, A
     if pins is not None:
         if "listUniqueIdentifiers" not in out:
             out["listUniqueIdentifiers"] = [str(uuid.uuid4()).upper() for _ in out["iconLists"]]
-        meta = _list_metadata(out["listUniqueIdentifiers"], pins, grid)
+        ids = out["listUniqueIdentifiers"]
+        meta = _list_metadata(ids, pins, grid)
+        if keep_archive_frame and ids and not meta and grid and (grid.cols, grid.rows) != (Grid().cols, Grid().rows):
+            meta[ids[0]] = {"fixedLocationsGridColumns": grid.cols, "fixedLocationsGridRows": grid.rows}
         if meta:
             out["listMetadata"] = meta
         else:
@@ -363,12 +391,17 @@ class PhoneSource:
             return raw, None
         return raw, library_from_installed(raw, await self.installed_apps())
 
-    def check_write(self, pins: list[dict[str, int]] | None) -> None:
+    @property
+    def page_identity(self) -> dict[str, Any]:
+        raw = self._last_dict or {}
+        return {k: raw[k] for k in ("listUniqueIdentifiers",) if k in raw}
+
+    def check_write(self, pins: list[dict[str, int]] | None, library: list[Any] | None = None) -> None:
         if self._last_dict is not None:
             if "listUniqueIdentifiers" in self._last_dict:
                 _validate_page_ids(self._last_dict, len(self._last_dict["iconLists"]))
         elif self.write_mode == "list":
-            _check_list_write(pins)
+            _check_list_write(pins, library)
 
     pins: dict[str, int] | None = None  # ordinary USB list reads do not report gaps
 
@@ -376,12 +409,10 @@ class PhoneSource:
     async def write(self, state: list[Any], library: list[Any] | None,
                     pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> None:
         require_writable()
-        self.check_write(pins)
+        self.check_write(pins, library)
         if self._last_dict is not None:
             payload: Any = model_to_disk(state, library, self._last_dict, pins, grid)
         elif self.write_mode == "list":
-            if library:
-                raise ValueError("HOMESCREEN_WRITE=list can't keep apps in the App Library")
             payload = state
         else:
             # Safety net: any installed app in neither the layout nor the library (an old
@@ -480,7 +511,7 @@ class SimSource:
             for d in items:
                 if d["udid"] == self.udid:
                     return {"DeviceName": d["name"], "ProductVersion": runtime.rsplit(".", 1)[-1].replace("iOS-", "").replace("-", "."),
-                            "State": d["state"], "UniqueDeviceID": self.udid}
+                            "State": d["state"], "UniqueDeviceID": self.udid, "icon_metrics": _archive_metrics(self.path)}
         raise ValueError(f"no simulator {self.udid}")
 
     async def read(self) -> Layout:
@@ -501,7 +532,7 @@ class SimSource:
                     pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> None:
         require_writable()
         base = plistlib.loads(self.path.read_bytes())
-        out = model_to_disk(state, library, base, pins if pins is not None else [], grid)
+        out = model_to_disk(state, library, base, pins if pins is not None else [], grid, keep_archive_frame=True)
         before = self._springboard_pid()
         self.path.write_bytes(plistlib.dumps(out, fmt=plistlib.FMT_BINARY))
         # SIGKILL so SpringBoard can't save its old in-memory layout over ours on the way out
@@ -583,25 +614,26 @@ class FileSource:
         self.name = f"file:{self.path.name}"
 
     async def info(self) -> dict[str, Any]:
-        return {"DeviceName": f"fixture {self.path.name}", "UniqueDeviceID": f"fixture-{self.path.stem}"}
+        return {"DeviceName": f"fixture {self.path.name}", "UniqueDeviceID": f"fixture-{self.path.stem}",
+                "icon_metrics": _archive_metrics(self.path)}
 
     async def read(self) -> Layout:
         raw = plistlib.loads(self.path.read_bytes())
         self.pins = disk_pins(raw) if is_dict_format(raw) else None
         return disk_to_model(raw) if is_dict_format(raw) else (raw, None)
 
-    def check_write(self, pins: list[dict[str, int]] | None) -> None:
+    def check_write(self, pins: list[dict[str, int]] | None, library: list[Any] | None = None) -> None:
         if self.pins is None:
-            _check_list_write(pins)
+            _check_list_write(pins, library)
 
     async def write(self, state: list[Any], library: list[Any] | None,
                     pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> None:
         require_writable()
         raw = plistlib.loads(self.path.read_bytes())
         if is_dict_format(raw):
-            out = model_to_disk(state, library, raw, pins if pins is not None else [], grid)
+            out = model_to_disk(state, library, raw, pins if pins is not None else [], grid, keep_archive_frame=True)
         else:
-            _check_list_write(pins)
+            _check_list_write(pins, library)
             out = state
         self.path.write_bytes(plistlib.dumps(out, fmt=plistlib.FMT_BINARY))
 

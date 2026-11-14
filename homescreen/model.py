@@ -40,13 +40,22 @@ class Grid:
 
     @classmethod
     def from_metrics(cls, m: dict[str, Any] | None) -> "Grid":
-        m = m or {}
-        try:
-            return cls(int(m["homeScreenIconColumns"]), int(m["homeScreenIconRows"]),
-                       int(m.get("homeScreenIconDockMaxCount", DEFAULT_DOCK_SLOTS)),
-                       int(m.get("homeScreenIconFolderColumns", 3)) * int(m.get("homeScreenIconFolderRows", 3)))
-        except (KeyError, TypeError, ValueError):
+        if m is None:
             return cls()
+        if not isinstance(m, dict):
+            raise LayoutError("device grid metrics must be positive integers; read the device again")
+
+        def dimension(key: str, default: int) -> int:
+            value = m.get(key, default)
+            if isinstance(value, str) and value.isascii() and value.isdecimal():
+                value = int(value)
+            if type(value) is not int or value <= 0:
+                raise LayoutError("device grid metrics must be positive integers; read the device again")
+            return value
+
+        return cls(dimension("homeScreenIconColumns", GRID_COLS), dimension("homeScreenIconRows", GRID_ROWS),
+                   dimension("homeScreenIconDockMaxCount", DEFAULT_DOCK_SLOTS),
+                   dimension("homeScreenIconFolderColumns", 3) * dimension("homeScreenIconFolderRows", 3))
 
     def to_dict(self) -> dict[str, int]:
         return {"cols": self.cols, "rows": self.rows, "dock": self.dock, "folder": self.folder}
@@ -138,6 +147,7 @@ class Layout:
         """
         if not isinstance(raw_state, list) or not raw_state:
             raise LayoutError("icon state must be a non-empty list (dock, then pages)")
+        self.approval_device: str | None = None
         self.grid = grid or IPHONE
         self.page_slots = self.grid.slots if grid else page_slots
         self.dock_slots = self.grid.dock if grid else dock_slots
@@ -195,13 +205,17 @@ class Layout:
         self.nodes = {node.id: node for node in nodes}
         self._counter = dict(counters)
 
-    def snapshot(self) -> dict[str, Any]:
-        """A local memento includes independent current/source ownership and allocation state."""
+    def current_snapshot(self) -> dict[str, Any]:
+        """An undo step owns its editable state and local allocation identities."""
         return copy.deepcopy({"state": self.to_state(), "library": self.to_library(), "bank": self.to_bank(),
-                              "source": self.source, "source_library": self.source_library,
-                              "pins": self.pins, "source_pins": self.source_pins,
-                              "identity": self.identity(), "source_identity": self.source_identity,
-                              "grid": self.grid.to_dict()})
+                              "pins": self.pins, "identity": self.identity(), "grid": self.grid.to_dict()})
+
+    def baseline(self) -> dict[str, Any]:
+        return {"source": self.source, "source_library": self.source_library, "source_pins": self.source_pins,
+                "source_identity": self.source_identity}
+
+    def snapshot(self) -> dict[str, Any]:
+        return {**self.current_snapshot(), **copy.deepcopy(self.baseline())}
 
     @classmethod
     def from_snapshot(cls, snap: dict[str, Any]) -> "Layout":
@@ -743,7 +757,8 @@ class Layout:
     def token(self) -> str:
         """Short hash of the exact state that would be written."""
         pins = [[(node.id, self.pins[node.id]) for node in page if node.id in self.pins] for page in self.pages]
-        blob = plistlib.dumps({"state": self.to_state(), "library": self.to_library() or [],
+        blob = plistlib.dumps({"device": self.approval_device or "",
+                               "state": self.to_state(), "library": self.to_library() or [],
                                "pins": pins, "grid": self.grid.to_dict()},
                               fmt=plistlib.FMT_BINARY, sort_keys=True)
         return "apply-" + hashlib.sha256(blob).hexdigest()[:10]
@@ -799,6 +814,9 @@ def node_structure(node: Node) -> Any:
     if node.kind == "widget":
         return "widget:" + widget_configuration(node.raw)
     if node.bundle_id:
+        wire = node.raw.get("displayIdentifier") or node.bundle_id
+        if wire != node.bundle_id:
+            return {"bundle": node.bundle_id, "display": wire}
         return node.bundle_id
     return {"opaque": plistlib.dumps(node.raw, fmt=plistlib.FMT_BINARY, sort_keys=True).hex()}
 
