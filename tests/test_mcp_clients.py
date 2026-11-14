@@ -243,6 +243,12 @@ if args == ["app-server"]:
                         source = {"name":{"type":"system","file":"/synthetic/system.toml"}} if name == os.environ["TEST_SYSTEM_ENV_NAME"] else origin
                         result["origins"]["mcp_servers." + key + ".env." + name] = source
                 result["layers"].append({**origin,"disabledReason":None,"config":{"mcp_servers":{key:project}}})
+                if os.getenv("TEST_SYSTEM_ENV"):
+                    inherited = json.loads(os.environ["TEST_SYSTEM_ENV"])
+                    effective["env"] = {**inherited, **effective.get("env",{})}
+                    system = {"name":{"type":"system","file":"/synthetic/system.toml"},"version":"s"}
+                    result["layers"].insert(0,{**system,"disabledReason":None,"config":{"mcp_servers":{key:{"env":inherited}}}})
+                if os.getenv("TEST_ORIGINS"): result["origins"] = json.loads(os.environ["TEST_ORIGINS"])
             if return_to_intended:
                 store.write_text(json.dumps({**entries, key:json.loads(store.with_suffix(".intended").read_text())}))
                 marker.write_text("returned")
@@ -370,6 +376,7 @@ if action == "get":
     if os.getenv("TEST_PROJECT") in {"1","irrelevant"}:
         entry = {"command":"/project","args":["mcp"],"env":{"HOMESCREEN_READ_ONLY":"0","HOMESCREEN_ALLOW_APPLY":"1"}}
     if os.getenv("TEST_PROJECT_FIELDS"): entry = {**entry, **json.loads(os.environ["TEST_PROJECT_FIELDS"])}
+    if os.getenv("TEST_SYSTEM_ENV"): entry["env"] = {**json.loads(os.environ["TEST_SYSTEM_ENV"]), **entry.get("env",{})}
     if os.getenv("TEST_EFFECTIVE"): entry = {**entry, **json.loads(os.environ["TEST_EFFECTIVE"])}
     if "--json" in args:
         print(json.dumps({"name": "ios-homescreen-mcp", "enabled": entry.get("enabled", True), "transport": {"type": "stdio", **{k:v for k,v in entry.items() if k != "environment_id"}}}))
@@ -1666,3 +1673,68 @@ def test_journal_writable_unicode_environment_is_checked_before_recovery(native_
     journal.write_text(json.dumps(record))
     assert execute(native_mcp_binary,sandbox,"recover","codex",cli)["code"] == "snapshotReadFailed"
     assert store.read_bytes() == before and mutations(sandbox) == ["replace"]
+
+
+@pytest.mark.parametrize("name,sibling,attribution", [
+    ("app.mode","app","missing"),
+    ('app."mode".flag','app."mode"',"missing"),
+    (r"app.\quoted.part", r"app.\quoted","missing"),
+    ("cafe\u0301.group.mode","cafe\u0301.group","missing"),
+    ("app.mode","app","system"),
+    ("app.mode","app","malformed"),
+    ("app.mode","app","project"),
+    ('app."mode".flag','app."mode"',"table"),
+    ("app.group.mode","app.group","server"),
+])
+def test_literal_environment_origins_use_only_real_ancestors(native_mcp_binary,sandbox,tmp_path,name,sibling,attribution):
+    store, prior = seed_user(sandbox, options={"values":[True,1]})
+    cli = fake_client(tmp_path)
+    server = "mcp_servers." + SERVER_ID
+    env_table = server + ".env"
+    project = {"name":{"type":"project","dotCodexFolder":"/synthetic/.codex"},"version":"p"}
+    system = {"name":{"type":"system","file":"/synthetic/system.toml"},"version":"s"}
+    project_env = {"HOMESCREEN_READ_ONLY":"0","HOMESCREEN_ALLOW_APPLY":"1",sibling:"project sibling"}
+    inherited = {name:"system value"}
+    origins = {env_table + "." + key:project for key in project_env}
+    accepted = attribution in {"project","table","server"}
+    if accepted: project_env[name] = "project value"
+    if attribution == "project": origins[env_table + "." + name] = project
+    if attribution in {"table","system","malformed"}: origins[env_table] = project
+    if attribution == "server": origins[server] = project
+    if attribution == "system": origins[env_table + "." + name] = system
+    if attribution == "malformed": origins[env_table + "." + name] = {}
+    environment = {**sandbox,"TEST_PROJECT":"custom","TEST_PROJECT_FIELDS":json.dumps({"env":project_env}),
+                   "TEST_SYSTEM_ENV":json.dumps(inherited),"TEST_ORIGINS":json.dumps(origins)}
+    result = execute(native_mcp_binary,environment,"register","codex",cli,"/new")
+    observed = execute(native_mcp_binary,environment,"scope","codex",cli)
+    assert observed == {"scope":"other" if accepted else "unknown","user":"readOnly",
+                        "effective":"applyEnabled","connection":"unknown"}
+    if accepted:
+        assert (result["code"],result["recovery"]) == ("success","notNeeded")
+        assert json.loads(store.read_text()) == {**prior,SERVER_ID:{**prior[SERVER_ID],**LOCAL}}
+        assert mutations(sandbox) == ["replace"]
+    else:
+        assert (result["code"],result["recovery"]) == ("invalidResponse","restored")
+        assert json.loads(store.read_text()) == prior and mutations(sandbox) == ["replace","replace"]
+    assert not journal_file(sandbox).exists()
+
+
+@pytest.mark.parametrize("exact_origin",[False,True])
+def test_direct_field_scope_uses_exact_origin_before_server(native_mcp_binary,sandbox,tmp_path,exact_origin):
+    store, prior = seed_user(sandbox)
+    cli = fake_client(tmp_path)
+    server = "mcp_servers." + SERVER_ID
+    origins = {server:{"name":{"type":"project","dotCodexFolder":"/synthetic/.codex"},"version":"p"}}
+    if exact_origin:
+        origins[server + ".command"] = {"name":{"type":"system","file":"/synthetic/system.toml"},"version":"s"}
+    env = {**sandbox,"TEST_PROJECT":"custom","TEST_PROJECT_FIELDS":json.dumps({"command":"/project"}),
+           "TEST_ORIGINS":json.dumps(origins)}
+    result = execute(native_mcp_binary,env,"register","codex",cli,"/new")
+    if exact_origin:
+        assert (result["code"],result["recovery"]) == ("invalidResponse","restored")
+        assert json.loads(store.read_text()) == prior and mutations(sandbox) == ["replace","replace"]
+    else:
+        assert (result["code"],result["recovery"]) == ("success","notNeeded")
+        assert json.loads(store.read_text()) == {**prior,SERVER_ID:{**prior[SERVER_ID],**LOCAL}}
+        assert mutations(sandbox) == ["replace"]
+    assert not journal_file(sandbox).exists()

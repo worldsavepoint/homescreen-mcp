@@ -214,25 +214,28 @@ struct MCPEntryStore {
             let fields = try MCPOwnedEntry.fields(in: config, table: "mcp_servers")
             snapshot.effectiveEntry = try MCPOwnedEntry(fields)
             let saved = try snapshot.entry.object() ?? [:], active = fields ?? [:]
-            var changed: [String] = []
+            var changedPaths: [[String]] = []
             // Compare registration semantics, ignoring spelling differences between
             // layer TOML defaults and the typed effective configuration.
             for field in ["command", "args", "url", "enabled", "environment_id", "env_vars"] {
                 let defaults: [String: Any] = ["enabled": true, "environment_id": "local", "args": [String](), "env_vars": [String]()]
                 let a = saved[field] ?? defaults[field], b = active[field] ?? defaults[field]
-                if try MCPOwnedEntry(["v": a ?? NSNull()]) != MCPOwnedEntry(["v": b ?? NSNull()]) { changed.append(field) }
+                if try MCPOwnedEntry(["v": a ?? NSNull()]) != MCPOwnedEntry(["v": b ?? NSNull()]) {
+                    changedPaths.append([key + "." + field, key])
+                }
             }
             let lhs = try mcpEnvironment(saved["env"]), rhs = try mcpEnvironment(active["env"])
-            changed += Set(lhs.keys).union(rhs.keys).filter { lhs[$0] != rhs[$0] }.map { "env." + String(decoding: $0, as: UTF8.self) }
-            let projectExplainsChange = !changed.isEmpty && changed.allSatisfy { field in
-                var path = key + "." + field
-                while path.count >= key.count {
-                    if let entry = origins[path] as? [String: Any], let origin = entry["name"] as? [String: Any] {
-                        guard origin["type"] as? String == "project", let file = origin["dotCodexFolder"] as? String else { return false }
-                        return projectFiles.contains(file)
-                    }
-                    guard let dot = path.lastIndex(of: ".") else { break }
-                    path = String(path[..<dot])
+            let environmentPath = key + ".env"
+            for name in Set(lhs.keys).union(rhs.keys) where lhs[name] != rhs[name] {
+                // A variable name can contain periods. It is a single key in the environment table.
+                changedPaths.append([environmentPath + "." + String(decoding: name, as: UTF8.self), environmentPath, key])
+            }
+            let projectExplainsChange = !changedPaths.isEmpty && changedPaths.allSatisfy { paths in
+                for path in paths {
+                    guard let raw = origins[path] else { continue }
+                    guard let entry = raw as? [String: Any], let origin = entry["name"] as? [String: Any],
+                          origin["type"] as? String == "project", let file = origin["dotCodexFolder"] as? String else { return false }
+                    return projectFiles.contains(file)
                 }
                 return false
             }
