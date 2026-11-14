@@ -4,7 +4,8 @@
 # Requires Python 3.12 and Xcode command line tools. See macapp/BUILDING.md.
 set -euo pipefail
 
-ROOT=${0:A:h:h}
+CHECKOUT=${0:A:h:h}
+ROOT="$CHECKOUT"
 ARCH=${HOMESCREEN_BUILD_ARCH:-$(uname -m)}
 case "$ARCH" in
   arm64|x86_64) ;;
@@ -17,6 +18,19 @@ fi
 export HOMESCREEN_BUILD_ARCH="$ARCH"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 BUILD=$ROOT/build/$ARCH
+unset HOMESCREEN_LOCAL_SOURCE
+LOCAL_LOCK=
+LOCAL_LINKS=()
+if [[ $# -gt 0 ]]; then
+  if [[ $# -ne 5 || "$1" != --local-build ]]; then
+    echo "Use rebuild_sources.py refreeze for an edited local build." >&2
+    exit 2
+  fi
+  BUILD=$2
+  LOCAL_LOCK=$3
+  LOCAL_LINKS=(--find-links "$4")
+  export HOMESCREEN_LOCAL_SOURCE=$5
+fi
 BOOTSTRAP=${HOMESCREEN_BUILD_PYTHON:-python3.12}
 VENV=$(mktemp -d "${TMPDIR:-/tmp}/homescreen-build.XXXXXXXX")
 trap 'rm -rf "$VENV"' EXIT
@@ -28,7 +42,11 @@ fi
 WHEELS="$VENV/wheels"
 SOURCE_STAGE="$VENV/source-inputs"
 mkdir -p "$WHEELS" "$SOURCE_STAGE"
-export HOMESCREEN_SOURCE_COMMIT=$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null || true)
+export HOMESCREEN_SOURCE_COMMIT=
+if [[ -z "$LOCAL_LOCK" ]]; then
+  HOMESCREEN_SOURCE_COMMIT=$("$BOOTSTRAP" "$CHECKOUT/macapp/source_checkout.py" "$CHECKOUT" "$VENV/project")
+  ROOT="$VENV/project"
+fi
 export HOMESCREEN_FREEZE_WHEELS="$WHEELS" HOMESCREEN_FREEZE_SOURCES="$SOURCE_STAGE"
 export PYINSTALLER_CONFIG_DIR="$VENV/pyinstaller-cache"
 
@@ -36,7 +54,7 @@ LOCK="$ROOT/requirements-build.lock"
 WHEEL_LINKS=()
 BUILD_PATH_ARGS=()
 if [[ "$ARCH" == x86_64 ]]; then
-  DEPENDENCIES="$ROOT/build/dependencies/x86_64"
+  DEPENDENCIES="$CHECKOUT/build/dependencies/x86_64"
   if ! "$PYTHON" "$ROOT/macapp/build_paths.py" intel-check "$DEPENDENCIES" 2>/dev/null; then
     bash "$ROOT/macapp/prepare_intel.sh" "$PYTHON" "$DEPENDENCIES"
   fi
@@ -45,7 +63,10 @@ if [[ "$ARCH" == x86_64 ]]; then
   WHEEL_LINKS=(--find-links "$DEPENDENCIES/wheels")
 fi
 "$PYTHON" -m venv "$VENV"
-if [[ -n "${HOMESCREEN_WHEELHOUSE:-}" ]]; then
+if [[ -n "$LOCAL_LOCK" ]]; then
+  LOCK="$LOCAL_LOCK"
+  "$VENV/bin/python" -m pip download --require-hashes --only-binary=:all: --no-deps "${WHEEL_LINKS[@]}" "${LOCAL_LINKS[@]}" --dest "$WHEELS" -r "$LOCK"
+elif [[ -n "${HOMESCREEN_WHEELHOUSE:-}" ]]; then
   "$VENV/bin/python" "$ROOT/macapp/wheelhouse.py" "$LOCK" "$HOMESCREEN_WHEELHOUSE" "$WHEELS"
 else
   "$VENV/bin/python" -m pip download --require-hashes --only-binary=:all: "${WHEEL_LINKS[@]}" --dest "$WHEELS" -r "$LOCK"
@@ -83,6 +104,11 @@ fi
 cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
 cp "$SOURCE_STAGE/THIRD-PARTY-NOTICES.txt" "$APP/Contents/Resources/"
 cp -R "$SOURCE_STAGE/ThirdPartyLicenses" "$APP/Contents/Resources/"
+if [[ -n "$LOCAL_LOCK" ]]; then
+  cp "$SOURCE_STAGE/LOCAL-BUILD.json" "$APP/Contents/Resources/"
+else
+  cp "$SOURCE_STAGE/inventory.json" "$APP/Contents/Resources/SourceInventory.json"
+fi
 "$VENV/bin/python" "$ROOT/macapp/make_icon.py" "$BUILD/AppIcon.iconset"
 iconutil -c icns "$BUILD/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -116,6 +142,11 @@ echo "• ad-hoc signing"
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 
+if [[ -n "$LOCAL_LOCK" ]]; then
+  echo "Built locally modified $APP"
+  exit 0
+fi
+
 echo "• dmg"
 DMG=$BUILD/home-screen-organizer-$VERSION.dmg
 STAGE=$BUILD/dmg
@@ -127,5 +158,5 @@ echo "built $APP ($(du -sh "$APP" | cut -f1)) and $DMG ($(du -sh "$DMG" | cut -f
 
 echo "• release archives"
 "$VENV/bin/python" "$ROOT/macapp/build_paths.py" app-record "$BUILD" "$ROOT" "$BUILD" "$VENV" "${BUILD_PATH_ARGS[@]}"
-"$VENV/bin/python" "$ROOT/macapp/release.py" package --arch "$ARCH"
-"$VENV/bin/python" "$ROOT/macapp/source_archive.py" native --inputs "$SOURCE_STAGE" --archive "$ROOT/build/release/$ARCH/home-screen-organizer-$VERSION-macos-$ARCH.zip" --output "$BUILD/source-inputs.zip"
+"$VENV/bin/python" "$ROOT/macapp/release.py" package --build-dir "$BUILD" --output-dir "$CHECKOUT/build/release/$ARCH" --arch "$ARCH"
+"$VENV/bin/python" "$ROOT/macapp/source_archive.py" native --inputs "$SOURCE_STAGE" --archive "$CHECKOUT/build/release/$ARCH/home-screen-organizer-$VERSION-macos-$ARCH.zip" --output "$BUILD/source-inputs.zip"

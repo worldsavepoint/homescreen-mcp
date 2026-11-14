@@ -36,6 +36,17 @@ fi
 
 The generated `local-requirements.lock` records the hash of your edited wheel. Install it into a fresh virtual environment with `pip install --require-hashes --only-binary=:all: --find-links local-wheels -r local-requirements.lock`. On Intel also pass the directory containing the prepared cryptography wheel. Use this environment to run the editable project, its command line tools and the PyInstaller and Swift build steps described in `project/macapp/BUILDING.md`.
 
+## Refreeze a modified Python package
+
+For a pure-Python component such as h11, run the `component` command with `h11`, edit its Python source, then run the same `wheel` command with that editable directory. Refreeze the engine and Swift app using the resulting local lock.
+
+```sh
+"$PYTHON" project/macapp/rebuild_sources.py refreeze --arch "$ARCH" --wheelhouse local-wheels --lock local-requirements.lock --output "$PWD/modified-build"
+"$PYTHON" project/macapp/check_mcp.py -- "$PWD/modified-build/Screen Organizer.app/Contents/Resources/engine/engine" mcp
+```
+
+The local build creates a signed app in the selected directory. Its `Contents/Resources/LOCAL-BUILD.json` records the original and replacement wheel hashes, the frozen engine digest and the hashes of changed editable files. An official release uses the clean Git export and the upstream wheel hashes. For a development build of an edited source tree, use the local refreeze route.
+
 ## Install a replacement into your own app
 
 Copy the installed macOS app into your build directory. Replace the shared extension and ad-hoc sign that copy.

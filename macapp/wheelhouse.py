@@ -8,9 +8,13 @@ from source_inputs import relative_name, sha256
 
 
 def entries(lock):
+    return entries_text(lock.read_text())
+
+
+def entries_text(text):
     requirement = None
     count = 0
-    for line in lock.read_text().splitlines():
+    for line in text.splitlines():
         if line.startswith("# ") and line.endswith(".whl"):
             requirement = relative_name(line[2:])
         elif line.strip() and not line.startswith("#"):

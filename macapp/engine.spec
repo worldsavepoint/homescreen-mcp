@@ -41,4 +41,4 @@ arch = os.environ["HOMESCREEN_BUILD_ARCH"]
 capture(a, pyz, exe, coll, Path(SPECPATH).parent.resolve(), Path(os.environ["HOMESCREEN_FREEZE_SOURCES"]),
         Path(os.environ["HOMESCREEN_FREEZE_WHEELS"]), arch,
         os.environ.get("GITHUB_REPOSITORY", "worldsavepoint/ios-homescreen-organizer"), check_runtime(arch),
-        os.environ.get("HOMESCREEN_SOURCE_COMMIT", ""))
+        os.environ.get("HOMESCREEN_SOURCE_COMMIT", ""), os.environ.get("HOMESCREEN_LOCAL_SOURCE"))

@@ -153,3 +153,85 @@ def test_editable_component_extracts_under_one_directory(tmp_path):
         tar.addfile(link)
     with pytest.raises(ValueError):
         unpack_source(archive, tmp_path / "bad")
+
+
+def test_local_refreeze_records_actual_substitution_and_stays_outside_release(tmp_path):
+    from rebuild_sources import local_selections
+    original = tmp_path / "original.lock"
+    edited = tmp_path / "edited.lock"
+    original.write_text("# h11-0.16.0-py3-none-any.whl\nh11==0.16.0 --hash=sha256:" + "a" * 64 + "\n")
+    edited.write_text(original.read_text().replace("a" * 64, "b" * 64))
+    assert local_selections(original, edited, {"h11"}) == {"h11": {"upstreamWheel": "a" * 64, "wheel": "b" * 64}}
+    edited.write_text(edited.read_text().replace("h11", "other"))
+    with pytest.raises(ValueError, match="release component"):
+        local_selections(original, edited, {"h11"})
+
+
+
+def test_signed_inventory_and_source_header_are_required(tmp_path):
+    from source_archive import check_zip
+    from test_mcp_bundle import assets
+    folder = assets(tmp_path)
+    package = folder / "home-screen-organizer-1.3.0-macos-arm64.zip"
+    altered = {"arch": "arm64", "version": "1.3.0"}
+    with pytest.raises(ValueError, match="signed source inventory"):
+        check_zip(package, altered)
+    pins = json.loads((ROOT / "macapp/sources/python.json").read_bytes())
+    assert "pylzss-0.3.9/src/include/py3c.h" in pins["pylzss"]["notices"]
+
+
+def test_local_extract_skips_git_pointer_and_checks_promoted_root(tmp_path):
+    import io
+    import tarfile
+    from rebuild_sources import unpack_source
+    path = tmp_path / "source.tar"
+    with tarfile.open(path, "w") as tar:
+        for name, data in [("project/source.py", b"x = 1"), ("project/suite/.git", b"gitdir: ../.git/modules/suite\n")]:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    unpack_source(path, tmp_path / "good")
+    assert (tmp_path / "good/source.py").is_file()
+    assert not (tmp_path / "good/suite/.git").exists()
+    with tarfile.open(path, "w") as tar:
+        link = tarfile.TarInfo("project/untrusted")
+        link.type, link.linkname = tarfile.SYMTYPE, "../promoted-outside"
+        tar.addfile(link)
+    with pytest.raises(ValueError, match="link"):
+        unpack_source(path, tmp_path / "bad")
+    assert not (tmp_path / "bad").exists()
+
+
+def test_provider_matches_actual_collected_stdlib(tmp_path):
+    import io
+    import tarfile
+    from native_sources import verify_provider_files
+    path = tmp_path / "runtime.tar.gz"
+    with tarfile.open(path, "w:gz") as tar:
+        info = tarfile.TarInfo("python/lib/python3.12/stat.py")
+        info.size = 7
+        tar.addfile(info, io.BytesIO(b"trusted"))
+    verify_provider_files(path, {"lib/python3.12/stat.py": hashlib.sha256(b"trusted").hexdigest()})
+    with pytest.raises(ValueError, match="Python"):
+        verify_provider_files(path, {"lib/python3.12/stat.py": hashlib.sha256(b"changed").hexdigest()})
+
+
+def test_official_freeze_exports_clean_commit_and_excludes_ignored_files(tmp_path):
+    import subprocess
+    from source_checkout import export_project
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    def git(*args):
+        return subprocess.check_output(["git", "-C", tree, *args], text=True).strip()
+    git("init", "-q")
+    (tree / "module.py").write_text("original")
+    (tree / ".gitignore").write_text("local.py\n")
+    git("add", ".")
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "Fixture")
+    (tree / "local.py").write_text("ignored")
+    destination = tmp_path / "release"
+    assert export_project(tree, destination) == git("rev-parse", "HEAD")
+    assert (destination / "module.py").read_text() == "original" and not (destination / "local.py").exists()
+    (tree / "module.py").write_text("edited")
+    with pytest.raises(ValueError, match="clean release"):
+        export_project(tree, tmp_path / "invalid")

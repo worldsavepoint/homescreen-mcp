@@ -37,7 +37,8 @@ def wide_text(data):
 
 def is_xml_plist(data):
     markup = data.lstrip(b" \t\r\n\0")
-    if not markup.startswith((b"<", codecs.BOM_UTF8, codecs.BOM_UTF16_BE, codecs.BOM_UTF16_LE)):
+    if not markup.startswith((b"<", codecs.BOM_UTF8, codecs.BOM_UTF32_BE, codecs.BOM_UTF32_LE,
+                              codecs.BOM_UTF16_BE, codecs.BOM_UTF16_LE)):
         return False
     try:
         wide = wide_text(data)

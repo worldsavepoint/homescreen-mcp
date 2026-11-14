@@ -106,7 +106,7 @@ macapp/build.sh
 matching native host architecture explicitly. `HOMESCREEN_BUILD_PYTHON` selects
 a previously extracted, verified release Python executable. The default downloads and checks the pinned native CPython distribution.
 
-The script creates a fresh temporary virtual environment, installs wheels from
+The release script exports the clean Git commit into a private build directory, creates a fresh temporary virtual environment, installs wheels from
 the architecture's hashed lock, adds the local source, and rebuilds the Python
 engine and Swift launcher. On Intel, it calls `prepare_intel.sh` when the recorded
 Intel wheel or generated lock needs preparation. The app bundle
@@ -270,7 +270,7 @@ The check initializes the server, compares its version with the project version,
 
 The app includes `THIRD-PARTY-NOTICES.txt` and `ThirdPartyLicenses/` in its Resources directory. The MCPB includes the same explanatory notice at its root and copies each signed notice tree to `licenses/<architecture>/ThirdPartyLicenses/`. The original source remains available under Jonathan Kats’s MIT license.
 
-Each native build writes `build/<architecture>/source-inputs.zip` alongside the build directory’s app. CI uploads these sanitized inputs in separate architecture artifacts. After both native builds and MCPB assembly, create the single matching source download with the exact clean checkout:
+Each native build writes `build/<architecture>/source-inputs.zip` alongside the build directory’s app. CI uploads these sanitized inputs in separate architecture artifacts. A canonical source inventory is included in the signed app and copied into the MCPB. After both native builds and MCPB assembly, create the single matching source download with the exact clean checkout:
 
 ```sh
 VERSION=$(python3.12 macapp/release.py version)

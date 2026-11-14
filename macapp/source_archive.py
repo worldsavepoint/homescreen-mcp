@@ -8,7 +8,9 @@ import io
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import stat
 import tarfile
 import tempfile
 import tomllib
@@ -30,7 +32,7 @@ def asset_name(version):
 
 
 def validate_inventory(data, arch, version, packages, native):
-    if (not HEX.fullmatch(data.get("engine", "")) or set(data) != {"projectCommit", "engine", "version", "arch", "runtime", "owners", "members", "notices", "overlays"}
+    if (not HEX.fullmatch(data.get("engine", "")) or set(data) != {"projectCommit", "projectFiles", "engine", "version", "arch", "runtime", "owners", "members", "notices", "overlays"}
             or data["arch"] != arch or data["version"] != version
             or not re.fullmatch(r"(?:[0-9a-f]{40})?", data["projectCommit"])):
         raise ValueError("Source inputs do not match the release version and architecture")
@@ -54,6 +56,9 @@ def validate_inventory(data, arch, version, packages, native):
             raise ValueError("Invalid frozen source member")
         seen.add((section, path))
         used.add(owner)
+    project_paths = {source for _, _, owner, source, _ in data["members"] if owner == "home-screen-organizer"}
+    if project_paths != data["projectFiles"].keys() or any(not HEX.fullmatch(x) for x in data["projectFiles"].values()):
+        raise ValueError("Incomplete corresponding project source inventory")
     if used - {"cpython", "home-screen-organizer"} != owners.keys() or not seen:
         raise ValueError("Incomplete frozen component inventory")
     for group in ("notices", "overlays"):
@@ -61,6 +66,10 @@ def validate_inventory(data, arch, version, packages, native):
             relative_name(path)
             if not HEX.fullmatch(value):
                 raise ValueError("Invalid source input member digest")
+    for owner in owners:
+        for member, value in packages[owner].get("notices", {}).items():
+            if data["notices"].get(owner + "/upstream/" + member) != value:
+                raise ValueError("Missing or changed embedded source license")
     native_notices = {"native/" + item["id"] + "/" + name: digest
                       for item in selected_assets(native, arch, owners) for name, digest in item.get("notices", {}).items()}
     for name, value in native_notices.items():
@@ -75,7 +84,16 @@ def check_zip(source, inventory):
     arch, version = inventory["arch"], inventory["version"]
     from mcp_bundle import engine_entries
     with zipfile.ZipFile(source) as archive:
+        if (RESOURCES + "SourceInventory.json" not in archive.NameToInfo
+                or archive.read(RESOURCES + "SourceInventory.json") != json_bytes(inventory)):
+            raise ValueError("The signed source inventory differs from the native source inputs")
         engine_entries(archive, arch, version)
+        if arch == "x86_64" and "cryptography" in inventory["owners"]:
+            from wheelhouse import entries_text
+            lock = archive.read(RESOURCES + "requirements-build.lock").decode()
+            crypto = [value for wheel, value in entries_text(lock) if wheel.split("-")[0] == "cryptography"]
+            if crypto != [inventory["owners"]["cryptography"]["wheel"]]:
+                raise ValueError("Different native cryptography source wheel")
         with archive.open(ENGINE + "engine") as stream:
             if hashlib.file_digest(stream, "sha256").hexdigest() != inventory["engine"]:
                 raise ValueError("The frozen engine differs from its source inventory")
@@ -148,15 +166,20 @@ def payload_tar(output, entries, metadata):
             archive.addfile(header, io.BytesIO(data))
 
 
-def verify_tar(path, version, commit=None, *, release=False):
-    files, inventories = {}, {}
+def verify_tar(path, version, commit=None, *, release=False, root=ROOT, repository=None, release_dir=None):
+    files, modes, inventories = {}, {}, {}
+    total = 0
     manifest = None
     with tarfile.open(path, "r|gz") as archive:
         for member in archive:
             name = relative_name(member.name)
+            total += member.size
+            if total > 4 * LIMIT:
+                raise ValueError("Source archive exceeds its unpacked size limit")
             if (not member.isfile() or not 0 <= member.size <= LIMIT or name in files
                     or manifest is not None or len(files) >= 100000):
                 raise ValueError("Invalid source archive member")
+            modes[name] = member.mode
             stream = archive.extractfile(member)
             if name == "MANIFEST.json":
                 if member.size > 32 * 1024**2:
@@ -194,6 +217,7 @@ def verify_tar(path, version, commit=None, *, release=False):
             if any(files.get(f"overlays/{arch}/" + relative_name(key)) != value
                    for key, value in volume["overlays"].items()):
                 raise ValueError("Missing corresponding source overlay")
+        verify_release_inputs(release_dir or path.parent, root, repository, version, manifest, files, modes, inventories)
     return manifest
 
 
@@ -211,10 +235,62 @@ def project_entries(root, commit):
         yield "project/" + name, int(mode, 8) & 0o777, io.BytesIO(data), len(data)
 
 
-def assemble(input_dir, release, version, commit, repository, root=ROOT):
-    if not re.fullmatch("[0-9a-f]{40}", commit) or subprocess.check_output(
-            ["git", "-C", root, "rev-parse", "HEAD"], text=True).strip() != commit:
+def trusted_file(root, commit, name):
+    return subprocess.check_output(["git", "-C", root, "show", commit + ":" + name])
+
+
+def trusted_head(root, commit):
+    if (not re.fullmatch(r"[0-9a-f]{40}", commit)
+            or subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip() != commit):
         raise ValueError("Build source assets from the exact release commit")
+
+
+def verify_release_inputs(folder, root, repository, version, manifest, files, modes, inventories):
+    from frozen_sources import distribution_notice
+    commit = manifest["commit"]
+    trusted_head(root, commit)
+    packages, native = [json.loads(trusted_file(root, commit, f"macapp/sources/{name}.json"))
+                        for name in ("python", "native")]
+    expected = {}
+    for name, mode, stream, size in project_entries(root, commit):
+        expected[name] = hashlib.file_digest(stream, "sha256").hexdigest()
+        if modes.get(name) != mode:
+            raise ValueError("Different corresponding project source file or mode")
+    expected["README.md"] = expected["project/macapp/SOURCE.md"]
+    pins = {}
+    for arch in ARCHES:
+        name = f"inventories/{arch}.json"
+        inventory = inventories[name]
+        validate_inventory(inventory, arch, version, packages, native)
+        if any(expected.get("project/" + key) != value for key, value in inventory["projectFiles"].items()):
+            raise ValueError("The frozen project source differs from the checked-out release")
+        data = json_bytes(inventory)
+        expected[name] = hashlib.sha256(data).hexdigest()
+        archive = folder / f"home-screen-organizer-{version}-macos-{arch}.zip"
+        if sha256(archive) != manifest["architectures"][arch]["zip"]:
+            raise ValueError("The release sources match a different native archive")
+        if check_zip(archive, inventory) != distribution_notice(repository, version):
+            raise ValueError("The downloaded source notice does not match the release")
+        for key, value in inventory["overlays"].items():
+            expected[f"overlays/{arch}/" + key] = value
+        for owner in inventory["owners"]:
+            pins["python/" + owner] = packages[owner]["source"]
+        for item in selected_assets(native, arch, inventory["owners"]):
+            pins[item["id"]] = item
+    unique = {pin["sha256"]: pin for pin in pins.values()}
+    paths = {value: "sources/" + value + "-" + pin_name(pin) for value, pin in unique.items()}
+    inputs = {key: {"path": paths[pin["sha256"]], "url": pin["url"], "sha256": pin["sha256"]}
+              for key, pin in pins.items()}
+    expected.update({path: value for value, path in paths.items()})
+    if any(mode != 0o644 for name, mode in modes.items() if not name.startswith("project/")):
+        raise ValueError("Invalid source archive data mode")
+    if expected != files or inputs != manifest["inputs"]:
+        raise ValueError("The source archive differs from the release commit, frozen inputs or source locks")
+
+
+
+def assemble(input_dir, release, version, commit, repository, root=ROOT):
+    trusted_head(root, commit)
     for flag in ([], ["--cached"]):
         subprocess.run(["git", "-C", root, "diff", "--quiet", *flag, commit, "--"], check=True)
     project = tomllib.loads(subprocess.check_output(["git", "-C", root, "show", f"{commit}:pyproject.toml"], text=True))
@@ -225,9 +301,22 @@ def assemble(input_dir, release, version, commit, repository, root=ROOT):
     cache = cache_directory()
     from frozen_sources import distribution_notice
     with ExitStack() as stack:
+        overlay_stage = Path(stack.enter_context(tempfile.TemporaryDirectory()))
         for arch in ARCHES:
             inputs = stack.enter_context(zipfile.ZipFile(input_dir / ("home-screen-organizer-sources-" + arch) / "source-inputs.zip"))
             folder = release / f"home-screen-organizer-{version}-macos-{arch}.zip"
+            sizes = {info.filename: info.file_size for info in inputs.infolist()}
+            if (len(sizes) != len(inputs.infolist()) or len(sizes) > 32768
+                    or sizes.get("inventory.json", LIMIT) > 32 * 1024**2 or sizes.get("binary.sha256") != 64
+                    or sum(sizes.values()) > 256 * 1024**2):
+                raise ValueError("Invalid native source input bounds")
+            for info in inputs.infolist():
+                relative_name(info.filename)
+                if any(str(parent) in sizes for parent in Path(info.filename).parents):
+                    raise ValueError("Source input includes a file as a directory")
+                if (info.file_size > 32 * 1024**2 or info.is_dir() or info.flag_bits & 1
+                        or stat.S_IFMT(info.external_attr >> 16) not in (0, stat.S_IFREG)):
+                    raise ValueError("Invalid native source input member")
             inventory = json.loads(inputs.read("inventory.json"))
             validate_inventory(inventory, arch, version, packages, native)
             if inventory['projectCommit'] != commit:
@@ -242,10 +331,14 @@ def assemble(input_dir, release, version, commit, repository, root=ROOT):
             if set(inputs.namelist()) != expected or len(inputs.infolist()) != len(expected):
                 raise ValueError("Unexpected source input sidecar members")
             for name, value in inventory["overlays"].items():
-                data = inputs.read("overlays/" + name)
-                if hashlib.sha256(data).hexdigest() != value:
+                entry = f"overlays/{arch}/{name}"
+                path = overlay_stage / entry
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with inputs.open("overlays/" + name) as source, path.open("xb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+                if sha256(path) != value:
                     raise ValueError("Different editable source overlay")
-                overlays[f"overlays/{arch}/{name}"] = data
+                overlays[entry] = path
             for owner in inventory["owners"]:
                 pins["python/" + owner] = packages[owner]["source"]
             for item in selected_assets(native, arch, inventory["owners"]):
@@ -264,15 +357,16 @@ def assemble(input_dir, release, version, commit, repository, root=ROOT):
             for arch, inventory in sorted(owners_by_arch.items()):
                 data = json_bytes(inventory)
                 yield records[arch]["inventory"], 0o644, io.BytesIO(data), len(data)
-            for name, data in sorted(overlays.items()):
-                yield name, 0o644, io.BytesIO(data), len(data)
+            for name, path in sorted(overlays.items()):
+                with path.open("rb") as stream:
+                    yield name, 0o644, stream, path.stat().st_size
             for value, path in sorted(paths.items()):
                 with path.open("rb") as stream:
                     yield blobs[value], 0o644, stream, path.stat().st_size
         with tempfile.TemporaryDirectory(dir=release) as temporary:
             out = Path(temporary) / asset_name(version)
             payload_tar(out, entries(), {"version": version, "commit": commit, "architectures": records, "inputs": inputs})
-            verify_tar(out, version, commit, release=True)
+            verify_tar(out, version, commit, release=True, root=root, repository=repository, release_dir=release)
             digest = sha256(out)
             out.replace(release / out.name)
             checksums = release / "SHA256SUMS.txt"

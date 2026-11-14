@@ -1,7 +1,9 @@
 """Prepare editable components and local rebuild inputs from a release source tree."""
 import argparse
 import json
-from pathlib import Path
+import os
+import platform
+from pathlib import Path, PurePosixPath
 import shutil
 import stat
 import subprocess
@@ -23,6 +25,8 @@ def unpack_source(archive, output):
                 size = 0
                 seen = set()
                 for info in zipped.infolist():
+                    if ".git" in PurePosixPath(info.filename).parts:
+                        continue
                     name = relative_name(info.filename.rstrip("/"))
                     size += info.file_size
                     if (name in seen or size > 2 * 1024**3 or len(seen) > 150000
@@ -40,21 +44,34 @@ def unpack_source(archive, output):
             with tarfile.open(archive) as tar:
                 members, seen, size = [], set(), 0
                 for item in tar:
+                    if ".git" in PurePosixPath(item.name).parts:
+                        continue
                     name = relative_name(item.name.rstrip("/"))
+                    if not (item.isfile() or item.isdir() or item.issym() or item.islnk()):
+                        raise ValueError("Unsupported upstream source member")
                     size += item.size
                     if name in seen or size > 2 * 1024**3 or len(seen) > 150000:
                         raise ValueError("Unexpected upstream archive bounds")
                     seen.add(name)
                     members.append(item)
+                links = {item.name for item in members if item.issym() or item.islnk()}
+                if any(any(str(parent) in links for parent in PurePosixPath(item.name).parents) for item in members):
+                    raise ValueError("Source member descends through an archive link")
                 try:
                     tar.extractall(stage, members=members, filter="data")
                 except tarfile.FilterError as error:
                     raise ValueError("Unsafe upstream archive link or member") from error
         children = list(stage.iterdir())
-        if len(children) == 1 and children[0].is_dir() and not children[0].is_symlink():
-            children[0].rename(output)
-        else:
-            stage.rename(output)
+        unpacked = children[0] if len(children) == 1 and children[0].is_dir() and not children[0].is_symlink() else stage
+        for path in unpacked.rglob("*"):
+            if path.is_symlink():
+                try:
+                    valid = not path.readlink().is_absolute() and path.resolve(strict=True).is_relative_to(unpacked.resolve())
+                except (OSError, RuntimeError):
+                    valid = False
+                if not valid:
+                    raise ValueError("Invalid archive link in editable source tree")
+        unpacked.rename(output)
 
 
 def blob(root, entry):
@@ -146,6 +163,51 @@ def local_wheel(root, source, arch, wheelhouse, output):
         print(wheelhouse / wheel.name)
 
 
+def local_selections(original, edited, shipped):
+    from wheelhouse import entries
+    def indexed(path):
+        records = {}
+        for wheel, value in entries(path):
+            name, version = wheel.split("-")[:2]
+            key = canonical(name)
+            if key in records:
+                raise ValueError("Duplicate release component")
+            records[key] = (version, value)
+        return records
+    before, after = indexed(original), indexed(edited)
+    if before.keys() != after.keys() or any(v[0] != after[k][0] for k, v in before.items()):
+        raise ValueError("The local lock must retain the release component names and versions")
+    changed = {k: {"upstreamWheel": v[1], "wheel": after[k][1]} for k, v in before.items() if v != after[k]}
+    if not changed or not changed.keys() <= set(shipped):
+        raise ValueError("Select an edited frozen runtime component")
+    return changed
+
+
+def refreeze(root, arch, wheelhouse, lock, output):
+    if platform.machine() != arch or output.exists():
+        raise ValueError("Use a new output directory on the matching native Mac")
+    from wheelhouse import entries
+    manifest = json.loads((root / "MANIFEST.json").read_bytes())
+    volume = json.loads((root / relative_name(manifest["architectures"][arch]["inventory"])).read_bytes())
+    project = root / "project"
+    original = project / ("requirements-build.lock" if arch == "arm64" else "build/dependencies/x86_64/requirements-build.lock")
+    changed = local_selections(original, lock, volume["owners"])
+    wheels = wheelhouse.resolve()
+    for wheel, value in entries(lock):
+        owner = canonical(wheel.split("-")[0])
+        if owner in changed and sha256(wheels / wheel) != value:
+            raise ValueError("Edited wheel does not match its local lock")
+    output.mkdir(parents=True)
+    with tempfile.TemporaryDirectory() as temporary:
+        settings = Path(temporary) / "rebuild.json"
+        settings.write_text(json.dumps({"upstreamCommit": manifest["commit"], "components": changed}))
+        env = {**os.environ, "HOMESCREEN_BUILD_ARCH": arch, "HOMESCREEN_BUILD_PYTHON": sys.executable,
+               "HOMESCREEN_SOURCE_CACHE": str(root / "sources")}
+        subprocess.run([str(project / "macapp/build.sh"), "--local-build", output.resolve(), lock.resolve(),
+                        wheels, settings], env=env, check=True)
+
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
@@ -160,11 +222,17 @@ def main():
     wheel.add_argument("--arch", choices=("arm64", "x86_64"), required=True)
     for name in ("source", "wheelhouse", "output"):
         wheel.add_argument("--" + name, type=Path, required=True)
+    local = commands.add_parser("refreeze")
+    local.add_argument("--arch", required=True, choices=("arm64", "x86_64"))
+    for name in ("wheelhouse", "lock", "output"):
+        local.add_argument("--" + name, type=Path, required=True)
     args = parser.parse_args()
     if args.command == "component":
         editable(args.root, canonical(args.owner), args.arch, args.output)
     elif args.command == "cargo-vendor":
         cargo_vendor(args.root, args.output)
+    elif args.command == "refreeze":
+        refreeze(args.root.resolve(), args.arch, args.wheelhouse, args.lock, args.output)
     else:
         local_wheel(args.root, args.source, args.arch, args.wheelhouse, args.output)
 

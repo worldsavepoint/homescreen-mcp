@@ -204,7 +204,7 @@ def distribution(tmp_path):
         "fileSha256": hashlib.sha256(bundle.read_bytes()).hexdigest(), "transport": {"type": "stdio"}}]}
     (output / "server.json").write_text(json.dumps(metadata))
     from source_fixture import release_source
-    release_source(output, VERSION, "a" * 40)
+    release_source(output, VERSION, tmp_path / "source-checkout")
     refresh_distribution_checksums(output)
     return output
 
@@ -215,9 +215,14 @@ def refresh_distribution_checksums(output):
         for path in sorted(output.iterdir()) if path.name != "SHA256SUMS.txt"))
 
 
+def verify_fixture(tmp_path, *args):
+    script = tmp_path / "source-checkout/macapp/release.py"
+    return subprocess.run([sys.executable, script, "verify", *map(str, args)], capture_output=True, text=True)
+
+
 def test_verify_distribution_checks_all_assets_and_package_metadata(tmp_path):
     output = distribution(tmp_path)
-    result = release("verify", "--input-dir", output, "--repository", "example/project", "--tag", f"v{VERSION}")
+    result = verify_fixture(tmp_path, "--input-dir", output, "--repository", "example/project", "--tag", f"v{VERSION}")
     assert result.returncode == 0, result.stderr
 
 
@@ -240,7 +245,7 @@ def test_verify_rejects_incomplete_checksums_and_mismatched_registry_metadata(tm
             metadata[damage] = "different"
         metadata_path.write_text(json.dumps(metadata))
         refresh_distribution_checksums(output)
-    result = release("verify", "--input-dir", output, "--repository", "example/project", "--tag", f"v{VERSION}")
+    result = verify_fixture(tmp_path, "--input-dir", output, "--repository", "example/project", "--tag", f"v{VERSION}")
     assert result.returncode != 0
 
 
@@ -487,17 +492,22 @@ def test_previous_manifest_establishes_owned_native_pair(tmp_path, bad):
         previous_assets(tmp_path, "arm64")
 
 
-def test_protected_retirement_preserves_shared_file(tmp_path):
+@pytest.mark.parametrize("nested", [False, True])
+def test_protected_retirement_preserves_shared_file(tmp_path, nested):
     build = make_build(tmp_path)
     output = tmp_path / "published"
     result = release("package", "--arch", "arm64", "--build-dir", build, "--output-dir", output)
     assert result.returncode == 0, result.stderr
-    note = output / "retained"
+    retained = output / "existing" if nested else output
+    retained.mkdir(exist_ok=True)
+    note = retained / "retained"
     note.write_bytes(b"ordinary retained file")
     note.chmod(0o644)
     outside = tmp_path / "second-link"
     os.link(note, outside)
-    subprocess.run(["chmod", "+a", "everyone deny delete", note], check=True)
+    protected = retained if nested else note
+    restriction = "everyone deny delete_child" if nested else "everyone deny delete"
+    subprocess.run(["chmod", "+a", restriction, protected], check=True)
     acl = subprocess.check_output(["ls", "-lde", outside], text=True).splitlines()[1:]
     try:
         for _ in range(2):
@@ -507,8 +517,17 @@ def test_protected_retirement_preserves_shared_file(tmp_path):
             assert note.samefile(outside) and note.read_bytes() == b"ordinary retained file"
             assert subprocess.check_output(["ls", "-lde", outside], text=True).splitlines()[1:] == acl
             assert all((p.stat().st_mode & 0o777) == 0o700 for p in tmp_path.glob(".native-release-*"))
+        previous = (output / "SHA256SUMS.txt").read_bytes()
+        subprocess.run(["chmod", "+a", "everyone deny add_file", output], check=True)
+        failed = release("package", "--arch", "arm64", "--build-dir", build, "--output-dir", output)
+        assert failed.returncode != 0 and (output / "SHA256SUMS.txt").read_bytes() == previous
+        assert note.samefile(outside) and note.stat().st_mode & 0o777 == 0o644
     finally:
+        subprocess.run(["chmod", "-N", output], check=True)
         subprocess.run(["chmod", "-N", outside], check=True)
+        if nested:
+            for path in tmp_path.rglob("existing"):
+                subprocess.run(["chmod", "-N", path], check=True)
 
 
 def test_distribution_requires_an_archive_with_verified_native_sources(tmp_path):
@@ -524,5 +543,53 @@ def test_distribution_requires_an_archive_with_verified_native_sources(tmp_path)
         item.size = len(manifest)
         archive.addfile(item, io.BytesIO(manifest))
     refresh_distribution_checksums(output)
-    result = release("verify", "--input-dir", output, "--repository", "example/project", "--tag", f"v{VERSION}", "--commit", "a" * 40)
+    result = verify_fixture(tmp_path, "--input-dir", output, "--repository", "example/project", "--tag", f"v{VERSION}", "--commit", "a" * 40)
     assert result.returncode != 0
+
+
+@pytest.mark.parametrize("missing", ["project/homescreen/example.py", "native/dependency"])
+def test_publish_verifier_derives_source_closure_from_commit_and_native_zip(tmp_path, missing):
+    import io
+    import tarfile
+    output = distribution(tmp_path)
+    archive = output / f"home-screen-organizer-{VERSION}-corresponding-source.tar.gz"
+    with tarfile.open(archive) as source:
+        items = {member.name: (member, source.extractfile(member).read()) for member in source}
+    manifest = json.loads(items.pop("MANIFEST.json")[1])
+    name = manifest["inputs"].pop(missing)["path"] if missing.startswith("native/") else missing
+    del items[name], manifest["files"][name]
+    with tarfile.open(archive, "w:gz") as replaced:
+        for header, data in items.values():
+            replaced.addfile(header, io.BytesIO(data))
+        data = json.dumps(manifest).encode()
+        header = tarfile.TarInfo("MANIFEST.json")
+        header.size = len(data)
+        replaced.addfile(header, io.BytesIO(data))
+    refresh_distribution_checksums(output)
+    result = verify_fixture(tmp_path, "--input-dir", output, "--repository", "example/project")
+    assert result.returncode != 0 and "source" in result.stderr.lower()
+
+
+def test_build_record_round_trips_non_utf8_filesystem_root(tmp_path):
+    from macapp.build_paths import RECORD, read_roots
+    from macapp.check_package_paths import check_archive
+    from test_package_privacy import native_zip
+    root = Path(os.fsdecode(b"/fixture/nonutf8-\xff"))
+    (tmp_path / RECORD).write_text(json.dumps({"version": 2, "roots": [str(root)], "inputs": {}}))
+    assert read_roots(tmp_path) == [root]
+    with pytest.raises(ValueError, match="build path"):
+        check_archive(native_zip(tmp_path, extra=os.fsencode(root) + b"/child"), [root])
+
+
+def test_native_retirement_envelope_clears_inherited_acl(tmp_path):
+    from macapp.release import private_transaction
+    parent = tmp_path / "inherited"
+    parent.mkdir()
+    subprocess.run(["chmod", "+a", "everyone allow list,search,directory_inherit", parent], check=True)
+    try:
+        folder = private_transaction(parent)
+        result = subprocess.check_output(["ls", "-lde", folder], text=True).splitlines()
+        assert len(result) == 1 and folder.stat().st_mode & 0o777 == 0o700
+        assert not list(folder.iterdir())
+    finally:
+        subprocess.run(["chmod", "-N", parent], check=True)

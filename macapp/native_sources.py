@@ -1,5 +1,6 @@
 """Select the native release interpreter and preserve verified vendor grants."""
 import argparse
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256 as digest
 from pathlib import Path
@@ -37,6 +38,21 @@ def interpreter(arch, target, cache):
             raise ValueError("Different Python distributor library")
         (folder / "python").rename(target)
     return target / "bin/python3.12"
+
+
+def verify_provider_files(archive_path, files):
+    found = set()
+    with tarfile.open(archive_path, "r|gz") as archive:
+        for member in archive:
+            name = member.name.removeprefix("python/")
+            if name not in files:
+                continue
+            if (name in found or not member.isfile()
+                    or hashlib.file_digest(archive.extractfile(member), "sha256").hexdigest() != files[name]):
+                raise ValueError("Collected Python runtime files differ from the release provider")
+            found.add(name)
+    if found != files.keys():
+        raise ValueError("Collected Python runtime files missing from the release provider")
 
 
 def check_runtime(arch):

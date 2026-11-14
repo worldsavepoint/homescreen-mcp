@@ -15,7 +15,7 @@ from release import ARCHITECTURES, ROOT, project_version
 APP = "Screen Organizer.app"
 RESOURCES = f"{APP}/Contents/Resources/"
 ENGINE = RESOURCES + "engine/"
-NOTICES = ("LICENSE", "dependencies.txt", "requirements-build.lock", "THIRD-PARTY-NOTICES.txt", "ThirdPartyLicenses/components.json")
+NOTICES = ("LICENSE", "dependencies.txt", "requirements-build.lock", "THIRD-PARTY-NOTICES.txt", "SourceInventory.json", "ThirdPartyLicenses/components.json")
 INTEL_NOTICES = ("OPENSSL-LICENSE.txt", "requirements-cryptography-x86_64.lock")
 
 

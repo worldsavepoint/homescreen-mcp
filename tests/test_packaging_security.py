@@ -104,6 +104,11 @@ def test_build_recreates_environment_and_requires_locked_hashes(tmp_path):
     uname.chmod(0o755)
     fake_python = fake_bin / "python3.12"
     fake_python.write_text('''#!/bin/zsh
+if [[ "$1" == */source_checkout.py ]]; then
+  mkdir -p "$3/macapp"
+  print -r -- "0123456789012345678901234567890123456789"
+  exit 0
+fi
 if [[ "$1" != "-m" || "$2" != "venv" ]]; then exit 80; fi
 mkdir -p "$3/bin"
 cat > "$3/bin/python" <<'SCRIPT'

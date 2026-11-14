@@ -14,6 +14,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tarfile
+import zipfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +75,20 @@ def localize(app, locales, check=False):
             path.write_bytes(data)
 
 
+def private_transaction(parent):
+    folder = Path(tempfile.mkdtemp(dir=parent, prefix=".native-release-"))
+    try:
+        subprocess.run(["/bin/chmod", "-N", folder], check=True, capture_output=True)
+        folder.chmod(0o700)
+        mode = folder.stat()
+        if mode.st_uid != os.getuid() or stat.S_IMODE(mode.st_mode) != 0o700 or any(folder.iterdir()):
+            raise OSError("Could not prepare a private release transaction")
+        return folder
+    except BaseException:
+        folder.rmdir()
+        raise
+
+
 def package(build_dir, output_dir, version, arch):
     app = build_dir / "Screen Organizer.app"
     bundle = plistlib.loads((app / "Contents/Info.plist").read_bytes())
@@ -92,7 +108,7 @@ def package(build_dir, output_dir, version, arch):
     roots = [ROOT, build_dir, output_dir, *read_roots(build_dir), *runner_roots()]
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     basename = f"home-screen-organizer-{version}-macos-{arch}"
-    folder = Path(tempfile.mkdtemp(dir=output_dir.parent, prefix=".native-release-"))
+    folder = private_transaction(output_dir.parent)
     committed = False
     try:
         staged = folder / "assets"
@@ -290,12 +306,7 @@ def verify_distribution(folder, version, repository, commit=None):
     if seen != expected:
         raise ValueError("Supply checksums for all release assets")
     from source_archive import verify_tar
-    sources = verify_tar(folder / source_name, version, commit, release=True)
-    for arch in ARCHITECTURES:
-        name = f"home-screen-organizer-{version}-macos-{arch}.zip"
-        with (folder / name).open("rb") as stream:
-            if sources["architectures"][arch]["zip"] != hashlib.file_digest(stream, "sha256").hexdigest():
-                raise ValueError("The release sources match a different native archive")
+    verify_tar(folder / source_name, version, commit, release=True, root=ROOT, repository=repository)
     metadata = json.loads((folder / "server.json").read_text())
     with (folder / bundle_name).open("rb") as stream:
         bundle_hash = hashlib.file_digest(stream, "sha256").hexdigest()
@@ -343,7 +354,7 @@ def main():
         elif args.command == "verify":
             verify_distribution(args.input_dir.resolve(), version, args.repository, args.commit)
         print(version)
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.CalledProcessError, tarfile.TarError, zipfile.BadZipFile) as exc:
         if args.command == "package":
             parser.exit(1, "Could not prepare the verified native release\n")
         parser.exit(1, f"{exc}\n")

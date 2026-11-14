@@ -258,3 +258,26 @@ def test_wide_native_localization(tmp_path, kind, suffix):
     else:
         with pytest.raises(ValueError, match="build path"):
             check_archive(path, [root])
+
+
+def test_wide_plist_at_unlabeled_path_and_embedded_entity(tmp_path):
+    import base64
+    import codecs
+    import plistlib
+    import subprocess
+    from macapp.check_package_paths import check_archive
+    root = tmp_path / "private-fixture"
+    encoded = base64.b64encode(str(root).encode()).decode()
+    xml = f"<!--fixture--><plist><dict><key>x</key><data>{encoded}</data></dict></plist>"
+    path = native_zip(tmp_path)
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr("assets/translation", codecs.BOM_UTF32_BE + xml.encode("utf-32-be"))
+    with pytest.raises(ValueError, match="build path"):
+        check_archive(path, [root])
+    canary = tmp_path / "temporary-canary"
+    canary.write_text("fixture-only external entity")
+    declaration = ('<!DOCTYPE plist [<!ENTITY external SYSTEM "' + canary.as_uri()
+                   + '">]><plist><dict><key>v</key><string>&external;</string></dict></plist>')
+    result = subprocess.run(["/usr/bin/plutil", "-convert", "binary1", "-o", "-", "--", "-"],
+                            input=declaration.encode(), capture_output=True, timeout=5)
+    assert result.returncode or plistlib.loads(result.stdout)["v"] != canary.read_text()

@@ -3,6 +3,7 @@ from collections import defaultdict
 from hashlib import sha256 as digest
 from importlib.metadata import distributions, version as package_version
 from pathlib import Path
+import json
 import re
 import sys
 import sysconfig
@@ -98,11 +99,13 @@ def distribution_notice(repository, version):
     ).encode()
 
 
-def capture(analysis, pyz, executable, collection, root, output, wheel_dir, arch, repository, runtime, project_commit):
+def capture(analysis, pyz, executable, collection, root, output, wheel_dir, arch, repository, runtime, project_commit, local_build=None):
     from PyInstaller.archive.readers import CArchiveReader
     from PyInstaller.depend.analysis import get_bootstrap_modules
 
     packages, native = read_locks()
+    local = json.loads(Path(local_build).read_bytes()) if local_build else None
+    replacements = local["components"] if local else {}
     wheel_paths = {canonical(path.name.split("-", 1)[0]): path for path in wheel_dir.glob("*.whl")}
     installed = installed_files(distributions())
     version = package_version("home-screen-organizer")
@@ -111,11 +114,17 @@ def capture(analysis, pyz, executable, collection, root, output, wheel_dir, arch
     cache = cache_directory()
     base = Path(sys.base_prefix).resolve()
     sysconfig_name = sysconfig._get_sysconfigdata_name()
+    provider = {Path(sys._base_executable).resolve().relative_to(base).as_posix(): sha256(Path(sys._base_executable)),
+                "lib/libpython3.12.dylib": runtime["libpython"]}
+    sysconfig_input = Path(__import__(sysconfig_name).__file__).resolve()
+    provider[sysconfig_input.relative_to(base).as_posix()] = sha256(sysconfig_input)
     bootstrap = {name: path for name, path, kind in get_bootstrap_modules() if kind == "PYMODULE"}
     engine_dir = Path(collection.name)
     package = CArchiveReader(str(engine_dir / "engine"))
     pyz_reader = package.open_embedded_archive(next(k for k, v in package.toc.items() if v[-1] == "z"))
     project = "home-screen-organizer"
+
+    project_files = {}
 
     def record(section, target, path, kind, payload_hash):
         relative_name(target)
@@ -138,6 +147,11 @@ def capture(analysis, pyz, executable, collection, root, output, wheel_dir, arch
                     wheel_path = wheel_paths[owner]
                     value = sha256(wheel_path)
                     pinned = pin["wheels"].get(arch)
+                    if owner in replacements:
+                        selected = replacements[owner]
+                        if selected["upstreamWheel"] != pinned and not (arch == "x86_64" and owner == "cryptography"):
+                            raise ValueError("Different upstream wheel in local source inventory")
+                        pinned = selected["wheel"]
                     if pinned != value and not (owner == "cryptography" and arch == "x86_64" and pinned is None):
                         raise ValueError(f"Different release wheel: {owner}")
                     opened[owner] = zipfile.ZipFile(wheel_path)
@@ -156,10 +170,14 @@ def capture(analysis, pyz, executable, collection, root, output, wheel_dir, arch
             put(overlays / owner, relative, path.read_bytes())
         elif path.is_relative_to(base):
             owner, relative = "cpython", path.relative_to(base).as_posix()
+            if relative not in provider:
+                provider[relative] = sha256(path)
         elif path.is_relative_to(root) and path == root / "macapp/engine.py":
             owner, relative = project, "macapp/engine.py"
         else:
             raise ValueError(f"Unknown source owner for frozen member: {section}/{target}")
+        if owner == project and relative not in project_files:
+            project_files[relative] = sha256(root / relative)
         entries.append([section, target, owner, relative_name(relative), payload_hash])
 
     try:
@@ -194,6 +212,11 @@ def capture(analysis, pyz, executable, collection, root, output, wheel_dir, arch
         for owner, wheel in sorted(opened.items()):
             source = fetch(packages[owner]["source"], cache)
             wheel_material(owner, wheel, source, editable[owner], notices, overlays)
+            for member, expected in packages[owner].get("notices", {}).items():
+                data = source_member(source, member)
+                if digest(data).hexdigest() != expected:
+                    raise ValueError("Different embedded source license")
+                put(notices / owner / "upstream", member, data)
             if owner == "developer-disk-image":
                 metadata = next(n for n in wheel.namelist() if n.endswith(".dist-info/METADATA"))
                 put(notices / owner, "METADATA", wheel.read(metadata))
@@ -207,15 +230,29 @@ def capture(analysis, pyz, executable, collection, root, output, wheel_dir, arch
                 put(notices / owner, "LICENSE", fetch(data, cache).read_bytes())
             if not (notices / owner).is_dir():
                 raise ValueError(f"Missing license for frozen component: {owner}")
-        from native_sources import add_native_notices
+        from native_sources import add_native_notices, verify_provider_files
+        interpreter_pin = next(item for item in native["assets"] if item["id"] == runtime["archive"])
+        verify_provider_files(fetch(interpreter_pin, cache), provider)
         add_native_notices(native, arch, owners, notices, cache)
         index = {owner: {"version": item["version"], "license": packages[owner]["license"]}
                  for owner, item in sorted(owners.items())}
         (notices / "components.json").write_bytes(json_bytes(index))
-        public = {"projectCommit": project_commit, "engine": sha256(engine_dir / "engine"), "version": version, "arch": arch, "runtime": runtime, "owners": owners, "members": sorted(entries),
+        public = {"projectCommit": project_commit, "projectFiles": project_files, "engine": sha256(engine_dir / "engine"), "version": version, "arch": arch, "runtime": runtime, "owners": owners, "members": sorted(entries),
                   "notices": files_below(notices), "overlays": files_below(overlays)}
-        (output / "inventory.json").write_bytes(json_bytes(public))
-        (output / "THIRD-PARTY-NOTICES.txt").write_bytes(distribution_notice(repository, version))
+        notice = distribution_notice(repository, version)
+        if local:
+            if not replacements.keys() <= owners.keys():
+                raise ValueError("The modified component is absent from the frozen engine")
+            for owner, values in replacements.items():
+                owners[owner].update(modified=True, upstreamWheel=values["upstreamWheel"])
+            (output / "LOCAL-BUILD.json").write_bytes(json_bytes({
+                "upstreamCommit": local["upstreamCommit"], "arch": arch, "components": owners,
+                "engine": public["engine"], "editableOverlayHashes": public["overlays"]}))
+            notice = (b"Locally modified build. LOCAL-BUILD.json records the actual selected wheels.\n"
+                      + notice.replace(b"Download the matching Corresponding Source", b"Download the original release source"))
+        else:
+            (output / "inventory.json").write_bytes(json_bytes(public))
+        (output / "THIRD-PARTY-NOTICES.txt").write_bytes(notice)
     finally:
         for wheel in opened.values():
             wheel.close()
