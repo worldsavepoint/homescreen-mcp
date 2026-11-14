@@ -207,8 +207,7 @@ struct MCPClientManager {
                 forwarded = Set(options.map(\.name))
             }
             return MCPClientQuery(client: client, code: .success, configuration: .configured, connection: .unknown,
-                mode: local && enabled.boolValue ? accessMode(transport) : nil,
-                command: transport["command"] as? String, arguments: transport["args"] as? [String], localEnabled: local && enabled.boolValue, url: transport["url"] as? String, enabled: enabled.boolValue,
+                command: transport["command"] as? String, arguments: transport["args"] as? [String], url: transport["url"] as? String, enabled: enabled.boolValue,
                 transportEnvironment: environment, forwardedNames: forwarded)
         }
         let plainOutput = result.stdout.replacingOccurrences(of: "\u{1b}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
@@ -284,7 +283,6 @@ struct MCPClientManager {
         let activeForwarded = (try? forwardedOptions(active["env_vars"] ?? []).map(\.name)) ?? []
         let agrees = query.enabled == enabled && query.command == active["command"] as? String &&
             query.arguments == active["args"] as? [String] && query.url == active["url"] as? String &&
-            query.mode == (local && enabled ? accessMode(active) : nil) &&
             (!local || (query.transportEnvironment == activeEnv && query.forwardedNames == Set(activeForwarded)))
         if !agrees {
             query.code = .invalidResponse
@@ -294,10 +292,8 @@ struct MCPClientManager {
             return
         }
         query.scope = snapshot.scope
-        if !local || (active["environment_id"] != nil && active["environment_id"] as? String != "local") {
-            query.localEnabled = false
-            query.mode = nil
-        }
+        query.localEnabled = local && enabled && (active["environment_id"] == nil || active["environment_id"] as? String == "local")
+        query.mode = query.localEnabled ? localMode(active) : nil
     }
 
     private func checkLaunchEnvelope(_ args: [String], store: MCPEntryStore) throws {
@@ -319,7 +315,7 @@ struct MCPClientManager {
 
     private func mergedEntry(client: MCPClient, prior: MCPOwnedEntry, enginePath: String, gates: [String: String]) throws -> MCPOwnedEntry {
         var object = try prior.object() ?? [:]
-        if client == .codex { object.removeValue(forKey: "environment_id") }
+        if client == .codex { object["environment_id"] = "local" }
         if object["url"] != nil {
             for field in ["url", "http_headers", "env_http_headers", "bearer_token_env_var", "http_headers_helper", "scopes", "oauth_resource", "oauth", "auth"] {
                 object.removeValue(forKey: field)
@@ -358,9 +354,17 @@ struct MCPClientManager {
         let permitted: Bool
         switch record.phase {
         case .prepared, .committed: permitted = false
+        case .bootstrapping:
+            guard store.client == .codex, record.prior == .absent, var initial = try record.intended.object() else {
+                throw MCPClientOperationCode.recoveryConflict
+            }
+            initial.removeValue(forKey: "environment_id")
+            permitted = try current.entry == record.intended || current.entry == MCPOwnedEntry(initial)
         case .removing: permitted = current.entry == .absent
         case .adding:
-            permitted = try (current.entry == .absent && store.client == .claudeCode) ||
+            let unchangedBootstrap = store.client == .codex && record.bootstrapVersion != nil &&
+                current.version == record.bootstrapVersion && current.entry == record.observed
+            permitted = try unchangedBootstrap || (current.entry == .absent && store.client == .claudeCode) ||
                 matches(current.entry, intended: record.intended, client: store.client)
         case .observed, .restoring: permitted = current.entry == record.observed ||
                 (record.phase == .restoring && store.client == .claudeCode && current.entry == .absent)
@@ -467,20 +471,30 @@ struct MCPClientManager {
                     try await store.command(["mcp", "remove", "--scope", "user", MCPClientRegistration.serverID])
                     awaitingPostimage = false
                 }
-                let before = try await store.read()
+                var before = try await store.read()
                 guard before.file == snapshot.file, before.entry == (client == .claudeCode ? .absent : snapshot.entry) else {
                     throw MCPClientOperationCode.recoveryConflict
                 }
+                if client == .codex && before.version == nil {
+                    // The CLI creates the missing base file. Its add command omits the
+                    // executor, so pin it with a versioned edit of the new entry.
+                    guard before.entry == .absent else { throw MCPClientOperationCode.recoveryConflict }
+                    record.phase = .bootstrapping
+                    try journal.save(record)
+                    try await store.command(add)
+                    before = try await store.read()
+                    guard before.file == record.file, before.version != nil,
+                          before.entry == base || before.entry == intended else { throw MCPClientOperationCode.recoveryConflict }
+                    record.observed = before.entry
+                    record.bootstrapVersion = before.version
+                }
                 record.phase = .adding
                 try journal.save(record)
-                awaitingPostimage = true
                 let acknowledged: String?
-                if client == .codex && before.version != nil {
-                    // An RPC can produce only this key replacement. An unexpected
-                    // value without an acknowledged revision has ambiguous ownership.
-                    awaitingPostimage = false
+                if client == .codex {
                     acknowledged = try await store.replaceCodex(before, with: intended)
                 } else {
+                    awaitingPostimage = true
                     try await store.command(add)
                     acknowledged = nil
                 }

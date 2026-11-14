@@ -18,6 +18,7 @@ struct MCPServiceCheck {
     private static func validTool(_ entry: [String: Any]) -> Bool {
         guard let name = entry["name"] as? String, !name.isEmpty,
               let schema = entry["inputSchema"] as? [String: Any], schema["type"] as? String == "object" else { return false }
+        if let dialect = schema["$schema"], !(dialect is String) { return false }
         if let properties = schema["properties"], !(properties is [String: [String: Any]]) { return false }
         if let required = schema["required"], !(required is [String]) { return false }
         return true

@@ -14,6 +14,8 @@ def valid_tool(tool):
     schema = tool.get("inputSchema")
     if not isinstance(schema, dict) or schema.get("type") != "object":
         return False
+    if "$schema" in schema and not isinstance(schema["$schema"], str):
+        return False
     properties = schema.get("properties", {})
     required = schema.get("required", [])
     return (isinstance(properties, dict) and all(isinstance(item, dict) for item in properties.values())

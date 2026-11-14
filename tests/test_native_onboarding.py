@@ -45,9 +45,19 @@ final class TemporaryPreferences: LanguagePreferences {
 }
 final class TestEntry {
  var entry = MCPOwnedEntry.absent
+ var revision = 0
+ var beforeWrite: () async throws -> Void = {}
  func store(client: MCPClient, path: String, env: [String:String], home: URL, timeout: TimeInterval, runner: @escaping MCPCommandRunner) -> MCPEntryStore {
   MCPEntryStore(client:client,executable:path,environment:env,home:home,timeout:timeout,runner:runner,
-    readOverride:{ MCPUserSnapshot(file:home.appendingPathComponent("fixture").path,entry:self.entry) },preflightOverride:{})
+    readOverride:{ MCPUserSnapshot(file:home.appendingPathComponent("fixture").path,entry:self.entry,
+                                   version:String(self.revision),scope:.user,effectiveEntry:self.entry) },
+    preflightOverride:{},writeOverride:{ snapshot, desired in
+     guard snapshot.version == String(self.revision) else { throw MCPClientOperationCode.versionConflict }
+     try await self.beforeWrite()
+     self.entry = desired
+     self.revision += 1
+     return String(self.revision)
+    })
  }
 }
 actor Gate {
@@ -204,6 +214,7 @@ actor Gate {
    var addFailure = false
    var calledPaths: [String] = []
    let storage = TestEntry()
+   storage.beforeWrite = { if addFailure { throw MCPClientOperationCode.commandFailed } }
    let manager = MCPClientManager(environment: [:], homeDirectory: directory, executableLocator: { _ in executable }, runner: { path, args, _, _, _ in
     calledPaths.append(path)
     if args[1] == "get" {
@@ -211,10 +222,7 @@ actor Gate {
      let response: [String:Any] = ["name":"ios-homescreen-mcp","enabled":true,"transport":["type":"stdio","command":executable,"args":["mcp"],"env":["HOMESCREEN_READ_ONLY":"1"]]]
      return MCPCommandResult(exitStatus:0,stdout:String(decoding:try! JSONSerialization.data(withJSONObject:response),as:UTF8.self))
     }
-    if !addFailure {
-     storage.entry = try! MCPOwnedEntry(["command":executable,"args":["mcp"],"env":["HOMESCREEN_READ_ONLY":"1"]])
-    }
-    return MCPCommandResult(exitStatus:addFailure ? 1 : 0)
+    return MCPCommandResult(exitStatus:1)
    },storeFactory:storage.store)
    let model = MCPSetupModel(manager:manager,enginePath:executable)
    let c = LaunchConsent()
@@ -306,12 +314,9 @@ actor Gate {
    var calls: [[String]] = []
    let gate = Gate()
    let storage = TestEntry()
+   storage.beforeWrite = { await gate.hold() }
    let manager = MCPClientManager(environment: [:], homeDirectory: directory, executableLocator: { _ in executable }, runner: { _, args, _, _, _ in
     calls.append(args)
-    if args[1] == "add" {
-     await gate.hold()
-     storage.entry = try! MCPOwnedEntry(["command":executable,"args":["mcp"],"env":["HOMESCREEN_READ_ONLY":"1"]])
-    }
     if args[1] == "get" {
      let response: [String:Any] = ["name":"ios-homescreen-mcp","enabled":true,"transport":["type":"stdio","command":executable,"args":["mcp"],"env":["HOMESCREEN_READ_ONLY":"1"]]]
      return MCPCommandResult(exitStatus:0,stdout:String(decoding:try! JSONSerialization.data(withJSONObject:response),as:UTF8.self))
@@ -340,7 +345,7 @@ actor Gate {
    await gate.resume()
    await first.value
    while replies == 0 { await Task.yield() }; assert(replies == 1)
-   assert(calls.filter { $0[1] == "add" }.count == 1)
+   assert(storage.revision == 1)
    assert(!model.busy && model.registrations[.codex]?.code == .success)
    assert(model.queries[.codex]?.configuration == .configured && model.queries[.codex]?.connection == .unknown)
    assert(model.checkResult == nil)

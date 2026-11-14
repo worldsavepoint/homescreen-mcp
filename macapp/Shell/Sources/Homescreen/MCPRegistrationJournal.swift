@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 enum MCPRegistrationPhase: String, Codable {
-    case prepared, removing, adding, observed, restoring, restoreRemoved, committed
+    case prepared, bootstrapping, removing, adding, observed, restoring, restoreRemoved, committed
 }
 
 struct MCPRegistrationRecord: Codable {
@@ -14,6 +14,7 @@ struct MCPRegistrationRecord: Codable {
     let intended: MCPOwnedEntry
     var phase: MCPRegistrationPhase = .prepared
     var observed: MCPOwnedEntry?
+    var bootstrapVersion: String?
 }
 
 /// The fixed record and lock names never come from decoded journal data.

@@ -45,6 +45,7 @@ struct MCPEntryStore {
     var cwd: String = FileManager.default.currentDirectoryPath
     var readOverride: (() async throws -> MCPUserSnapshot)? = nil
     var preflightOverride: (() async throws -> Void)? = nil
+    var writeOverride: ((MCPUserSnapshot, MCPOwnedEntry) async throws -> String)? = nil
 
     func command(_ args: [String]) async throws {
         let result = await runner(executable, args, environment, timeout, cwd)
@@ -208,6 +209,7 @@ struct MCPEntryStore {
 
     private func write(_ snapshot: MCPUserSnapshot, _ prior: MCPOwnedEntry) async throws -> String {
         guard let version = snapshot.version else { throw MCPClientOperationCode.recoveryConflict }
+        if let writeOverride { return try await writeOverride(snapshot, prior) }
         let edit: [String: Any] = ["keyPath": "mcp_servers." + MCPClientRegistration.serverID,
                                    "mergeStrategy": "replace", "value": try prior.object() as Any? ?? NSNull()]
         let result = try await rpc("config/batchWrite", ["edits": [edit], "expectedVersion": version, "filePath": snapshot.file])
