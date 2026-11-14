@@ -735,11 +735,6 @@ class Layout:
             "apply_token": self.token(),
         }
 
-    def pin_intents(self) -> set[str]:
-        """Explicit owners and coordinates within each Home Screen page."""
-        return {json.dumps([index, divmod(self.pins[node.id], self.grid.cols), node_structure(node)])
-                for index, page in enumerate(self.pages) for node in page if node.id in self.pins}
-
     def library_structure(self) -> list[Any] | None:
         if self.library is None:
             return None
@@ -747,8 +742,9 @@ class Layout:
 
     def token(self) -> str:
         """Short hash of the exact state that would be written."""
+        pins = [[(node.id, self.pins[node.id]) for node in page if node.id in self.pins] for page in self.pages]
         blob = plistlib.dumps({"state": self.to_state(), "library": self.to_library() or [],
-                               "pins": sorted(self.pin_intents()), "grid": self.grid.to_dict()},
+                               "pins": pins, "grid": self.grid.to_dict()},
                               fmt=plistlib.FMT_BINARY, sort_keys=True)
         return "apply-" + hashlib.sha256(blob).hexdigest()[:10]
 

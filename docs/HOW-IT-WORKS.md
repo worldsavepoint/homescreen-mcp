@@ -20,7 +20,7 @@ Drafts, backups, icon caches, category caches and generated previews live under 
 
 Home Screen Organizer sends the dictionary form: `buttonBar`, `iconLists` and `ignored`. App Library contents are inferred from installed apps, including offloaded apps, minus apps on the Home Screen and hidden/system-only apps. App and folder data and unknown fields are retained as items move.
 
-**Widgets:** configuration is associated with an element ID exported as `userSelectedElementIdentifier`. For a single widget, the engine supplies a missing `uniqueIdentifier` from that element ID. It can recover a missing element ID when the widget’s exported configuration and instance evidence identify one owner. Readback compares exported widget settings and element identifiers.
+**Widgets:** configuration is associated with an element ID exported as `userSelectedElementIdentifier`. For a single widget, the engine supplies a missing `uniqueIdentifier` from that element ID. It can recover a missing element ID when the widget’s exported configuration and instance evidence identify one owner. When several widgets share a configuration, recovery requires an identified instance. Readback compares exported widget settings and element identifiers.
 
 **Web clips:** the engine remembers clips observed in each device’s layout reads and includes off-screen clips in `ignored`. If a new clip appears after a write, the result names it under `hidden_webclips`. Move the clip to the App Library and apply again.
 
@@ -36,7 +36,7 @@ The import preserves existing device values by omitting Today View and page-ID k
 
 iOS stores pinned empty cells in `listMetadata` → `fixedLocations`, keyed by page ID. Dictionary-format reads expose that position data; ordinary USB list reads use the engine's remembered pins. Create the desired spacing by dropping an app on its target empty position in the editor. The engine remembers those pins per device and sends them with the corresponding page IDs.
 
-Pins and remembered gaps retain page ownership, including separate copies of the same app on different pages. Remembered coordinates retain their saved grid; a later Read maps their row and column to the current grid and clears a page's remembered gaps if they no longer fit. Older gap files migrate keys that identify a single item. A list-format writer supports ordinary page order. Use a dictionary-format writer to apply fixed positions. If the saved gap file is unreadable, Read recovers the current layout using ordinary page order.
+Pins and remembered gaps retain page ownership, including separate copies of the same app on different pages. Folders with the same name and contents on one page use their individual device identifiers. A regenerated identifier can be matched by content when the folder is unique on its page. Remembered coordinates retain their saved grid; a later Read maps their row and column to the current grid and clears a page's remembered gaps if they no longer fit. Older gap files migrate keys that identify a single item. A list-format writer supports ordinary page order. Use a dictionary-format writer to apply fixed positions. If the saved gap file is unreadable, Read recovers the current layout using ordinary page order.
 
 On iOS 16, use sequential app order and keep folders after widgets originally read at a page’s start. New fixed positions are rejected with placement guidance. On iOS 17, 18, 26 and 27, the engine uses fixed-position editing. See [version-family layout modes](COMPATIBILITY.md).
 

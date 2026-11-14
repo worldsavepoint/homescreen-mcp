@@ -17,7 +17,7 @@ import json
 import os
 import uuid
 import plistlib
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
@@ -50,32 +50,42 @@ def _exclusive_file(path: Path, data: bytes) -> None:
     _sync_directory(path.parent)
 
 
-def _private_replace(path: Path, data: bytes) -> None:
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    previous = temporary.with_suffix(".previous")
+@contextmanager
+def _previous_file(path: Path):
+    """Keep the old inode until all updates in the transaction succeed."""
+    previous = path.with_name(f".{path.name}.{uuid.uuid4().hex}.previous")
     linked = False
     try:
-        _exclusive_file(temporary, data)
-        try:
-            os.link(path, previous, follow_symlinks=False)
-            linked = True
-        except FileNotFoundError:
-            pass
-        os.replace(temporary, path)
-        try:
-            _sync_directory(path.parent)
-        except OSError:
-            # The rename is visible even if its directory sync fails.
-            if linked:
-                os.replace(previous, path)
-            else:
-                path.unlink()
-            _sync_directory(path.parent)
-            raise
-    finally:
-        temporary.unlink(missing_ok=True)
+        os.link(path, previous, follow_symlinks=False)
+        linked = True
+    except FileNotFoundError:
+        pass
+    try:
+        yield
+    except BaseException:
         if linked:
-            previous.unlink(missing_ok=True)
+            os.replace(previous, path)
+        else:
+            path.unlink(missing_ok=True)
+        _sync_directory(path.parent)
+        raise
+    finally:
+        if linked:
+            # Removing a private rollback link is housekeeping after the commit.
+            with suppress(OSError):
+                previous.unlink(missing_ok=True)
+
+
+def _private_replace(path: Path, data: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        _exclusive_file(temporary, data)
+        with _previous_file(path):
+            os.replace(temporary, path)
+            _sync_directory(path.parent)
+    finally:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
 
 
 def _stamp() -> str:
@@ -124,10 +134,24 @@ def memory_key(node: Node) -> str | None:
     return pin_key(node)
 
 
+def _memory_keys(nodes: list[Node], saved: dict[str, Any] | None = None) -> dict[str, str | None]:
+    keys = {node.id: memory_key(node) for node in nodes}
+    counts = Counter(keys.values())
+    for node in nodes:
+        key = keys[node.id]
+        if node.kind == "folder" and pin_key(node):
+            instance = "folder-instance:" + json.dumps([key, pin_key(node)], separators=(",", ":"))
+            if counts[key] > 1 or (saved is not None and instance in saved):
+                keys[node.id] = instance
+    return keys
+
+
 def memory_pins(lay: Layout) -> dict[str, Any]:
-    return {"version": 2, "grid": lay.grid.to_dict(),
-            "pages": [{key: lay.pins[node.id] for node in page
-                       if node.id in lay.pins and (key := memory_key(node))} for page in lay.pages]}
+    pages = []
+    for page in lay.pages:
+        keys = _memory_keys(page)
+        pages.append({keys[n.id]: lay.pins[n.id] for n in page if n.id in lay.pins and keys[n.id]})
+    return {"version": 2, "grid": lay.grid.to_dict(), "pages": pages}
 
 
 def pins_by_page(lay: Layout) -> list[dict[str, int]]:
@@ -187,18 +211,19 @@ def node_pins(lay: Layout, keyed: dict[str, Any] | list[dict[str, int]], by_memo
     if strict and scoped and any(keyed[len(lay.pages):]):
         raise LayoutError("pin identifiers do not match the layout's page items")
     wanted: dict[str, int] = {}
-    key_for = memory_key if by_memory else pin_key
     global_nodes = [n for page in lay.pages for n in page]
     matched_global = set()
     for index, page in enumerate(lay.pages):
         values = (keyed[index] if index < len(keyed) else {}) if scoped else keyed
         candidates = page if scoped else global_nodes
-        identities = Counter(key_for(n) for n in candidates)
+        keys = _memory_keys(candidates, values) if by_memory and scoped else {
+            n.id: (memory_key(n) if by_memory else pin_key(n)) for n in candidates}
+        identities = Counter(keys.values())
         names = Counter(n.name for n in candidates if n.kind == "folder")
         matched = set()
         invalid = False
         for n in page:
-            key = key_for(n)
+            key = keys[n.id]
             if by_memory:
                 # Older global files used child model IDs or just a folder name. An
                 # enumeration can change on reorder, so require a unique folder name.
@@ -207,7 +232,7 @@ def node_pins(lay: Layout, keyed: dict[str, Any] | list[dict[str, int]], by_memo
                         [n.name, [[child.id for child in p] for p in n.children]], separators=(",", ":"))
                     key = legacy if legacy in values else f"folder:{n.name}"
             if key and key in values:
-                if identities[key_for(n)] != 1:
+                if identities[keys[n.id]] != 1:
                     if strict:
                         raise LayoutError("ambiguous pin identifier on a layout page")
                     continue
@@ -243,6 +268,27 @@ def node_pins(lay: Layout, keyed: dict[str, Any] | list[dict[str, int]], by_memo
             for n in page:
                 wanted.pop(n.id, None)
     return wanted
+
+
+def _retains_pins(requested: Layout, observed: Layout) -> bool:
+    for index, page in enumerate(requested.pages):
+        for owner in page:
+            if owner.id not in requested.pins:
+                continue
+            cell = requested.pins[owner.id]
+            others = observed.pages[index] if index < len(observed.pages) else []
+            shape = node_structure(owner)
+            matches = [node for node in others if node_structure(node) == shape]
+            if owner.kind == "folder":
+                wire = pin_key(owner)
+                same_wire = [node for node in others if wire and pin_key(node) == wire]
+                if same_wire:
+                    matches = [node for node in same_wire if node_structure(node) == shape]
+                elif sum(node_structure(node) == shape for node in page) != 1:
+                    return False
+            if len(matches) != 1 or observed.pins.get(matches[0].id) != cell:
+                return False
+    return True
 
 
 def placed_structure(state: list[Any], library: list[Any] | None,
@@ -332,8 +378,9 @@ class Session:
 
     def _clear_pending(self) -> None:
         if self._pending_path.exists():
-            self._pending_path.unlink()
-            _sync_directory(self.dir)
+            with _previous_file(self._pending_path):
+                self._pending_path.unlink()
+                _sync_directory(self.dir)
 
     async def _assert_identity(self) -> None:
         info = await asyncio.wait_for(self.source.info(), OPERATION_TIMEOUT)
@@ -517,27 +564,47 @@ class Session:
             config["uniqueIdentifier"] = wire
         return hashlib.sha256(bytes.fromhex(widget_configuration(config))).hexdigest()
 
-    def _widget_memory(self) -> dict[str, str | None]:
+    def _widget_memory(self) -> tuple[dict[str, str | None], dict[str, str | None]]:
         path = self._widget_ids_path
         if path.exists():
             stored = json.loads(path.read_text())
-            if isinstance(stored, dict) and stored.get("version") == 2 and isinstance(stored.get("instances"), dict):
-                return stored["instances"]
-        return {}  # Older display-only keys carried no instance or configuration evidence.
+            if isinstance(stored, dict) and isinstance(stored.get("instances"), dict):
+                if stored.get("version") == 3 and isinstance(stored.get("owners"), dict):
+                    return stored["instances"], stored["owners"]
+                if stored.get("version") == 2:
+                    # Old wire+configuration keys remain usable. Configuration-only entries
+                    # gain owner evidence once the element is actually observed again.
+                    return stored["instances"], {}
+        return {}, {}
 
     def _remember_widget_ids(self, state: list[Any]) -> None:
-        known = self._widget_memory()
-        for widget in _widgets(state):
-            element = widget.get("userSelectedElementIdentifier")
-            if not widget.get("displayIdentifier") or not isinstance(element, str) or not element:
+        known, owners = self._widget_memory()
+        widgets = _widgets(state)
+        counts = Counter(self._widget_key(widget) for widget in widgets)
+        for widget in widgets:
+            if not widget.get("displayIdentifier"):
                 continue
-            for key in {self._widget_key(widget), self._widget_key(widget, widget.get("uniqueIdentifier"))}:
-                known[key] = element if known.get(key, element) == element else None
-        if known:
-            _private_replace(self._widget_ids_path, json.dumps({"version": 2, "instances": known}).encode())
+            element = widget.get("userSelectedElementIdentifier")
+            wire = widget.get("uniqueIdentifier")
+            config = self._widget_key(widget)
+            owner = wire or element
+            if counts[config] > 1:
+                owners[config] = None
+            elif owner:
+                # A wire-only observation cannot identify the owner of a legacy element.
+                if config not in owners and config in known and not element:
+                    owners[config] = None
+                else:
+                    owners[config] = owner if owners.get(config, owner) == owner else None
+            if isinstance(element, str) and element:
+                for key in {config, self._widget_key(widget, wire)}:
+                    known[key] = element if known.get(key, element) == element else None
+        if known or owners:
+            _private_replace(self._widget_ids_path, json.dumps(
+                {"version": 3, "instances": known, "owners": owners}).encode())
 
     def _recover_widget_ids(self, widgets: list[dict[str, Any]]) -> None:
-        known = self._widget_memory()
+        known, owners = self._widget_memory()
         keys = [self._widget_key(widget, widget.get("uniqueIdentifier")) for widget in widgets]
         configs = Counter(self._widget_key(widget) for widget in widgets)
         counts = Counter(keys)
@@ -549,14 +616,14 @@ class Session:
             wire = widget.get("uniqueIdentifier")
             if widget.get("userSelectedElementIdentifier") or counts[key] != 1:
                 continue
-            if not wire and configs[key] != 1:
+            if not wire and (configs[key] != 1 or not owners.get(key)):
                 continue
             element = known.get(key)
             if element and claimed[element] == int(wire == element):
                 candidates.append((widget, element))
-        owners = Counter(element for _, element in candidates)
+        selected = Counter(element for _, element in candidates)
         for widget, element in candidates:
-            if owners[element] == 1:
+            if selected[element] == 1:
                 widget["userSelectedElementIdentifier"] = element
 
     def _prepare_widget_pins(self, lay: Layout) -> None:
@@ -685,9 +752,12 @@ class Session:
             reported = getattr(self.source, "pins", None)
             self._observed_placement = copy.deepcopy(reported)
             self._undo, self._redo = [], []
-            self._save_draft()
             if clear_pending:
-                self._clear_pending()
+                with _previous_file(self.draft_path):
+                    self._save_draft()
+                    self._clear_pending()
+            else:
+                self._save_draft()
         except BaseException:
             self.device_id, self.info, self.grid, self.layout, self._undo, self._redo, self._observed_placement = previous
             raise
@@ -758,7 +828,8 @@ class Session:
                 raise LayoutError("the phone's exported gaps changed since it was read; read again and redo the edits")
         elif expected is not None and baseline_pins is not None:
             # Legacy drafts only recorded resolved pins, without export availability.
-            if baseline_layout.pin_intents() != self.require().original().pin_intents():
+            original = self.require().original()
+            if len(original.pins) != len(baseline_layout.pins) or not _retains_pins(original, baseline_layout):
                 raise LayoutError("the phone's exported gaps changed since it was read; read again and redo the edits")
         saved, saved_pins = self._prepared_layout(self._layout_from(current, current_lib))
         target = copy.deepcopy(target)
@@ -803,7 +874,7 @@ class Session:
             else:
                 observed = Layout(after, library=after_lib, grid=self.grid)
                 node_pins(observed, got_pins, strict=True)
-                if not requested.pin_intents() <= observed.pin_intents():
+                if not _retains_pins(requested, observed):
                     raise LayoutError("readback did not retain every requested fixed position")
             ok = (placed_structure(after, after_lib if lib_known else None, got_pins, self.grid,
                                    by_memory=unreported)

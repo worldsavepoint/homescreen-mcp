@@ -185,3 +185,73 @@ def test_failed_recovery_read_preserves_legacy_draft_until_pending_record_is_rea
     session._pending_path.write_text(json.dumps({"device_id": "synthetic", "status": "pending"}))
     run(session.read())
     assert apply(session)["status"] == "verified"
+
+
+@pytest.mark.parametrize("failure", ["unlink", "directory-sync"])
+def test_failed_recovery_preserves_legacy_draft_and_pending_bytes(tmp_path, monkeypatch, failure):
+    session, source = folder_session(tmp_path)
+    backup = session._backup(session.require().to_state(), [], "synthetic")
+    session.edit(lambda lay: lay.pin("folder:1", 1, 34))
+    blob = plistlib.loads(session.draft_path.read_bytes())
+    del blob["identity"], blob["source_identity"]
+    original = plistlib.dumps(blob)
+    session.draft_path.write_bytes(original)
+    session = Session(source, session.dir)
+    marker = session._pending_path
+    pending = b'{"device_id": "synthetic", "status": "pending"}\n'
+    marker.write_bytes(pending)
+    unlink, sync = Path.unlink, session_module._sync_directory
+
+    def fail_unlink(path, *args, **kwargs):
+        if path == marker and failure == "unlink":
+            raise fault()
+        return unlink(path, *args, **kwargs)
+
+    def fail_sync(path):
+        if path == marker.parent and not marker.exists() and failure == "directory-sync":
+            raise fault()
+        return sync(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", fail_unlink)
+        patch.setattr(session_module, "_sync_directory", fail_sync)
+        with pytest.raises(OSError):
+            run(session.read())
+    assert session.draft_path.read_bytes() == original and marker.read_bytes() == pending
+    for using in (session, Session(source, session.dir)):
+        with pytest.raises(LayoutError, match="identity.*read"):
+            using.require()
+        with pytest.raises(LayoutError, match="pending|identity"):
+            run(using.restore(backup.name))
+    assert source.payloads == [] and session.backups() == [backup.name]
+    run(session.read())
+    assert not marker.exists() and run(session.restore(backup.name))["status"] == "verified"
+
+
+@pytest.mark.parametrize("action", ["edit", "undo", "redo"])
+def test_committed_history_survives_previous_link_cleanup_failure(tmp_path, monkeypatch, action):
+    source = FrameSource()
+    session = Session(source, tmp_path / "data")
+    run(session.read())
+    session.edit(lambda lay: lay.pin("example.a", 1, 1))
+    session.edit(lambda lay: lay.pin("example.a", 1, 2))
+    session.undo()
+    unlink = Path.unlink
+    failed = []
+
+    def fail(path, *args, **kwargs):
+        if path.name.startswith(".draft.plist.") and path.suffix == ".previous":
+            failed.append(path)
+            raise OSError(errno.EIO, "synthetic cleanup failure")
+        return unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", fail)
+        if action == "edit":
+            session.edit(lambda lay: lay.pin("example.a", 1, 9))
+        else:
+            assert getattr(session, action)()
+    assert failed
+    expected = {} if action == "undo" else {"example.a": 9 if action == "edit" else 2}
+    assert session.require().pins == Session(source, session.dir).require().pins == expected
+    assert session.history() == ({"undo": 0, "redo": 2} if action == "undo" else {"undo": 2, "redo": 0})

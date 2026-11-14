@@ -273,3 +273,148 @@ def test_legacy_missing_observation_compares_available_source_intent(tmp_path, c
     else:
         source.raw["listMetadata"] = {}
         assert apply(session)["status"] == "verified"
+
+
+def paired_folders(tmp_path, same_content=True):
+    from fake_phone import folder
+
+    a = app("example.a", "A")
+    b = a if same_content else app("example.b", "B")
+    return observed_session(tmp_path, [[{**folder("Tools", [a]), "uniqueIdentifier": "alpha"},
+                                        {**folder("Tools", [b]), "uniqueIdentifier": "beta"}]])
+
+
+def test_approval_tracks_which_identical_folder_owns_the_pin(tmp_path):
+    session, source = paired_folders(tmp_path)
+    session.edit(lambda lay: lay.pin("folder:alpha", 1, 0))
+    token = session.require().token()
+    session.edit(lambda lay: (lay.unpin("folder:alpha"), lay.pin("folder:beta", 1, 0)))
+    with pytest.raises(LayoutError, match="token"):
+        run(session.apply(token))
+    assert not source.payloads and not session.backups()
+    assert apply(session)["status"] == "verified"
+
+
+@pytest.mark.parametrize("returned,distinct", [("alpha", False), ("beta", False), ("regenerated", False),
+                                               ("regenerated", True)])
+def test_reported_pin_verifies_the_folder_owner(tmp_path, returned, distinct):
+    session, source = paired_folders(tmp_path, same_content=not distinct)
+    session.edit(lambda lay: lay.pin("folder:alpha", 1, 0))
+    before = reviewed(session)
+
+    def report(raw):
+        if returned == "regenerated":
+            for item in raw["iconLists"][0]:
+                item["uniqueIdentifier"] += "-new"
+        page_id = raw["listUniqueIdentifiers"][0]
+        raw["listMetadata"][page_id]["fixedLocations"] = {
+            "alpha-new" if returned == "regenerated" else returned: 0}
+
+    change_read(source, 3, report)
+    matched = returned == "alpha" or distinct
+    assert apply(session)["status"] == ("verified" if matched else "unknown")
+    assert session._pending_path.exists() != matched
+    if not matched:
+        assert reviewed(session) == before
+
+
+@pytest.mark.parametrize("survivor,wire,pin", [
+    ("b", False, False), ("b", False, True), ("b", True, False), ("a", True, False), ("a", True, True)])
+def test_widget_history_remembers_siblings_without_selected_elements(tmp_path, survivor, wire, pin):
+    first = {"displayIdentifier": "weather", "gridSize": "small", "configuration": b"same",
+             "uniqueIdentifier": "wire-a", "userSelectedElementIdentifier": "chosen-a"}
+    second = {**first, "uniqueIdentifier": "wire-b"}
+    del second["userSelectedElementIdentifier"]
+    session, source = observed_session(tmp_path, [[first], [second]])
+    current = source.raw["iconLists"][0 if survivor == "a" else 1][0]
+    current.pop("userSelectedElementIdentifier", None)
+    if not wire:
+        del current["uniqueIdentifier"]
+    source.raw["iconLists"] = [[current]]
+    run(session.read())
+    session = Session(source, session.dir)
+    if pin:
+        action = lambda: session.edit(lambda lay: lay.pin(lay.pages[0][0].id, 1, 0))
+        if not wire:
+            with pytest.raises(LayoutError, match="wire identifier"):
+                action()
+        else:
+            action()
+    assert apply(session)["status"] == "verified"
+    written = source.payloads[0]["iconLists"][0][0]
+    assert written.get("userSelectedElementIdentifier") == ("chosen-a" if survivor == "a" else None)
+
+
+@pytest.mark.parametrize("normalized", [False, True])
+def test_equal_folder_owners_in_unreported_memory(tmp_path, normalized):
+    session, source = paired_folders(tmp_path)
+    source.reported = False
+    run(session.read())
+    session.edit(lambda lay: lay.pin("folder:alpha", 1, 5))
+    session.edit(lambda lay: lay.pin("folder:beta", 1, 10))
+    if normalized:
+        def regenerate(raw):
+            for node in raw["iconLists"][0]:
+                node["uniqueIdentifier"] += "-new"
+        change_read(source, 3, regenerate)
+    result = apply(session)
+    if normalized:
+        assert result["status"] == "unknown" and session._pending_path.exists()
+    else:
+        assert result["status"] == "verified"
+        session = Session(source, session.dir)
+        source.raw["iconLists"][0].reverse()
+        run(session.read())
+        assert session.require().pins == {"folder:alpha": 5, "folder:beta": 10}
+        assert apply(session)["status"] == "verified"
+
+
+def test_widget_history_remembers_separate_wire_owners_across_reads(tmp_path):
+    first = {"displayIdentifier": "weather", "gridSize": "small", "uniqueIdentifier": "wire-a",
+             "userSelectedElementIdentifier": "chosen-a"}
+    session, source = observed_session(tmp_path, [[first]])
+    current = source.raw["iconLists"][0][0]
+    del current["userSelectedElementIdentifier"]
+    current["uniqueIdentifier"] = "wire-b"
+    run(session.read())
+    del current["uniqueIdentifier"]
+    run(session.read())
+    assert apply(session)["status"] == "verified"
+    assert "userSelectedElementIdentifier" not in source.payloads[-1]["iconLists"][0][0]
+
+
+def test_folder_memory_keeps_known_owner_after_sibling_disappears(tmp_path):
+    session, source = paired_folders(tmp_path)
+    source.reported = False
+    run(session.read())
+    session.edit(lambda lay: lay.pin("folder:alpha", 1, 5))
+    assert apply(session)["status"] == "verified"
+    source.raw["iconLists"][0].pop()
+    run(session.read())
+    assert session.require().pins == {"folder:alpha": 5}
+
+
+@pytest.mark.parametrize("wire", [False, True])
+def test_older_widget_cache_only_recovers_confirmed_wire(tmp_path, wire):
+    item = {"displayIdentifier": "weather", "gridSize": "small", "uniqueIdentifier": "wire-a"}
+    session, source = observed_session(tmp_path, [[item]])
+    key = Session._widget_key(item)
+    wire_key = Session._widget_key(item, "wire-a")
+    session._widget_ids_path.write_text(json.dumps({"version": 2, "instances": {key: "chosen", wire_key: "chosen"}}))
+    if not wire:
+        del source.raw["iconLists"][0][0]["uniqueIdentifier"]
+    run(session.read())
+    assert apply(session)["status"] == "verified"
+    assert source.payloads[0]["iconLists"][0][0].get("userSelectedElementIdentifier") == ("chosen" if wire else None)
+
+
+def test_legacy_wire_observation_does_not_prove_a_config_only_element(tmp_path):
+    item = {"displayIdentifier": "weather", "gridSize": "small", "uniqueIdentifier": "wire-b"}
+    session, source = observed_session(tmp_path, [[item]])
+    session._widget_ids_path.write_text(json.dumps({"version": 2, "instances": {
+        Session._widget_key(item): "chosen-a", Session._widget_key(item, "wire-a"): "chosen-a"}}))
+    run(session.read())
+    del source.raw["iconLists"][0][0]["uniqueIdentifier"]
+    run(session.read())
+    assert apply(session)["status"] == "verified"
+    assert "userSelectedElementIdentifier" not in source.payloads[0]["iconLists"][0][0]
