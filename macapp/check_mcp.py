@@ -2,10 +2,13 @@
 import argparse
 import json
 import os
+from pathlib import Path
+import plistlib
 import selectors
 import subprocess
 import tempfile
 import time
+import tomllib
 
 
 def valid_tool(tool):
@@ -24,7 +27,10 @@ def valid_tool(tool):
 
 def check(command, timeout):
     with tempfile.TemporaryDirectory(prefix="home-screen-mcp-check-") as data:
-        environment = {**os.environ, "HOMESCREEN_READ_ONLY": "1", "HOMESCREEN_DATA": data}
+        fixture = Path(data) / "layout.plist"
+        fixture.write_bytes(plistlib.dumps([]))
+        environment = {**os.environ, "HOMESCREEN_READ_ONLY": "1", "HOMESCREEN_DATA": data,
+                       "HOMESCREEN_FIXTURE": str(fixture)}
         environment.pop("HOMESCREEN_ALLOW_APPLY", None)
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    env=environment)
@@ -86,7 +92,6 @@ def check(command, timeout):
             tools = {tool["name"] for tool in descriptors}
             if not {"read_phone", "show_layout", "move", "diff"} <= tools:
                 raise ValueError("Required MCP tools are missing")
-            print("ios-homescreen-mcp initialized; required tools discovered")
             return result["serverInfo"]["version"]
         finally:
             selector.close()
@@ -110,7 +115,11 @@ def main():
     if not command or args.timeout <= 0:
         parser.error("Supply a server command and a positive timeout")
     try:
-        check(command, args.timeout)
+        with (Path(__file__).resolve().parents[1] / "pyproject.toml").open("rb") as project:
+            expected_version = tomllib.load(project)["project"]["version"]
+        if check(command, args.timeout) != expected_version:
+            raise ValueError("Packaged MCP version differs from the project release")
+        print(f"ios-homescreen-mcp {expected_version} initialized and listed the required tools")
     except (OSError, ValueError, KeyError, TypeError) as exc:
         parser.exit(1, f"{exc}\n")
 

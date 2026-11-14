@@ -12,9 +12,9 @@ Screen Organizer exposes a local **stdio MCP server** for inspecting layouts, ed
 | [Source installation](../macapp/BUILDING.md#source-installation) | `/absolute/path/ios-homescreen-organizer/.venv/bin/home-screen-mcp` | None |
 | Standalone MCPB | Client-managed `server/launch.sh` | Managed by the bundle manifest |
 
-Open **MCP Setup** in the app after accepting the launch agreement. The client panel detects Codex and Claude Code and can register, inspect, update or remove this server. If a client executable is missing, install it using its official guide or choose its executable in the panel. New registrations use **read-only** mode and the existing **stdio** engine.
+Open **MCP Setup** in the app after accepting the launch agreement. The client panel detects Codex and Claude Code and can register, inspect and update this server. If a client executable is missing, install it using its official guide or choose its executable in the panel. New registrations use **read-only** mode and the existing **stdio** engine.
 
-**Advanced settings** show the current engine path and access mode and export a launch command, Cursor / Claude JSON, Codex TOML or VS Code / Copilot JSON. Exports use the selected mode; Apply-enabled mode sets both `HOMESCREEN_READ_ONLY=0` and `HOMESCREEN_ALLOW_APPLY=1`. Configuration status records a saved registration; the separate startup check initializes and discovers tools; live connection status comes from client-reported state. A successful registration or startup check alone does not confirm a live client connection.
+**Advanced settings** show the current engine path and access mode and copy a launch command, Cursor / Claude JSON, Codex TOML, VS Code JSON or Copilot JSON. Exports use the selected mode; Apply-enabled mode sets both `HOMESCREEN_READ_ONLY=0` and `HOMESCREEN_ALLOW_APPLY=1`. Configuration status records a saved registration; the separate startup check initializes and discovers tools; live connection status comes from client-reported state.
 
 Use an absolute executable path in client settings. After upgrading from the old app name or moving the app, select **Update** in the client panel or replace the old engine path with `/Applications/Screen Organizer.app/Contents/Resources/engine/engine`. The package name, commands, server ID, Registry namespace and saved-data location stay compatible. **Device → MCP** also offers read-only configuration shortcuts. Any local stdio MCP client can use the settings below; consult its official configuration guide for its destination.
 
@@ -54,6 +54,7 @@ Or add this to `~/.codex/config.toml`:
 [mcp_servers.ios-homescreen-mcp]
 command = "/Applications/Screen Organizer.app/Contents/Resources/engine/engine"
 args = ["mcp"]
+environment_id = "local"
 
 [mcp_servers.ios-homescreen-mcp.env]
 HOMESCREEN_READ_ONLY = "1"
@@ -98,7 +99,22 @@ For a source install, replace `command` with the absolute `.venv/bin/home-screen
 <details>
 <summary><strong>VS Code / Copilot — native MCP configuration</strong></summary>
 
-For personal use, add the following to `~/.copilot/mcp-config.json`. If `COPILOT_HOME` is set, use `$COPILOT_HOME/mcp-config.json`. A workspace can instead use `.mcp.json` at its root.
+For VS Code workspace settings, add the server to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "ios-homescreen-mcp": {
+      "type": "stdio",
+      "command": "/Applications/Screen Organizer.app/Contents/Resources/engine/engine",
+      "args": ["mcp"],
+      "env": { "HOMESCREEN_READ_ONLY": "1" }
+    }
+  }
+}
+```
+
+For personal Copilot settings, add the following to `~/.copilot/mcp-config.json`. If `COPILOT_HOME` is set, use `$COPILOT_HOME/mcp-config.json`. A workspace can instead use `.mcp.json` at its root.
 
 ```json
 {

@@ -185,7 +185,7 @@ a native Intel Mac. Use a fresh virtual environment for each release build.
 
 ## Signing and build outputs
 
-The build script applies **ad-hoc signing** (`codesign --sign -`) to the app and
+The build script strips the Swift executable’s debug symbols and applies **ad-hoc signing** (`codesign --sign -`) to the app and
 native engine. The standalone MCPB preserves the native signatures and is unsigned
 as an outer archive. Release checksums cover the complete downloaded files.
 
@@ -196,15 +196,14 @@ or `x86_64`. Install and launch the resulting app as a separate step. After repl
 
 ## Release archives
 
-After `macapp/build.sh`, assemble the distributable files:
+The build stages the native DMG, ZIP and checksum manifest in `build/release/<arch>`. It checks the ZIP members, nested archives and frozen Python modules for local build paths. Verify the resulting files:
 
 ```sh
-python3.12 macapp/release.py package --arch "$(uname -m)"
 cd "build/release/$(uname -m)"
 shasum -a 256 --check SHA256SUMS.txt
 ```
 
-The package command checks the bundle version and architecture, preserves executable
+To recreate the archives from a completed build, run `python3.12 macapp/release.py package --arch "$(uname -m)"`. The package command checks the bundle version and architecture, preserves executable
 permissions in the ZIP, and produces the following in `build/release/<arch>/`:
 
 - `home-screen-organizer-<version>-macos-<arch>.dmg`
@@ -267,8 +266,7 @@ ditto -x -k release/home-screen-organizer-<version>-macos.mcpb extracted-mcpb
 python3.12 macapp/check_mcp.py -- /bin/sh "$PWD/extracted-mcpb/server/launch.sh"
 ```
 
-The check initializes the server and lists tools with a startup deadline and a
-fresh temporary read-only data directory, then terminates the server.
+The check initializes the server, compares its version with the project version, and lists tools using a temporary layout fixture, read-only data directory and startup deadline. It then terminates the server.
 
 ## Automatic releases
 

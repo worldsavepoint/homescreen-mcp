@@ -12,9 +12,9 @@ Screen Organizer（屏幕整理）提供本地 <strong>stdio MCP 服务器</stro
 | [源码安装](../macapp/BUILDING.md#source-installation) | `/absolute/path/ios-homescreen-organizer/.venv/bin/home-screen-mcp` | 无 |
 | 独立 MCPB | 客户端管理的 `server/launch.sh` | 由清单管理 |
 
-同意启动协议后，打开 App 的<strong>MCP 配置</strong>。客户端面板检测 Codex 和 Claude Code，可注册、检查、更新或移除此服务器。未找到客户端时，请按官方指南安装或在面板中选择可执行文件。新注册采用<strong>只读</strong>模式与现有的 <strong>stdio</strong> 引擎。
+同意启动协议后，打开 App 的<strong>MCP 配置</strong>。客户端面板检测 Codex 和 Claude Code，可注册、检查和更新此服务器。未找到客户端时，请按官方指南安装或在面板中选择可执行文件。新注册采用<strong>只读</strong>模式与现有的 <strong>stdio</strong> 引擎。
 
-<strong>高级设置</strong>显示当前引擎路径与访问模式，并导出启动命令、Cursor / Claude JSON、Codex TOML 或 VS Code / Copilot JSON。导出内容采用所选模式；启用应用时设置 `HOMESCREEN_READ_ONLY=0` 与 `HOMESCREEN_ALLOW_APPLY=1`。配置状态表示已保存的注册；独立启动检查执行初始化与工具发现；实时连接状态来自客户端报告。注册或启动检查成功本身不代表客户端已实时连接。
+<strong>高级设置</strong>显示当前引擎路径与访问模式，可复制启动命令、Cursor / Claude JSON、Codex TOML、VS Code JSON 或 Copilot JSON。导出内容采用所选模式；启用应用时设置 `HOMESCREEN_READ_ONLY=0` 与 `HOMESCREEN_ALLOW_APPLY=1`。配置状态表示已保存的注册；独立启动检查执行初始化与工具发现；实时连接状态来自客户端报告。
 
 客户端设置采用绝对路径。从旧 App 名称升级或移动 App 后，请在客户端面板选择<strong>更新</strong>，或将旧引擎路径改为 `/Applications/Screen Organizer.app/Contents/Resources/engine/engine`。包名、命令、服务器 ID、Registry 命名空间与数据目录保持兼容。<strong>设备 → MCP</strong>还提供只读配置快捷菜单。任何本地 stdio MCP 客户端都可采用下述设置；具体配置位置请参阅其官方指南。
 
@@ -54,6 +54,7 @@ codex mcp add ios-homescreen-mcp --env HOMESCREEN_READ_ONLY=1 -- \
 [mcp_servers.ios-homescreen-mcp]
 command = "/Applications/Screen Organizer.app/Contents/Resources/engine/engine"
 args = ["mcp"]
+environment_id = "local"
 
 [mcp_servers.ios-homescreen-mcp.env]
 HOMESCREEN_READ_ONLY = "1"
@@ -98,7 +99,22 @@ claude mcp add --env HOMESCREEN_READ_ONLY=1 --transport stdio ios-homescreen-mcp
 <details>
 <summary><strong>VS Code / Copilot — 原生 MCP 配置</strong></summary>
 
-个人配置使用 `~/.copilot/mcp-config.json`；若已设置 `COPILOT_HOME`，使用 `$COPILOT_HOME/mcp-config.json`。工作区也可采用根目录中的 `.mcp.json`。
+在 VS Code 工作区的 `.vscode/mcp.json` 中添加服务器：
+
+```json
+{
+  "servers": {
+    "ios-homescreen-mcp": {
+      "type": "stdio",
+      "command": "/Applications/Screen Organizer.app/Contents/Resources/engine/engine",
+      "args": ["mcp"],
+      "env": { "HOMESCREEN_READ_ONLY": "1" }
+    }
+  }
+}
+```
+
+Copilot 个人配置使用 `~/.copilot/mcp-config.json`；若已设置 `COPILOT_HOME`，使用 `$COPILOT_HOME/mcp-config.json`。工作区也可采用根目录中的 `.mcp.json`。
 
 ```json
 {

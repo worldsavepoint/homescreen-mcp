@@ -1,8 +1,12 @@
-# PyInstaller spec for the engine inside Home Screen Organizer.app (onedir, so it starts fast).
+# PyInstaller spec for the engine inside Screen Organizer.app (onedir, so it starts fast).
+import importlib
 import os
 import platform
+import sys
+import sysconfig
 from importlib.metadata import distribution
 
+from PyInstaller.config import CONF
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 datas, binaries, hidden = [], [], []
@@ -19,6 +23,12 @@ datas += collect_data_files("homescreen")  # web assets and simulator icon reade
 a = Analysis(["engine.py"], pathex=[".."], binaries=binaries, datas=datas, hiddenimports=hidden + [
     "homescreen.ui", "homescreen.server", "homescreen.cli", "homescreen.preview"],
     excludes=["tkinter", "pytest", "IPython"])
+sys.path.insert(0, SPECPATH)
+from frozen_engine import project_metadata, replace_sysconfig
+
+module = sysconfig._get_sysconfigdata_name()
+replace_sysconfig(a.pure, CONF["code_cache"].get(id(a.pure)), workpath, module,
+                  importlib.import_module(module).build_time_vars, sys.base_prefix)
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="engine", console=True, target_arch=os.environ.get("HOMESCREEN_BUILD_ARCH", platform.machine()))
-coll = COLLECT(exe, a.binaries, a.datas, name="engine")
+coll = COLLECT(exe, a.binaries, project_metadata(a.datas, str(metadata)), name="engine")

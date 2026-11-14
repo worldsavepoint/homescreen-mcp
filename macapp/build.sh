@@ -53,6 +53,7 @@ echo "• app bundle"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$SHELL_BIN" "$APP/Contents/MacOS/HomeScreenOrganizer"
+/usr/bin/strip -S "$APP/Contents/MacOS/HomeScreenOrganizer"
 cp -R "$BUILD/dist/engine" "$APP/Contents/Resources/engine"
 "$VENV/bin/python" -c 'import importlib.metadata as m; print("\n".join(sorted(d.metadata["Name"] + "==" + d.version for d in m.distributions())))' \
   > "$APP/Contents/Resources/dependencies.txt"
@@ -103,3 +104,8 @@ cp -R "$APP" "$STAGE/" && ln -s /Applications "$STAGE/Applications"
 hdiutil create -quiet -volname "Screen Organizer" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 rm -rf "$STAGE"
 echo "built $APP ($(du -sh "$APP" | cut -f1)) and $DMG ($(du -sh "$DMG" | cut -f1))"
+
+echo "• release archives"
+"$VENV/bin/python" "$ROOT/macapp/release.py" package --arch "$ARCH"
+"$VENV/bin/python" "$ROOT/macapp/check_package_paths.py" \
+  "$ROOT/build/release/$ARCH/home-screen-organizer-$VERSION-macos-$ARCH.zip" "$ROOT" "$BUILD" "$VENV"

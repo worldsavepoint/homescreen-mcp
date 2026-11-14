@@ -10,6 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "macapp/check_mcp.py"
+VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
 
 
 def check(tmp_path, behavior="ok"):
@@ -19,6 +20,7 @@ def check(tmp_path, behavior="ok"):
 from pathlib import Path
 Path(sys.argv[1]).write_text(str(os.getpid()))
 behavior = sys.argv[2]
+release = sys.argv[3]
 assert os.environ["HOMESCREEN_READ_ONLY"] == "1"
 assert Path(os.environ["HOMESCREEN_DATA"]).is_dir()
 for line in sys.stdin:
@@ -30,7 +32,7 @@ for line in sys.stdin:
             time.sleep(30)
         if behavior == "eof":
             sys.exit(0)
-        info = {"name": "wrong" if behavior == "name" else "ios-homescreen-mcp", "version": "1.2.0"}
+        info = {"name": "wrong" if behavior == "name" else "ios-homescreen-mcp", "version": "0.1.0" if behavior == "release" else release}
         response = {"protocolVersion": "2025-11-25", "capabilities": {"tools": {}}, "serverInfo": info}
         if behavior == "version": response["protocolVersion"] = "not-supported"
         if behavior == "capability": response["capabilities"] = {}
@@ -50,7 +52,7 @@ time.sleep(30)
 ''')
     start = time.monotonic()
     result = subprocess.run([sys.executable, str(SCRIPT), "--timeout", "0.5", "--", sys.executable,
-                             str(server), str(pid), behavior], capture_output=True, text=True, timeout=5,
+                             str(server), str(pid), behavior, VERSION], capture_output=True, text=True, timeout=5,
                             env={**os.environ, "HOMESCREEN_READ_ONLY": "0", "HOMESCREEN_DATA": "/unused-fixture-path"})
     elapsed = time.monotonic() - start
     assert pid.exists(), result.stderr
@@ -74,12 +76,11 @@ def test_real_server_initializes_and_discovers_without_device_operations(tmp_pat
     monkeypatch.setenv("HOMESCREEN_DATA", str(tmp_path / "unused data"))
     monkeypatch.chdir(ROOT)
     received = check_server([sys.executable, "-m", "homescreen.server"], timeout=30)
-    expected = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
-    assert received == expected
+    assert received == VERSION
     assert not (tmp_path / "unused data").exists()
 
 
-@pytest.mark.parametrize("behavior", ["name", "tools", "error", "eof", "version", "capability", "info"])
+@pytest.mark.parametrize("behavior", ["name", "tools", "error", "eof", "version", "release", "capability", "info"])
 def test_invalid_server_fails_and_closes_process(tmp_path, behavior):
     result, _ = check(tmp_path, behavior)
     assert result.returncode != 0

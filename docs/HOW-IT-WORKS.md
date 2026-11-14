@@ -1,8 +1,8 @@
-# How Home Screen Organizer works
+# How Screen Organizer works
 
 [README](../README.md) · [中文 README](../README.zh-CN.md) · [MCP setup](MCP.md) · [Compatibility](COMPATIBILITY.md)
 
-The Mac app, browser editor, CLI and MCP server share a Python layout engine. [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) communicates with a trusted device over USB: `com.apple.springboardservices` supplies layouts and icons, and `installation_proxy` supplies installed-app information. Home Screen Organizer uses private device interfaces for layout operations.
+The Mac app, browser editor, CLI and MCP server share a Python layout engine. [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) communicates with a trusted device over USB: `com.apple.springboardservices` supplies layouts and icons, and `installation_proxy` supplies installed-app information. Screen Organizer uses private device interfaces for layout operations.
 
 ## Local editor and storage
 
@@ -18,7 +18,7 @@ Drafts, backups, icon caches, category caches and generated previews live under 
 2. `setIconState` reaches `-[SBIconController importIconState:]`. `+[SBIconStateArchiver rootArchiveFromITunesRepresentation:]` converts that list into `buttonBar` and `iconLists`.
 3. Omitting an app from the list can cause it to reappear on a Home Screen page. The dictionary import format uses `ignored` to retain App Library placement.
 
-Home Screen Organizer sends the dictionary form: `buttonBar`, `iconLists` and `ignored`. App Library contents are inferred from installed apps, including offloaded apps, minus apps on the Home Screen and hidden/system-only apps. App and folder data and unknown fields are retained as items move.
+Screen Organizer sends the dictionary form: `buttonBar`, `iconLists` and `ignored`. App Library contents are inferred from installed apps, including offloaded apps, minus apps on the Home Screen and hidden/system-only apps. App and folder data and unknown fields are retained as items move.
 
 **Widgets:** configuration is associated with an element ID exported as `userSelectedElementIdentifier`. For a single widget, the engine supplies a missing `uniqueIdentifier` from that element ID. It can recover a missing element ID when the widget’s exported configuration and instance evidence identify one owner. When several widgets share a configuration, recovery requires an identified instance. Readback compares exported widget settings and element identifiers.
 
@@ -67,7 +67,7 @@ System apps that iOS does not display on the Home Screen are listed in `NEVER_ON
 ### Usage sorting
 
 - **Device memory reports:** periodic iOS reports provide approximate app usage rankings without Screen Time setup. Frequently resident or continuously running apps receive less weight and are identified as background apps.
-- **Mac Screen Time source:** enable **Settings → Screen Time → Share Across Devices** on the device and Mac using the same Apple Account. Grant **Full Disk Access** to Home Screen Organizer, or the terminal running the source installation, in **System Settings → Privacy & Security**.
+- **Mac Screen Time source:** enable **Settings → Screen Time → Share Across Devices** on the device and Mac using the same Apple Account. Grant **Full Disk Access** to Screen Organizer, or the terminal running the source installation, in **System Settings → Privacy & Security**.
 
 The Mac source reads synced Biome `App.InFocus` records under `~/Library/Biome/streams/restricted/App.InFocus/remote`. It counts bundle-ID occurrences and estimates opens from paired focus records rather than fully decoding the records. It selects and combines synced records by overlap with installed apps, so results can include more than one synced device. These estimates support relative rankings rather than exact usage measurement.
 
@@ -75,7 +75,7 @@ The page-swipe estimate counts page *N* as *N−1* swipes, adds folder-page cost
 
 ### MCP client processing
 
-A local server does not determine where an assistant processes its inputs. Requested tool results, including layout details, icon images or usage estimates, pass to the MCP client and may be sent to its configured model provider. See [the returned data and client controls](MCP.md#data-and-write-controls) before connecting an assistant.
+Requested tool results, including layout details, icon images or usage estimates, pass to the MCP client and may be sent to its configured model provider. See [the returned data and client controls](MCP.md#data-and-write-controls) before connecting an assistant.
 
 ## Development sources
 

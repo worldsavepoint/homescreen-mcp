@@ -300,7 +300,7 @@ def model_to_disk(state: list[Any], library: list[Any] | None, base: dict[str, A
 # ---- USB iPhone -----------------------------------------------------------------------
 
 # Installed system apps that iOS never puts on a Home Screen page, though nothing in their
-# metadata says so. Seen on iOS 27.0.1: a list-format write left all of these alone.
+# metadata says so.
 NEVER_ON_HOME_SCREEN = {
     "com.apple.FTMInternal", "com.apple.Posters.ImagePlaygroundPosterApp", "com.apple.PreviewShell",
     "com.apple.TVRemoteApp", "com.apple.sidecar", "com.apple.webapp",

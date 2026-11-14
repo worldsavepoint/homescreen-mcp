@@ -56,8 +56,8 @@ def load(known: set[str], days: int = 30, root: Path = BIOME) -> dict[str, Any]:
     try:
         dirs = [d for d in root.iterdir() if d.is_dir()]
     except PermissionError:
-        return {"ok": False, "error": "macOS blocked access to Screen Time data. Give your terminal (or the "
-                "app running Home Screen Organizer) Full Disk Access in System Settings > Privacy & Security."}
+        return {"ok": False, "error": "macOS blocked access to Screen Time data. Give Screen Organizer (or the terminal "
+                "running the source installation) Full Disk Access in System Settings > Privacy & Security."}
     for d in dirs:
         files = [f for f in d.iterdir() if f.is_file() and (_file_time(f) or 0) >= since]
         if not files:
