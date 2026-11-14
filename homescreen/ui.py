@@ -72,8 +72,7 @@ def _page(page: list[Node], lay: Layout) -> list[dict[str, Any]]:
     return out
 
 
-def _usage_view(lay: Layout) -> dict[str, Any] | None:
-    u = session().usage
+def _usage_view(lay: Layout, u: dict[str, Any] | None, original: Callable[[], Layout]) -> dict[str, Any] | None:
     if u is None:
         return None
     if not u.get("ok"):
@@ -81,7 +80,7 @@ def _usage_view(lay: Layout) -> dict[str, Any] | None:
     opens = u["opens"]
     return {"ok": True, "days": u["days"], "source": u.get("source", "mac"), "reports": u.get("reports"),
             "background": [lay.nodes[b].name for b in u.get("background", []) if b in lay.nodes],
-            "original": usage.swipes(lay.original(), opens),
+            "original": usage.swipes(original(), opens),
             "now": usage.swipes(lay, opens), "top": usage.top_apps(lay, opens, 12)}
 
 
@@ -89,30 +88,100 @@ def _read_only() -> bool:
     return os.environ.get("HOMESCREEN_READ_ONLY") == "1"
 
 
-def _locations(lay: Layout) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Attach presentation fields to the model's existing position strings."""
-    positions = lay.positions()
-    labels: dict[str, dict[str, Any]] = {}
-    items: dict[str, dict[str, Any]] = {}
+def _same_fields(a: Any, b: Any) -> bool:
+    """Python equality merges plist integers, booleans and reals."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(_same_fields(value, b[key]) for key, value in a.items())
+    if isinstance(a, list):
+        return len(a) == len(b) and all(_same_fields(x, y) for x, y in zip(a, b))
+    return a == b
 
-    def walk(nodes: list[Node], location: dict[str, Any]) -> None:
+
+def _has_changes(lay: Layout, original: Callable[[], Layout]) -> bool:
+    if (lay.bank or lay.pins != lay.source_pins or
+            lay.identity()["ids"] != lay.source_identity["ids"] or
+            not _same_fields(lay.to_library(), lay.source_library)):
+        return True
+    state = lay.to_state()
+    # Serialization normalizes imported folders with unnamed or empty subpages.
+    return not _same_fields(state, lay.source) and not _same_fields(state, original().to_state())
+
+
+def _special_positions(lay: Layout, pinned: set[str]) -> dict[str, tuple[str, int, int]]:
+    positions = {}
+    for kind, page, nodes in [("dock", 0, lay.dock), ("bank", 0, lay.bank),
+                              *(("page", p, nodes) for p, nodes in enumerate(lay.pages, 1))]:
         for index, node in enumerate(nodes, 1):
-            descriptor = {**location, "index": index}
-            items[node.id] = descriptor
-            labels[positions[node.id]] = descriptor
-            if node.kind == "folder":
-                for page, children in enumerate(node.children, 1):
-                    walk(children, {"kind": "folder", "name": node.name, "page": page})
+            if node.kind in ("folder", "widget") or node.id in pinned:
+                positions[node.id] = (kind, page, index)
+    return positions
 
-    walk(lay.dock, {"kind": "dock"})
+
+def _placement_changes(lay: Layout, original: Layout) -> dict[str, dict[str, Any]]:
+    pins = {key for key in lay.pins.keys() | original.pins.keys() if lay.pins.get(key) != original.pins.get(key)}
+    old, new = _special_positions(original, pins), _special_positions(lay, pins)
+    changes = {}
+    for nid in sorted(old.keys() | new.keys()):
+        before, after = original.nodes.get(nid), lay.nodes.get(nid)
+        node = after or before
+        reason = None
+        if nid not in old and node.kind in ("folder", "widget"):
+            reason = "added"
+        elif nid not in new and node.kind in ("folder", "widget"):
+            reason = "removed"
+        elif before and after and before.name != after.name:
+            reason = "renamed"
+        elif nid in pins:
+            reason = "pinned" if nid in lay.pins else "unpinned"
+        elif node.kind == "folder" and (
+            [[n.id for n in p] for p in before.children if p] != [[n.id for n in p] for p in after.children if p]
+            or not _same_fields(original._unwrap(before), lay._unwrap(after))
+        ):
+            reason = "edited"
+        elif node.kind == "widget" and not _same_fields(before.raw, after.raw):
+            reason = "edited"
+        if reason or old.get(nid) != new.get(nid):
+            row = {"id": nid, "kind": node.kind, "name": lay.widget_label(node) if node.kind == "widget" else node.name,
+                   "reason": reason or "moved"}
+            if reason == "renamed":
+                row["before_name"] = before.name
+            changes[nid] = row
+    return changes
+
+
+def _locations(lay: Layout, wanted: set[str], physical: set[str]) -> dict[str, tuple[str, dict[str, Any]]]:
+    """Only materialize endpoints needed by Review or the visible usage list."""
+    found = {}
+
+    def walk(nodes: list[Node], kind: str, where: str, page: int = 0, name: str = "") -> None:
+        cells = lay.place(nodes)[0] if kind == "page" and any(n.id in physical for n in nodes) else {}
+        for index, node in enumerate(nodes, 1):
+            if node.id in wanted:
+                descriptor = {"kind": kind}
+                raw = where
+                if kind not in ("library", "bank"):
+                    descriptor["index"] = index
+                    raw += f" #{index}"
+                if page:
+                    descriptor["page"] = page
+                if kind == "folder":
+                    descriptor["name"] = name
+                if node.id in physical and node.id in cells:
+                    row, col, _, _ = cells[node.id]
+                    descriptor.update(row=row + 1, column=col + 1)
+                found[node.id] = (raw, descriptor)
+            if node.kind == "folder":
+                for p, children in enumerate(node.children, 1):
+                    walk(children, "folder", f"folder {node.name!r} p{p}", p, node.name)
+
+    walk(lay.dock, "dock", "dock")
     for page, nodes in enumerate(lay.pages, 1):
-        walk(nodes, {"kind": "page", "page": page})
-    for kind, nodes in (("library", lay.library or []), ("bank", lay.bank)):
-        for node in nodes:
-            descriptor = {"kind": kind}
-            items[node.id] = descriptor
-            labels[positions[node.id]] = descriptor
-    return labels, items
+        walk(nodes, "page", f"page {page}", page)
+    walk(lay.library or [], "library", "App Library")
+    walk(lay.bank, "bank", "App Bank")
+    return found
 
 
 def _problem_details(lay: Layout, problems: list[str]) -> list[dict[str, Any]]:
@@ -151,12 +220,46 @@ def view() -> dict[str, Any]:
                 "read_only": _read_only()}
     lay = s.layout
     d = lay.diff()
-    moved = {k.rsplit("[", 1)[-1].rstrip("]") for k in d["moves"]}
-    old_labels, old_items = _locations(lay.original())
-    labels, items = _locations(lay)
-    move_details = {f"{lay.nodes[item].name} [{item}]": {
-        "id": item, "name": lay.nodes[item].name, "from": old_items[item], "to": items[item]}
-        for item in moved if item in old_items and item in items}
+    baseline = None
+
+    def original() -> Layout:
+        nonlocal baseline
+        if baseline is None:
+            baseline = lay.original()
+        return baseline
+
+    has_changes = _has_changes(lay, original)
+    placements = _placement_changes(lay, original()) if has_changes else {}
+    moved = {}
+    if d["moves"]:
+        for node in lay.nodes.values():
+            key = f"{node.name} [{node.id}]"
+            if key in d["moves"]:
+                moved[node.id] = key
+    usage_view = _usage_view(lay, s.usage, original)
+    top = usage_view.get("top", []) if usage_view else []
+    usage_ids = {}
+    if top:
+        # Resolve each visible bundle to one occurrence for both its name and location.
+        top_bundles = {row["id"] for row in top}
+        for node in lay.nodes.values():
+            if node.bundle_id in top_bundles:
+                usage_ids.setdefault(node.bundle_id, node.id)
+    changed_ids = moved.keys() | placements.keys()
+    wanted = changed_ids | {usage_ids[row["id"]] for row in top}
+    physical = set(placements)
+    old = _locations(original(), changed_ids, physical) if changed_ids else {}
+    new = _locations(lay, wanted, physical) if wanted else {}
+    labels = dict(old.values())
+    labels.update(new.values())
+    for row in top:
+        node_id = usage_ids[row["id"]]
+        row.update(name=lay.nodes[node_id].name, where=new[node_id][0])
+    move_details = {key: {"id": nid, "name": lay.nodes[nid].name, "from": old[nid][1], "to": new[nid][1]}
+                    for nid, key in moved.items()}
+    for nid, change in placements.items():
+        change["from"] = old[nid][1] if nid in old else None
+        change["to"] = new[nid][1] if nid in new else None
     return {
         "loaded": True,
         "read_only": _read_only(),
@@ -167,12 +270,13 @@ def view() -> dict[str, Any]:
         "pages": [_page(p, lay) for p in lay.pages],
         "library": None if lay.library is None else [_item(n, lay) for n in lay.library],
         "bank": [_item(n, lay) for n in lay.bank],
-        "usage": _usage_view(lay),
+        "usage": usage_view,
         "moved": sorted(moved),
         "diff": {**{k: d[k] for k in ("items_moved", "to_app_library", "pages_before", "pages_after",
                                    "problems", "apply_token", "gaps_changed")},
-                 "problem_details": _problem_details(lay, d["problems"])},
-        "location_labels": {**old_labels, **labels},
+                 "has_changes": has_changes, "placement_changes": list(placements.values()),
+                 "problem_details": _problem_details(lay, d["problems"]) if d["problems"] else []},
+        "location_labels": labels,
         "move_details": move_details,
         "moves": d["moves"],
         "history": s.history(),

@@ -7,14 +7,35 @@
   const $ = selector => document.querySelector(selector);
   const send = message => window.webkit?.messageHandlers?.screenOrganizer?.postMessage(message);
   let accepted = native && host.consentAccepted === true;
-  let reachedEnd = false, declined = false, returnFocus = null;
-  let languagePending = false, languageRevision = 0;
+  let reachedEnd = false, declined = false, activeDialog = null;
+  let languagePending = true;
   let resolveConsent;
   const consent = new Promise(resolve => { resolveConsent = resolve; });
   if (accepted) resolveConsent();
 
-  function backgroundInert(value) {
-    for (const node of document.querySelectorAll("header,main,footer,#selection-bar,#drawer")) node.inert = value;
+  function syncInert() {
+    for (const node of document.querySelectorAll("header,main,footer,#selection-bar,#drawer,#toast,#modal,#mcp-dialog,#consent-dialog")) {
+      node.inert = activeDialog ? node !== activeDialog.root : !accepted;
+    }
+  }
+  function openDialog(root, focus, dismiss) {
+    if (activeDialog) return false;
+    activeDialog = {root, opener: document.activeElement, dismiss};
+    root.hidden = false;
+    syncInert();
+    focus.focus();
+    return true;
+  }
+  function closeDialog(root) {
+    if (activeDialog?.root !== root) return false;
+    const {opener} = activeDialog;
+    activeDialog = null;
+    root.hidden = true;
+    syncInert();
+    const restore = opener && opener !== document.body && document.body.contains(opener) && !opener.disabled &&
+      !opener.closest("[hidden],[inert]") ? opener : $("#read");
+    restore.focus();
+    return true;
   }
   function updateConsent() {
     const text = $("#consent-text");
@@ -43,25 +64,19 @@
       select.value = i18n.preference;
     }
   }
-  function onLocale() {
-    languageOptions();
+  function updateTitle() {
     document.title = i18n.t("app.name") + " · " + i18n.t("app.subtitle");
-    // Reset reading and agreement for the displayed terms.
-    if (!accepted) resetConsent();
   }
-  function hideSetup() {
-    $("#mcp-dialog").hidden = true;
-    backgroundInert(false);
-    returnFocus?.focus();
-  }
+  function hideSetup() { closeDialog($("#mcp-dialog")); }
   const serverID = "ios-homescreen-mcp";
   const entry = {command: "home-screen-mcp", args: [], env: {HOMESCREEN_READ_ONLY: "1"}};
   const examples = [
     ["codex", "Codex CLI", `codex mcp add ${serverID} --env HOMESCREEN_READ_ONLY=1 -- home-screen-mcp`],
     ["claude", "Claude Code CLI", `claude mcp add --env HOMESCREEN_READ_ONLY=1 --transport stdio ${serverID} -- home-screen-mcp`],
     ["json", "mcp.copyJSON", JSON.stringify({mcpServers: {[serverID]: entry}}, null, 2)],
-    ["toml", "mcp.copyCodex", `[mcp_servers.${serverID}]\ncommand = "home-screen-mcp"\nargs = []\n\n[mcp_servers.${serverID}.env]\nHOMESCREEN_READ_ONLY = "1"`],
+    ["toml", "mcp.copyCodex", `[mcp_servers.${serverID}]\ncommand = "home-screen-mcp"\nargs = []\nenvironment_id = "local"\n\n[mcp_servers.${serverID}.env]\nHOMESCREEN_READ_ONLY = "1"`],
     ["vscode", "mcp.copyVSCode", JSON.stringify({servers: {[serverID]: {type:"stdio", ...entry}}}, null, 2)],
+    ["copilot", "mcp.copyCopilot", JSON.stringify({mcpServers: {[serverID]: {type:"stdio", ...entry, tools:["*"]}}}, null, 2)],
   ];
   function setupExamples() {
     const root = $("#mcp-examples");
@@ -94,36 +109,31 @@
     i18n.translateDOM(root);
   }
   $("#mcp-setup").onclick = () => {
-    if (!accepted) return;
+    if (!accepted || activeDialog) return;
     if (native) { send({action: "openMCPSetup"}); return; }
-    returnFocus = document.activeElement;
     $("#mcp-copy-status").removeAttribute("data-i18n");
     $("#mcp-copy-status").textContent = "";
-    $("#mcp-dialog").hidden = false;
-    backgroundInert(true);
-    $("#mcp-title").focus();
+    openDialog($("#mcp-dialog"), $("#mcp-title"), hideSetup);
     $("#mcp-dialog .modal-card").scrollTop = 0;
   };
   $("#mcp-close").onclick = hideSetup;
-  for (const selector of ["#language-select", "#consent-language-select"]) $(selector).onchange = async event => {
-    const current = ++languageRevision;
-    languagePending = true;
+  i18n.onTransition(({phase, source}) => {
+    languagePending = phase === "start";
     if (!accepted) resetConsent();
-    try { await i18n.setLocale(event.target.value); }
-    catch (_) { if (current === languageRevision) languageOptions(); }
-    if (current !== languageRevision) return;
-    languagePending = false;
-    if (!accepted) resetConsent();
-    if (native) send({action: "setLanguage", preference: i18n.preference});
-  };
+    if (!languagePending) {
+      languageOptions();
+      if (source === "picker" && native) send({action: "setLanguage", preference: i18n.preference});
+    }
+  });
+  for (const selector of ["#language-select", "#consent-language-select"]) $(selector).onchange = event =>
+    i18n.setLocale(event.target.value, "picker");
   $("#consent-text").addEventListener("scroll", updateConsent);
   $("#consent-agree").onchange = updateConsent;
   $("#consent-continue").onclick = () => {
     updateConsent();
     if ($("#consent-continue").disabled || accepted) return;
     accepted = true;
-    $("#consent-dialog").hidden = true;
-    backgroundInert(false);
+    closeDialog($("#consent-dialog"));
     resolveConsent();
     window.dispatchEvent(new CustomEvent("screen-organizer-consent-accepted"));
     $("#read").focus();
@@ -136,31 +146,35 @@
     window.close();
   };
   document.addEventListener("keydown", event => {
-    const dialog = !$("#consent-dialog").hidden ? $("#consent-dialog") : !$("#mcp-dialog").hidden ? $("#mcp-dialog") : null;
-    if (!dialog) return;
-    if (event.key === "Escape") { event.preventDefault(); if (accepted) hideSetup(); }
-    if (event.key === "Tab") {
-      const controls = [...dialog.querySelectorAll("button,input,select,[tabindex]")].filter(n => !n.disabled && n.getAttribute("tabindex") !== "-1");
-      const first = controls[0], last = controls.at(-1);
-      if (event.shiftKey && (document.activeElement === first || document.activeElement === $("#mcp-title"))) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    if (!activeDialog) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      activeDialog.dismiss?.();
+    } else if (event.key === "Tab") {
+      const controls = [...activeDialog.root.querySelectorAll("button,input,select,textarea,summary,[href],[tabindex]")]
+        .filter(node => !node.disabled && node.getAttribute("tabindex") !== "-1" && !node.closest("[hidden],[inert]") &&
+          (!node.getClientRects || node.getClientRects().length));
+      const index = controls.indexOf(document.activeElement);
+      if (event.shiftKey ? index <= 0 : index === controls.length - 1) {
+        event.preventDefault();
+        (event.shiftKey ? controls.at(-1) : controls[0])?.focus();
+      }
     }
   });
   const ready = (async () => {
     await i18n.ready;
-    if (native && typeof host.languagePreference === "string") await i18n.setLocale(host.languagePreference);
+    languagePending = i18n.pending;
     setupExamples();
     for (const id of ["consent-brand", "mcp-brand"]) $("#" + id).appendChild($(".brand svg").cloneNode(true));
-    onLocale();
-    backgroundInert(!accepted);
-    i18n.onChange(onLocale);
+    languageOptions();
+    updateTitle();
+    syncInert();
+    i18n.onChange(updateTitle);
     if (!accepted) {
-      backgroundInert(true);
-      $("#consent-dialog").hidden = false;
-      $("#consent-text").focus();
+      openDialog($("#consent-dialog"), $("#consent-text"));
       requestAnimationFrame(updateConsent);
     }
     await consent;
   })();
-  window.ScreenOrganizerOnboarding = {ready, get accepted() { return accepted; }};
+  window.ScreenOrganizerOnboarding = {ready, openDialog, closeDialog, get dialog() { return activeDialog?.root; }, get accepted() { return accepted; }};
 })();

@@ -5,7 +5,10 @@
   const base = typeof document !== "undefined" && document.currentScript?.src
     ? new URL("locales/", document.currentScript.src).href : "/static/locales/";
   let manifest, english = {}, catalog = {}, locale = "en", preference = "system", revision = 0;
-  const listeners = new Set(), catalogs = new Map();
+  const listeners = new Set(), transitions = new Set(), catalogs = new Map();
+  let requested, committedTarget, pending = false, initialized = false, resolveReady, rejectReady;
+  let numberFormatter;
+  const dateFormatters = new Map();
   try { preference = localStorage.getItem(storageKey) || "system"; } catch (_) { /* storage unavailable */ }
 
   function canonical(value) {
@@ -16,14 +19,14 @@
   function match(value) {
     const code = canonical(value);
     if (!code) return null;
+    const exact = manifest.languages.find(item => canonical(item.code) === code);
+    if (exact) return exact.code;
     const parts = code.split("-");
-    // Explicit Chinese scripts take precedence over a conflicting region alias.
-    const script = parts.find(part => /^(Hans|Hant)$/.test(part));
-    const candidates = script ? [parts[0] + "-" + script, code] : [code];
-    for (let length = parts.length - 1; length > 0; length--) candidates.push(parts.slice(0, length).join("-"));
+    const candidates = [];
+    if (parts[0] === "zh" && ["Hans", "Hant"].includes(parts[1])) candidates.push("zh-" + parts[1]);
+    for (let length = parts.length; length > 0; length--) candidates.push(parts.slice(0, length).join("-"));
     for (const candidate of candidates) {
-      const language = manifest.languages.find(item => item.code === candidate ||
-        item.aliases.some(alias => canonical(alias) === candidate));
+      const language = manifest.languages.find(item => [item.code, ...item.aliases].some(tag => canonical(tag) === candidate));
       if (language) return language.code;
     }
     return null;
@@ -45,7 +48,13 @@
   }
 
   function loadCatalog(code) {
-    if (!catalogs.has(code)) catalogs.set(code, loadJSON(code + ".json"));
+    if (!catalogs.has(code)) {
+      const promise = loadJSON(code + ".json").catch(error => {
+        if (catalogs.get(code) === promise) catalogs.delete(code);
+        throw error;
+      });
+      catalogs.set(code, promise);
+    }
     return catalogs.get(code);
   }
 
@@ -69,48 +78,78 @@
     }
   }
 
-  async function select(request) {
-    const current = ++revision;
-    const nextPreference = request === "system" || manifest.languages.some(item => item.code === request)
-      ? request : "system";
-    const nextLocale = resolveLocale(nextPreference);
-    let nextCatalog;
-    try { nextCatalog = await loadCatalog(nextLocale); }
+  function notify(phase, source, revision) {
+    for (const listener of transitions) listener({phase, source, revision});
+  }
+
+  async function select(request, source, current) {
+    if (!initialized) await resources;
+    if (current !== revision) return locale;
+    requested = request === "system" ? request : match(request) || "system";
+    const target = resolveLocale(requested);
+    if (!pending && preference === requested && committedTarget === target && locale === target) return locale;
+    const nextPreference = requested;
+    pending = true;
+    notify("start", source, current);
+    let nextCatalog, effective = target;
+    try { nextCatalog = await loadCatalog(target); }
     catch (error) {
-      if (nextLocale === manifest.default) throw error;
-      catalogs.delete(nextLocale);
+      if (current !== revision) return locale;
+      if (target === manifest.default) throw error;
       nextCatalog = english;
+      effective = manifest.default;
     }
     if (current !== revision) return locale;
+    const changed = catalog !== nextCatalog || locale !== effective;
+    if (locale !== effective) { numberFormatter = undefined; dateFormatters.clear(); }
     preference = nextPreference;
-    locale = nextLocale;
+    committedTarget = target;
+    locale = effective;
     catalog = nextCatalog;
+    pending = false;
     try { localStorage.setItem(storageKey, preference); } catch (_) { /* storage unavailable */ }
-    if (typeof document !== "undefined") {
-      document.documentElement.lang = locale;
-      translateDOM(document);
+    if (changed) {
+      if (typeof document !== "undefined") {
+        document.documentElement.lang = locale;
+        translateDOM(document);
+      }
+      for (const listener of listeners) listener(locale);
     }
-    for (const listener of listeners) listener(locale);
+    notify("settle", source, current);
+    resolveReady();
     return locale;
   }
 
+  function setLocale(request, source = "host") {
+    requested = request;
+    return select(request, source, ++revision);
+  }
+
   const api = {
+    ready: new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; }),
+    get pending() { return pending; },
     get locale() { return locale; },
     get preference() { return preference; },
     get languages() { return manifest ? manifest.languages : []; },
-    t, resolveLocale, translateDOM,
-    async setLocale(request) { await api.ready; return select(request); },
-    formatNumber(value) { return new Intl.NumberFormat(locale).format(value); },
-    formatDate(value) { return new Intl.DateTimeFormat(locale).format(value); },
+    t, resolveLocale, translateDOM, setLocale,
+    formatNumber(value) { return (numberFormatter ||= new Intl.NumberFormat(locale)).format(value); },
+    formatDate(value, options) {
+      const key = JSON.stringify(options || {});
+      if (!dateFormatters.has(key)) dateFormatters.set(key, new Intl.DateTimeFormat(locale, options));
+      return dateFormatters.get(key).format(value);
+    },
     onChange(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    onTransition(listener) { transitions.add(listener); return () => transitions.delete(listener); },
   };
   globalThis.ScreenOrganizerI18n = api;
-  api.ready = (async () => {
+  const resources = (async () => {
     manifest = await loadJSON("manifest.json");
     english = await loadCatalog(manifest.default);
-    await select(preference);
+    initialized = true;
   })();
+  const host = globalThis.screenOrganizerHost;
+  setLocale(host?.native && typeof host.languagePreference === "string" ? host.languagePreference : preference, "bootstrap").catch(rejectReady);
   globalThis.addEventListener?.("languagechange", () => {
-    if (preference === "system") api.setLocale("system");
+    if (requested === "system") setLocale("system", "system");
   });
 })();

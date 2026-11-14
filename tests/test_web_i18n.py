@@ -79,22 +79,29 @@ process.on('unhandledRejection',error=>unhandled.push(error.message));
 const item={id:'synthetic.app',kind:'app',name:'Synthetic Notes',slots:1};
 const fixture={loaded:true,read_only:true,source:'phone',device:{DeviceName:'Synthetic iPhone',ProductVersion:'18.0',ProductType:'iPhone'},
  dock:[],pages:[[{id:'synthetic.folder',kind:'folder',name:'My Folder',pos:[0,0,1,1],pages:[[item]]}]],library:[],bank:[],moved:['synthetic.app'],history:{undo:true,redo:false},
- grid:{cols:4,rows:6,dock:4,folder:9},slots:{page:24},diff:{items_moved:1,pages_before:1,pages_after:1,gaps_changed:0,to_app_library:0,problems:[]},moves:{},usage:null};
+ grid:{cols:4,rows:6,dock:4,folder:9},slots:{page:24},diff:{has_changes:true,apply_token:"reviewed",placement_changes:[],items_moved:1,pages_before:1,pages_after:1,gaps_changed:0,to_app_library:0,problems:[]},moves:{},usage:null};
 const context={document,console,URL,URLSearchParams,Intl,Date,Set,Map,Promise,setTimeout:()=>0,clearTimeout(){},requestAnimationFrame:f=>f(),
  location:{hash:'',pathname:'/',search:''},history:{replaceState(){}},navigator:{languages:['en'],clipboard:{writeText:async t=>copied.push(t)}},
  localStorage:{getItem:k=>stored.get(k)||null,setItem:(k,v)=>stored.set(k,v)},Image:class extends Element{constructor(){super('img');}},
  Event:class{constructor(type){this.type=type;}},CustomEvent:class{constructor(type){this.type=type;}},
  addEventListener:(...a)=>document.addEventListener(...a),dispatchEvent:e=>document.dispatchEvent(e),close:()=>{context.closed=true;},
- fetch:async path=>{calls.push(String(path));if(String(path).includes('/locales/'))return {ok:true,json:async()=>harnessInput.catalogs[String(path).split('/').pop()]};
- if(path==='/api/state')return {ok:true,json:async()=>fixture};if(path==='/api/devices')return {ok:true,json:async()=>({switching:false,current:null,devices:[]})};
- if(path==='/api/read')return {ok:true,json:async()=>fixture};throw Error('Unexpected route '+path);}
+ fetch:async(path,opts={})=>{calls.push(String(path));const file=String(path).slice('/static/locales/'.length);
+ if(path==='/static/locales/'+file && Object.hasOwn(harnessInput.catalogs,file) && !opts.method)
+   return {ok:true,json:async()=>harnessInput.catalogs[file]};
+ if(path==='/api/state'&&!opts.method)return {ok:true,json:async()=>fixture};if(path==='/api/devices'&&!opts.method)return {ok:true,json:async()=>({switching:false,current:null,devices:[]})};
+ if(path==='/api/read'&&opts.method==='POST')return {ok:true,json:async()=>fixture};throw Error('Unexpected route '+path);}
 };context.window=context;context.globalThis=context;
 if(harnessInput.native) {context.screenOrganizerHost={native:true,languagePreference:'de',consentAccepted:true};context.webkit={messageHandlers:{screenOrganizer:{postMessage:m=>bridge.push(m)}}};}
 eval(harnessInput.setup || '');
 vm.createContext(context);
-for(const script of harnessInput.scripts)vm.runInContext(script,context);
 const tick=()=>new Promise(r=>setImmediate(r));
-(async()=>{await eval('(async()=>{'+(harnessInput.before_ready || '')+'})()');await context.ScreenOrganizerI18n.ready;await tick();await tick();
+(async()=>{for(const [index,script] of harnessInput.scripts.entries()){
+ vm.runInContext(script,context);
+ if(index===0 && context.waitForInitialCatalog)await context.ScreenOrganizerI18n.ready;
+}
+await eval('(async()=>{'+(harnessInput.before_ready || '')+'})()');if(context.expectCatalogFailure)await context.ScreenOrganizerI18n.ready.catch(e=>context.catalogFailure=e.message);
+else await context.ScreenOrganizerI18n.ready;
+await tick();await tick();
 const $=s=>document.querySelector(s);const i18n=context.ScreenOrganizerI18n;
 ''' 
 
@@ -246,7 +253,8 @@ assert.ok($('#modal-body').textContent.includes(name));assert.ok(!$('#modal-body
 
 def test_known_errors_show_localized_state_and_expandable_original_diagnostic():
     browser('''
-context.fetch=async path=>({ok:false,status:400,json:async()=>({error:"widgets can't go in the dock"})});
+context.fetch=async(path,opts)=>{assert.equal(path,'/api/op');assert.equal(opts.method,'POST');
+ return {ok:false,status:400,json:async()=>({error:"widgets can't go in the dock"})};};
 $('#undo').click();await tick();await tick();
 assert.ok($('#toast').textContent.includes('Widgets können nicht im Dock platziert werden.'));
 assert.ok($('#toast').querySelector('details'),'original diagnostic is expandable');
@@ -255,13 +263,19 @@ assert.ok($('#toast').querySelector('pre').textContent.includes("widgets can't g
 
 
 @pytest.mark.parametrize("message,key", [
+    ("Read-only mode doesn't fit at row 6, column 1", "error.position"),
+    ("the saved draft changed in another session; reopen it or read the device again", "error.staleDraft"),
+    ("the device placement changed in another session; read the device again", "error.readAgain"),
+    ("couldn't read the device: device grid metrics must be positive integers; read the device again", "error.readAgain"),
+    ("keep a Home Screen page to preserve this archive's grid dimensions", "error.keepPage"),
+    ("the USB root archive uses one display identifier for different apps", "error.wireConflict"),
     ("device grid changed during read; no layout was loaded", "error.readAgain"),
     ("device grid changed; explicitly read the intended device again", "error.readAgain"),
     ("saved draft identity is invalid; call read again", "error.readAgain"),
     ("saved draft pin identity is unavailable; call read again", "error.readAgain"),
     ("saved draft pin identity is ambiguous; call read again", "error.readAgain"),
-    ("ambiguous pin identifier on a layout page", "error.pinIdentifier"),
-    ("ambiguous pin identifier on a backup page", "error.pinIdentifier"),
+    ("ambiguous pin identifier on a layout page", "error.ambiguousIdentifier"),
+    ("ambiguous pin identifier on a backup page", "error.ambiguousIdentifier"),
     ("pins must identify items on each page", "error.savedPosition"),
     ("invalid saved pin memory", "error.savedPosition"),
     ("invalid saved pin memory; read again", "error.readAgain"),
@@ -283,7 +297,8 @@ assert.ok($('#toast').querySelector('pre').textContent.includes("widgets can't g
 def test_pin_integrity_errors_have_localized_primary_messages(message, key):
     browser(f'''
 const message={json.dumps(message)}, key={json.dumps(key)};
-context.fetch=async path=>({{ok:false,status:400,json:async()=>({{error:message}})}});
+context.fetch=async(path,opts)=>{{assert.equal(path,'/api/op');assert.equal(opts.method,'POST');
+ return {{ok:false,status:400,json:async()=>({{error:message}})}};}};
 $('#undo').click();await tick();await tick();
 assert.notEqual(i18n.t(key),key);
 assert.ok($('#toast').textContent.startsWith(i18n.t(key)));
@@ -330,9 +345,11 @@ assert.equal(calls.filter(p=>p.startsWith('/api/')).length,0);
 def test_backup_dates_follow_locale_without_loading_a_new_view():
     browser('''
 const originalFetch=context.fetch;
-context.fetch=async path=>path==='/api/backups'?{ok:true,json:async()=>({backups:['20261113-162400-synthetic-phone.plist']})}:originalFetch(path);
+context.fetch=async path=>path==='/api/backups'?{ok:true,json:async()=>({backups:['20261113-162400-before-apply-00000000000000000000000000000000.plist','20261113-162400-synthetic-phone.plist']})}:originalFetch(path);
 $('#backups-btn').click();await tick();await tick();
 assert.ok($('#modal-body').textContent.includes('13.11.2026'));
+assert.ok($('#modal-body').textContent.includes('20261113-162400-synthetic-phone.plist'));
+assert.ok(!$('#modal-body').textContent.includes('before apply'));
 await i18n.setLocale('fr');await tick();
 assert.ok($('#modal-body').textContent.includes('13/11/2026'));
 assert.equal($('#modal-title').textContent,'Sauvegardes');
@@ -401,7 +418,9 @@ const select=$('#consent-language-select');select.value='fr';const changing=sele
 assert.equal($('#consent-continue').disabled,true);await tick();
 $('#consent-continue').onclick();assert.equal(context.ScreenOrganizerOnboarding.accepted,false);
 fail();await changing;await tick();
+assert.equal(document.documentElement.lang,'en');assert.equal(i18n.preference,'fr');
 assert.equal($('#consent-title').textContent,'Before you begin');assert.equal($('#consent-agree').checked,false);assert.equal(text.scrollTop,0);
+context.fetch=originalFetch;await i18n.setLocale('fr');assert.equal(document.documentElement.lang,'fr');
 assert.equal(calls.filter(p=>p.startsWith('/api/')).length,0);
 text.scrollTop=800;text.dispatchEvent({type:'scroll'});$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});
 $('#consent-continue').click();await tick();await tick();assert.ok(calls.includes('/api/devices'));
@@ -513,3 +532,261 @@ assert.equal($('#consent-continue').disabled,false);$('#consent-continue').click
 ''', setup='''
 const text=nodes.find(n=>n.id==='consent-text');text.scrollHeight=200;
 ''')
+
+
+@pytest.mark.parametrize("explicit", [True, False])
+def test_os_language_during_pending_request_and_return_to_english(explicit):
+    browser('''
+const terms=$('#consent-text'), agree=$('#consent-agree'), go=$('#consent-continue');
+terms.scrollTop=800;terms.dispatchEvent({type:'scroll'});agree.checked=true;agree.onchange();
+let release;const originalFetch=context.fetch;
+context.fetch=p=>p.endsWith('/fr.json')?new Promise(resolve=>{release=()=>originalFetch(p).then(resolve);}):originalFetch(p);
+const select=$('#consent-language-select');let pending;
+if(EXPLICIT){select.value='fr';pending=select.onchange({target:select});}
+else{context.navigator.languages=['fr'];context.dispatchEvent({type:'languagechange'});}
+assert.equal(go.disabled,true);go.onclick();
+context.navigator.languages=['de'];context.dispatchEvent({type:'languagechange'});await tick();
+if(EXPLICIT){release();await pending;assert.equal(i18n.preference,'fr');assert.equal(i18n.locale,'fr');}
+else{await i18n.setLocale('en');release();await tick();assert.equal(i18n.locale,'en');assert.equal(select.value,'en');}
+assert.equal(calls.filter(p=>p.startsWith('/api/')).length,0);assert.equal(agree.checked,false);
+'''.replace('EXPLICIT', json.dumps(explicit)))
+
+
+def test_host_acknowledgment_and_large_review_reuse_icon_tree_and_formatters():
+    browser('''
+const select=$('#language-select');select.value='fr';await select.onchange({target:select});
+const page=$('#pages').firstChild, images=context.images, formats=context.formats;
+await i18n.setLocale('fr');assert.equal($('#pages').firstChild,page);assert.equal(context.images,images);
+assert.equal(bridge.filter(m=>m.action==='setLanguage').length,1);
+for(let i=0;i<240;i++){const k='item'+i;fixture.moves[k]='';
+ (fixture.move_details??={})[k]={name:k,from:{kind:'page',index:i,page:1},to:{kind:'page',index:i+1,page:2}};}
+fixture.read_only=false;vm.runInContext('render();review()',context);
+assert.ok($('#modal-body').textContent.includes(i18n.formatNumber(240)));
+assert.ok(context.formats-formats<=1);assert.equal(i18n.formatNumber(1234),new Intl.NumberFormat('fr').format(1234));
+''', native=True, setup='''
+context.images=0;context.formats=0;context.Image=class extends Element{constructor(){super('img');context.images++;}};
+fixture.pages[0][0].pages[0][0].icon='synthetic.app';
+context.Intl=Object.create(Intl);context.Intl.NumberFormat=class extends Intl.NumberFormat{constructor(...args){super(...args);context.formats++;}};
+''')
+
+
+def test_unknown_outcome_and_explicit_comparison():
+    browser('''
+const display=r=>vm.runInContext('showResult('+JSON.stringify(r)+')',context);
+display({ok:false,status:'unknown',error:'synthetic readback',backup:'recovery.plist'});
+assert.ok($('#modal-body').textContent.includes(i18n.t('editor.resultUnknown')));
+assert.ok($('#modal-body').textContent.includes('recovery.plist'));
+assert.ok(!$('#modal-body').textContent.includes('{}'));$('#modal-actions').firstChild.click();
+display({ok:false,mismatches:{added_by_ios:['synthetic.x']}});
+assert.ok($('#modal-body').textContent.includes(i18n.t('editor.resultMismatch',{device:'iPhone'})));
+assert.ok(!$('#modal-body').textContent.includes('undefined'));
+''', native=True)
+
+
+def test_editor_clears_selection_and_drawer_only_after_success():
+    browser('''
+const choose=()=>{$('#pages').querySelector('[data-id="synthetic.folder"]').click();
+ $('#folder-pages').querySelector('[data-id="synthetic.app"]').click();};
+choose();let fail=true;context.fetch=async(path,opts)=>{
+ assert.equal(path,'/api/op');assert.equal(opts.method,'POST');
+ return {ok:!fail,json:async()=>fail?{error:'synthetic failure'}:fixture};};
+const drop=()=>vm.runInContext("dropOnto(findItem('synthetic.folder'),['synthetic.app'],{})",context);
+await drop();assert.equal($('#selection-bar').hidden,false);fail=false;await drop();assert.equal($('#selection-bar').hidden,true);
+assert.ok(!$('#folder-pages').querySelector('[data-id="synthetic.app"]').classList.contains('selected'));
+choose();vm.runInContext('setView({loaded:false})',context);assert.equal($('#drawer').hidden,true);
+assert.equal($('#selection-bar').hidden,true);assert.equal($('#folder-pages').children.length,0);
+''', native=True)
+
+
+def view_for(monkeypatch, layout, usage=None):
+    from types import SimpleNamespace
+    import homescreen.ui as ui
+    monkeypatch.setattr(ui, 'session', lambda: SimpleNamespace(layout=layout, source=SimpleNamespace(name='fixture'),
+        device_id=None, info={}, usage=usage, gaps_readable=False, history=lambda: {}))
+    return ui.view()
+
+
+@pytest.mark.parametrize("kind", ["folder", "widget"])
+def test_web_diff_for_container_moves_and_pins(monkeypatch, kind):
+    from homescreen.model import Layout
+    from fake_phone import app, folder, widget
+
+    raw = folder("Folder", [app("child", "Child")]) if kind == "folder" else widget("Widget", "small")
+    lay = Layout([[], [app("a", "A"), raw], [app("b", "B")]], library=[])
+    item = lay.pages[0][1]
+    lay.move(item.id, "page:2")
+    result = view_for(monkeypatch, lay)
+    diff = result["diff"]
+    assert diff["has_changes"] and diff["items_moved"] == 0
+    row, = diff["placement_changes"]
+    assert (row["kind"], row["id"], row["from"]["page"], row["to"]["page"]) == (kind, item.id, 1, 2)
+    assert view_for(monkeypatch, Layout.from_snapshot(lay.snapshot()))["diff"]["has_changes"]
+    lay = lay.original()
+    lay.pin(item.id, 1, 8)
+    row, = view_for(monkeypatch, lay)["diff"]["placement_changes"]
+    assert row["from"]["row"] != row["to"]["row"] and row["to"]["row"] == 3
+    assert not view_for(monkeypatch, lay.original())["diff"]["has_changes"]
+
+
+def test_web_diff_clean_normalized_folders_typed_fields_and_bank(monkeypatch):
+    from homescreen.model import Layout
+    from fake_phone import app
+    lay = Layout([[], [{"listType":"folder","iconLists":[[],[app("child","Child")]]}, app("a","A")]], library=[])
+    assert not view_for(monkeypatch, lay)["diff"]["has_changes"]
+    node = lay.nodes["a"]
+    node.raw["someFutureKey"]["nested"][0] = True
+    assert view_for(monkeypatch, lay)["diff"]["has_changes"]
+    lay = lay.original()
+    lay.move("a", "bank")
+    assert view_for(monkeypatch, lay)["diff"]["has_changes"]
+
+
+def test_large_clean_view_sends_only_used_locations(monkeypatch):
+    from homescreen.model import Layout
+    from fake_phone import app
+    apps = [app(f"app{i}", f"Name {i}") for i in range(512)]
+    lay = Layout([[], *[apps[i:i+24] for i in range(0,288,24)]], library=apps[288:])
+    assert view_for(monkeypatch, lay)["location_labels"] == {}
+    lay.move("app0", "library")
+    view = view_for(monkeypatch,lay,{"ok":True,"days":1,"opens":{f"app{i}":i for i in range(25)}})
+    assert len(view["usage"]["top"]) == 12 and len(view["location_labels"]) <= 14
+
+
+def test_folder_lifecycle_and_duplicate_bundle_usage_in_web_view(monkeypatch):
+    from homescreen.model import Layout
+    from fake_phone import app, folder
+    lay = Layout([[], [folder("Existing", [app("dup", "First")]), app("a", "A")],
+                  [app("dup", "Second")]], library=[])
+    fid = lay.pages[0][0].id
+    lay.rename_folder(fid, "New name")
+    renamed, = view_for(monkeypatch, lay)["diff"]["placement_changes"]
+    assert (renamed["reason"], renamed["before_name"], renamed["name"]) == ("renamed", "Existing", "New name")
+    lay.dissolve_folder(fid)
+    added = lay.create_folder("New folder", ["a"], "page:2")
+    view = view_for(monkeypatch, lay, {"ok": True, "days": 2, "opens": {"dup": 10}})
+    rows = {row["id"]: row for row in view["diff"]["placement_changes"]}
+    assert rows[fid]["reason"] == "removed" and rows[fid]["to"] is None
+    assert rows[added]["reason"] == "added" and rows[added]["from"] is None
+    top, = view["usage"]["top"]
+    assert top["name"] == "First" and top["where"] == lay.positions()["dup"]
+
+
+def test_detached_confirm_button_cannot_dismiss_a_new_review():
+    browser('''
+fixture.read_only=false;vm.runInContext('render()',context);
+let writes=0;context.fetch=async(path,opt)=>{assert.equal(path,'/api/apply');assert.equal(opt.method,'POST');
+ writes++;return {ok:true,json:async()=>({view:fixture,result:{ok:true}})};};
+$('#review').click();const previous=$('#modal-actions').lastChild;
+$('#modal-actions').firstChild.click();await tick();$('#review').click();previous.click();await tick();
+assert.equal(writes,0);assert.equal($('#modal').hidden,false);
+$('#modal-actions').lastChild.click();await tick();assert.equal(writes,1);
+''',native=True)
+
+
+def test_verification_details_and_backup_in_webclip_result():
+    browser('''
+fixture.pages[0][0].pages[0][0].kind='webclip';
+vm.runInContext("showResult({ok:false,status:'unknown',hidden_webclips:['My clip'],mismatches:{added_by_ios:['synthetic.app']},backup:'raw.plist',error:'raw diagnostic'})",context);
+assert.ok($('#modal-body').textContent.includes('My clip'));assert.ok($('#modal-body').textContent.includes('raw.plist'));
+assert.equal($('#modal-body').querySelector('details pre').textContent,'raw diagnostic');
+$('#modal-actions').firstChild.click();
+vm.runInContext("showResult({hidden_webclips:['New clip'],mismatches:{added_by_ios:['new']},backup:'recovery'})",context);
+assert.ok($('#modal-body').textContent.includes('New clip'));assert.equal($('#modal-actions').children.length,1);
+''',native=True)
+
+
+def test_read_replacement_and_device_switch_clear_reused_ids_before_render():
+    browser('''
+const select=()=>{$('#pages').querySelector('[data-id="synthetic.folder"]').click();
+ $('#folder-pages').querySelector('[data-id="synthetic.app"]').click();};
+const clean=()=>{assert.equal($('#selection-bar').hidden,true);assert.equal($('#drawer').hidden,true);
+ assert.ok(!$('#pages').querySelector('[data-id="synthetic.folder"]').classList.contains('selected'));};
+context.fetch=async(path,opts)=>{assert.ok(['/api/read','/api/device'].includes(path));assert.equal(opts.method,'POST');
+ return {ok:true,json:async()=>({...fixture,device_id:'reused'})};};
+select();$('#read').click();await tick();assert.equal($('#modal').hidden,false);
+$('#modal-actions').lastChild.click();await tick();await tick();clean();
+select();await vm.runInContext("selectDevice('reused',true)",context);clean();
+''',native=True)
+
+
+def test_current_review_token_and_invalid_draft_actions():
+    browser('''
+fixture.read_only=false;fixture.diff.items_moved=0;vm.runInContext('render()',context);
+assert.equal($('#review').disabled,false);assert.equal($('#summary').textContent,i18n.t('editor.layoutChanged'));
+$('#review').click();fixture.diff.apply_token='changed';$('#modal-actions').lastChild.click();await tick();
+assert.ok(!calls.includes('/api/apply'));
+fixture.diff.problems=['bank'];$('#review').click();assert.equal($('#modal-actions').children.length,1);$('#modal-actions').firstChild.click();
+fixture.diff.has_changes=false;vm.runInContext('render()',context);assert.equal($('#review').disabled,true);
+''',native=True)
+
+def test_cached_bootstrap_catalog_precedes_onboarding_script():
+    browser('''
+const terms=$('#consent-text');terms.scrollTop=800;terms.dispatchEvent({type:'scroll'});
+$('#consent-agree').checked=true;$('#consent-agree').dispatchEvent({type:'change'});
+$('#consent-continue').click();await tick();await tick();
+assert.equal(context.ScreenOrganizerOnboarding.accepted,true);
+assert.deepEqual(calls.filter(path=>path.startsWith('/api/')),['/api/state','/api/devices']);
+''',setup="context.waitForInitialCatalog=true;")
+
+
+def test_winning_host_choice_can_finish_startup_before_older_catalog():
+    browser('''
+assert.equal(i18n.locale,'de');
+''',setup='''
+stored.set('screenOrganizer.language','fr');const fetch=context.fetch;
+context.fetch=p=>p.endsWith('/fr.json')?new Promise(r=>context.release=()=>fetch(p).then(r)):fetch(p);
+''',before_ready='''
+await tick();assert.ok(context.release);
+await context.ScreenOrganizerI18n.setLocale('de');
+let ready=false;context.ScreenOrganizerI18n.ready.then(()=>ready=true);await tick();
+assert.ok(ready,'a stale catalog must not prevent the winning selection from completing startup');
+context.release();await tick();assert.equal(context.ScreenOrganizerI18n.locale,'de');
+''')
+
+
+@pytest.mark.parametrize("file", ["manifest.json", "en.json"])
+def test_bootstrap_catalog_failure_blocks_consent_and_device_requests(file):
+    browser('''
+assert.ok(context.catalogFailure);
+$('#consent-continue').onclick();await tick();
+assert.equal(context.ScreenOrganizerOnboarding.accepted,false);
+assert.ok(calls.every(path=>!path.startsWith('/api/')));
+''', setup='''
+const read=context.fetch;context.fetch=(path,opts)=>path==='/static/locales/'+FILE?Promise.resolve({ok:false}):read(path,opts);
+'''.replace('FILE',json.dumps(file)), before_ready="context.expectCatalogFailure=true;")
+
+
+def test_app_pins_and_drop_repaint_selection_atomically():
+    browser('''
+$('#pages').querySelector('[data-id="synthetic.folder"]').click();$('#folder-pages').querySelector('[data-id="synthetic.app"]').click();
+vm.runInContext("drag={ids:['synthetic.app']}",context);let good=false;
+context.fetch=async(path,opts)=>{assert.equal(path,'/api/op');assert.equal(opts.method,'POST');
+ assert.equal(JSON.parse(opts.body).op,'pin');return {ok:good,json:async()=>good?fixture:{error:'synthetic failure'}};};
+const drop=()=>$('#pages').querySelector('.slot').dispatchEvent({type:'drop'});
+drop();await tick();assert.ok(!$('#selection-bar').hidden);good=true;drop();await tick();
+assert.equal($('#selection-bar').hidden,true);assert.ok(!$('#folder-pages').querySelector('[data-id="synthetic.app"]').classList.contains('selected'));
+''',native=True)
+
+
+def test_new_request_returning_to_displayed_locale_settles_consent_immediately():
+    browser('''
+const terms=$('#consent-text'), agree=$('#consent-agree'), select=$('#consent-language-select');
+let release;const read=context.fetch;
+context.fetch=(p,opt)=>p.endsWith('/fr.json')?new Promise(r=>release=()=>read(p,opt).then(r)):read(p,opt);
+const first=i18n.setLocale('fr');await i18n.setLocale('system');
+terms.scrollTop=800;terms.dispatchEvent({type:'scroll'});agree.checked=true;agree.onchange();
+assert.equal($('#consent-continue').disabled,false);
+release();await first;assert.equal(select.value,'system');assert.equal(document.documentElement.lang,'en');
+assert.equal(agree.checked,true);assert.equal($('#consent-continue').disabled,false);
+''')
+
+
+def test_generated_backup_timestamp_and_operations_preserve_opaque_names():
+    browser('''
+const label=s=>vm.runInContext('backupLabel('+JSON.stringify(s)+')',context), id='f'.repeat(32);
+for(const n of ['20260230-110000-before-apply-','20261113-246000-before-restore-','20261113-130000-user-defined-'])
+ assert.equal(label(n+id+'.plist'),n+id+'.plist');
+for(const [op,key] of [['apply','editor.beforeApply'],['restore','editor.beforeRestore']]){
+ const display=label('20260228-110000-before-'+op+'-'+id+'.plist');
+ assert.ok(display.includes(i18n.t(key)));assert.ok(display.includes(id));}
+''',native=True)

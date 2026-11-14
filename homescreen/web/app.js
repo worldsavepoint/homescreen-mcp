@@ -49,7 +49,7 @@ function locationText(descriptor) {
   if (descriptor.kind === "bank") return t("editor.bank");
   const params = Object.fromEntries(Object.entries(descriptor).map(([key, value]) =>
     [key, typeof value === "number" ? number(value) : value]));
-  return t("location." + descriptor.kind, params);
+  return t(descriptor.row ? "location.cell" : "location." + descriptor.kind, params);
 }
 function locationLabel(raw) { return V.location_labels?.[raw] ? locationText(V.location_labels[raw]) : raw; }
 function diagnostic(message) {
@@ -58,8 +58,18 @@ function diagnostic(message) {
   return details;
 }
 function errorKey(message, code) {
-  if (code === "read_only" || /read-only mode/i.test(message)) return "editor.readOnly";
+  message = message.replace(/^(?:couldn't read the device|apply failed|restore failed): /, "");
+  if (code === "read_only" || message === "read-only mode: device writes are disabled") return "editor.readOnly";
   if (code === "invalid_credentials") return "editor.authenticationFailed";
+  if (message === "the saved draft changed in another session; reopen it or read the device again") return "error.staleDraft";
+  if (message === "the device placement changed in another session; read the device again" ||
+      message === "device grid metrics must be positive integers; read the device again" ||
+      message === "exported page grid dimensions are invalid or inconsistent") return "error.readAgain";
+  if (message === "the USB root archive uses one display identifier for different apps") return "error.wireConflict";
+  if (message === "keep a Home Screen page to preserve this archive's grid dimensions") return "error.keepPage";
+  if (message === "list-format writes cannot keep apps in the App Library") return "editor.libraryUnavailable";
+  if (message === "backup pin identifier format is unsupported" ||
+      message === "backup folder instance does not identify a pinned folder on its page") return "error.savedPosition";
   if (message === "widgets can't go in the dock") return "error.widgetsDock";
   if (/^a (folder|widget) can't go inside a folder$/.test(message)) return "error.folderItem";
   if (/^only apps go in the App Library/.test(message)) return "editor.onlyAppsInLibrary";
@@ -74,8 +84,8 @@ function errorKey(message, code) {
   if (/^device grid changed(?: during read; no layout was loaded|; explicitly read the intended device again)$/.test(message) ||
       /^saved draft (?:identity is invalid|pin identity is unavailable|pin identity is ambiguous); call read again$/.test(message)) return "error.readAgain";
   if (/^iOS 16 /.test(message)) return "error.ios16";
-  if (/^ambiguous pin identifier on a (layout|backup) page$/.test(message) ||
-      / has no (known wire identifier|wire identifier for its pin); use ordinary page order$/.test(message)) return "error.pinIdentifier";
+  if (/^ambiguous pin identifier on a (layout|backup) page$/.test(message)) return "error.ambiguousIdentifier";
+  if (/ has no (known wire identifier|wire identifier for its pin); use ordinary page order$/.test(message)) return "error.pinIdentifier";
   if (message === "pinned backup has no saved grid dimensions; use a backup with grid provenance" ||
       message === "backup grid dimensions must be positive integers") return "error.backupGrid";
   if (["pins must identify items on each page", "invalid saved pin memory", "saved pin footprint does not fit the loaded grid"].includes(message) ||
@@ -99,8 +109,7 @@ function widgetSize(size) {
 
 function showError(error) {
   const key = errorKey(error.message, error.code);
-  toast(usageError(error.message) || (() => t(key)), "error");
-  $("#toast").appendChild(diagnostic(error.message));
+  toast(usageError(error.message) || (() => t(key)), "error", error.message);
 }
 
 let V = null;               // current view from the server
@@ -121,7 +130,7 @@ async function api(path, body) {
     throw error;
   }
   if (V && V.read_only && ["/api/apply", "/api/restore"].includes(path)) {
-    throw new Error(t("editor.readOnly"));
+    throw Object.assign(new Error(t("editor.readOnly")), {code: "read_only"});
   }
   const opts = body === undefined ? {} : {
     method: "POST",
@@ -141,12 +150,14 @@ async function api(path, body) {
   return data;
 }
 
-async function op(name, args = {}, quiet = false) {
+async function op(name, args = {}, onSuccess) {
   try {
-    setView(await api("/api/op", { op: name, args }));
+    const view = await api("/api/op", { op: name, args });
+    onSuccess?.();
+    setView(view);
     return true;
   } catch (e) {
-    if (!quiet) showError(e);
+    showError(e);
     return false;
   }
 }
@@ -199,43 +210,59 @@ function findItem(id) {
   return null;
 }
 
-function toast(msg, kind = "") {
-  const t = $("#toast");
-  t.replaceChildren();
-  t.appendChild(localizedEl("span", null, msg));
-  t.className = "toast " + kind;
-  t.hidden = false;
+function toast(message, kind = "", detail) {
+  localized($("#operation-status"), message);
+  const box = $("#toast");
+  const previous = box.querySelector("details");
+  if (!box.hidden && previous && (previous.open || box.contains(document.activeElement))) return;
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => { t.hidden = true; }, kind === "error" ? 6000 : 3000);
+  box.replaceChildren(localizedEl("span", null, message));
+  box.className = "toast " + kind;
+  box.hidden = false;
+  if (detail) {
+    const close = localizedEl("button", null, () => t("common.close"));
+    close.onclick = () => { box.hidden = true; $("#read").focus(); };
+    box.append(diagnostic(detail), close);
+  } else {
+    toast.timer = setTimeout(() => { box.hidden = true; }, kind === "error" ? 6000 : 3000);
+  }
 }
 
-function modal({ title, body, actions }) {
-  return new Promise((resolve) => {
+function modal({ title, body, actions, initialInput }) {
+  const dialogs = ScreenOrganizerOnboarding;
+  if (dialogs.dialog) return Promise.resolve(null);
+  return new Promise(resolve => {
+    const root = $("#modal");
+    let closed = false;
+    const close = value => {
+      if (closed || !dialogs.closeDialog(root)) return;
+      closed = true;
+      resolve(value);
+    };
     localized($("#modal-title"), title);
     const b = $("#modal-body");
     b.replaceChildren();
-    if (typeof body === "string" || typeof body === "function") b.appendChild(localizedEl("p", null, body));
+    if (typeof body === "string") b.appendChild(el("p", null, body));
+    else if (typeof body === "function") b.appendChild(localizedEl("p", null, body));
     else if (body) b.appendChild(body);
     const a = $("#modal-actions");
     a.replaceChildren();
-    const close = (v) => { $("#modal").hidden = true; document.removeEventListener("keydown", onKey); resolve(v); };
-    const onKey = (e) => {
-      if (e.key === "Escape") close(null);
-      if (e.key === "Enter" && !e.target.matches("textarea")) {
-        const def = actions.find((x) => x.primary);
-        if (def) close(def.value());
-      }
-    };
     for (const act of actions) {
       const btn = localizedEl("button", act.primary ? "primary" : act.danger ? "danger" : "", act.label);
       btn.onclick = () => close(act.value ? act.value() : null);
       a.appendChild(btn);
     }
-    document.addEventListener("keydown", onKey);
-    $("#modal").hidden = false;
-    const inp = b.querySelector("input");
-    (inp || a.querySelector(".primary") || a.lastChild).focus();
-    if (inp) inp.select();
+    for (const button of b.querySelectorAll("[data-backup]")) button.onclick = () => close(button.dataset.backup);
+    dialogs.openDialog(root, initialInput || a.firstChild, () => close(null));
+    if (initialInput) {
+      initialInput.select();
+      initialInput.onkeydown = event => {
+        if (event.key === "Enter" && !event.isComposing) {
+          event.preventDefault();
+          a.querySelector(".primary").click();
+        }
+      };
+    }
   });
 }
 
@@ -245,7 +272,7 @@ async function promptText(title, label, value) {
   const inp = el("input");
   inp.value = value || "";
   wrap.appendChild(inp);
-  return modal({ title, body: wrap, actions: [
+  return modal({ title, body: wrap, initialInput: inp, actions: [
     { label: () => t("common.cancel"), value: () => null },
     { label: () => t("common.ok"), primary: true, value: () => inp.value.trim() || null },
   ] });
@@ -258,7 +285,14 @@ const confirmBox = (title, text, label = () => t("common.continue"), danger = fa
 
 // ---- rendering --------------------------------------------------------------------------
 
+function clearEditor() {
+  sel.clear();
+  openFolder = null;
+  drag = null;
+}
+
 function setView(v) {
+  if (!v.loaded || (V && V.device_id !== v.device_id)) clearEditor();
   V = v;
   for (const id of [...sel]) if (!findItem(id)) sel.delete(id);
   if (openFolder && !findItem(openFolder)) openFolder = null;
@@ -275,6 +309,11 @@ function render() {
   if (!loaded) {
     $("#device").textContent = V && V.source && V.source !== "phone" ? V.source : (deviceLabel() || t("editor.noDevice"));
     $("#read").textContent = t("editor.readDevice");
+    $("#drawer").hidden = true;
+    $("#folder-pages").replaceChildren();
+    $("#folder-name").value = "";
+    $("#selection-bar").hidden = true;
+    $("#sel-count").textContent = "";
     renderFooter();
     return;
   }
@@ -349,6 +388,7 @@ function renderPages() {
     const tb = (label, title, fn, disabled) => {
       const b = el("button", null, label);
       b.title = title;
+      b.setAttribute("aria-label", title);
       b.disabled = !!disabled;
       b.onclick = fn;
       tools.appendChild(b);
@@ -515,16 +555,17 @@ function renderFooter() {
   if (!V || !V.loaded) { s.textContent = t("editor.readToStart"); btn.disabled = true; return; }
   const d = V.diff;
   const parts = [];
-  if (!d.items_moved && d.pages_before === d.pages_after && !d.gaps_changed) parts.push(t("editor.noChanges"));
+  if (!d.has_changes) parts.push(t("editor.noChanges"));
   else {
-    parts.push(t("editor.appsMoved", {count: number(d.items_moved)}));
+    if (d.items_moved) parts.push(t("editor.appsMoved", {count: number(d.items_moved)}));
+    else parts.push(t("editor.layoutChanged"));
     if (d.to_app_library) parts.push(t("editor.toLibraryCount", {count: number(d.to_app_library)}));
     if (d.pages_before !== d.pages_after) parts.push(t("editor.pagesChanged", {before: number(d.pages_before), after: number(d.pages_after)}));
     if (d.gaps_changed) parts.push(t("editor.gapsChanged", {count: number(d.gaps_changed)}));
   }
   s.textContent = parts.join(" · ");
   if (d.problems.length) s.appendChild(el("span", "problem", " · " + t("editor.problemCount", {count: number(d.problems.length)})));
-  btn.disabled = V.read_only || (!d.items_moved && d.pages_before === d.pages_after && !d.gaps_changed);
+  btn.disabled = V.read_only || !d.has_changes;
 }
 
 // ---- interaction -----------------------------------------------------------------------
@@ -608,7 +649,7 @@ function wireSlot(slot, page, cell) {
     e.stopPropagation();
     const id = drag.ids[0];
     clearMarks();
-    op("pin", { id, page, cell }).then((ok) => ok && sel.clear());
+    op("pin", { id, page, cell }, () => sel.clear());
   });
 }
 
@@ -634,10 +675,8 @@ async function moveIds(ids, target, before) {
     const bad = ids.map(findItem).filter((it) => it && it.kind !== "app" && it.kind !== "webclip");
     if (bad.length) return toast(() => t("editor.onlyAppsInLibrary"), "error");
   }
-  const ok = ids.length === 1
-    ? await op("move", { id: ids[0], target, before })
-    : await op("move_many", { ids, target, before });
-  if (ok) sel.clear(), render();
+  if (ids.length === 1) return op("move", { id: ids[0], target, before }, () => sel.clear());
+  return op("move_many", { ids, target, before }, () => sel.clear());
 }
 
 async function dropOnto(item, ids, ctx) {
@@ -646,14 +685,14 @@ async function dropOnto(item, ids, ctx) {
     const last = pages.length;
     const room = G().folder - (pages[last - 1] || []).length;
     const target = `${item.id}:${room >= ids.length ? last : last + 1}`;
-    if (await op("move_many", { ids, target })) { sel.clear(); toast(() => t("editor.movedInto", {name: item.name})); }
+    if (await op("move_many", { ids, target }, () => sel.clear())) toast(() => t("editor.movedInto", {name: item.name}));
     return;
   }
   const name = await promptText(() => t("editor.newFolder"), () => t("editor.folderWith", {name: item.name, count: number(ids.length)}), t("editor.folderDefault"));
   if (!name) return;
   const page = ctx.target;
   const siblings = locateIndex(item.id, page);
-  if (await op("create_folder", { name, ids: [item.id, ...ids], target: page, index: siblings })) sel.clear(), render();
+  await op("create_folder", { name, ids: [item.id, ...ids], target: page, index: siblings }, () => sel.clear());
 }
 
 function locateIndex(id, target) {
@@ -673,7 +712,7 @@ async function newFolderFromSelection() {
     const i = V.pages[p].findIndex((x) => ids.includes(x.id));
     if (i >= 0) { target = `page:${p + 1}`; index = i; break; }
   }
-  if (await op("create_folder", { name, ids, target, index })) { sel.clear(); render(); }
+  await op("create_folder", { name, ids, target, index }, () => sel.clear());
 }
 
 async function selectionToLibrary() {
@@ -725,29 +764,28 @@ function renderDeviceMenu() {
 }
 
 async function selectDevice(udid, quiet) {
-  if (!quiet && V && V.loaded && V.diff.items_moved) {
+  if (!quiet && V && V.loaded && V.diff.has_changes) {
     toast(() => t("editor.draftKept"), "ok");
   }
   try {
-    setView(await api("/api/device", { udid }));
+    const view = await api("/api/device", { udid });
     DEV.current = udid;
-    sel.clear();
-    openFolder = null;
+    clearEditor();
+    setView(view);
     renderDeviceMenu();
-    render();
   } catch (e) { showError(e); }
 }
 
 // ---- top-level actions ----------------------------------------------------------------
 
 async function readDevice() {
-  if (V && V.loaded && (V.diff.items_moved || V.history.undo)) {
+  if (V && V.loaded && (V.diff.has_changes || V.history.undo)) {
     if (!(await confirmBox(() => t("editor.readAgainTitle"), () => t("editor.readAgainBody", {device: D()}), () => t("editor.read"), true))) return;
   }
   try {
     const v = await withBusy(() => t("editor.reading", {device: V && V.loaded ? D() : t("editor.device")}), () => api("/api/read", {}));
+    clearEditor();
     setView(v);
-    sel.clear();
     toast(() => t("editor.readSuccess"), "ok");
   } catch (e) {
     showError(e);
@@ -755,8 +793,12 @@ async function readDevice() {
 }
 
 async function review() {
+  if (!V?.loaded) return;
   if (V.read_only) { toast(() => t("editor.readOnly"), "error"); return; }
   const d = V.diff;
+  if (!d.has_changes || ScreenOrganizerOnboarding.dialog) return;
+  const token = d.apply_token;
+  if (typeof token !== "string" || !token) return;
   const body = el("div");
   const stats = el("div", "stats");
   const stat = (value, key) => {
@@ -784,10 +826,20 @@ async function review() {
   for (const [k, v] of Object.entries(V.moves)) {
     const li = el("li");
     const detail = V.move_details?.[k];
-    li.append(el("span", null, detail ? detail.name : k.replace(/ \[.*\]$/, "")),
+    li.append(el("span", null, detail ? detail.name : k),
       detail ? localizedEl("span", "to", () => locationText(detail.from) + " → " + locationText(detail.to)) : el("span", "to", v));
     ul.appendChild(li);
   }
+  for (const change of d.placement_changes || []) {
+    const li = el("li");
+    const name = change.before_name !== undefined ? change.before_name + " → " + change.name : change.name;
+    li.append(el("span", null, name), localizedEl("span", "to", () => {
+      const endpoints = [change.from, change.to].filter(Boolean).map(locationText);
+      return t("placement." + change.reason) + " · " + [...new Set(endpoints)].join(" → ");
+    }));
+    ul.appendChild(li);
+  }
+  if (!d.items_moved) body.appendChild(localizedEl("p", null, () => t("editor.layoutChanged")));
   body.appendChild(ul);
   if (V.gaps && !V.gaps.readable) {
     body.appendChild(localizedEl("p", null, () => t("editor.gapsWarning", {device: D()}) + " "
@@ -797,8 +849,9 @@ async function review() {
   const actions = [{ label: () => d.problems.length ? t("common.close") : t("common.cancel"), value: () => false }];
   if (!d.problems.length) actions.push({ label: () => t("editor.apply"), primary: true, value: () => true });
   if (!(await modal({ title: () => d.problems.length ? t("editor.fixFirst") : t("editor.applyTitle", {device: D()}), body, actions }))) return;
+  if (!V?.loaded || V.read_only || V.diff.apply_token !== token || !V.diff.has_changes || V.diff.problems.length) return;
   try {
-    const res = await withBusy(() => t("editor.writing", {device: D()}), () => api("/api/apply", { token: d.apply_token }));
+    const res = await withBusy(() => t("editor.writing", {device: D()}), () => api("/api/apply", { token }));
     setView(res.view);
     const r = res.result;
     if (r.ok) toast(() => t("editor.applied", {device: D()}), "ok");
@@ -809,64 +862,76 @@ async function review() {
 }
 
 function showResult(r) {
-  const clips = (r.mismatches && r.mismatches.added_by_ios || []).filter((id) => (findItem(id) || {}).kind === "webclip");
-  if (r.hidden_webclips && clips.length) return showHiddenClips(r, clips);
+  const clips = (r.mismatches?.added_by_ios || []).filter(id => findItem(id)?.kind === "webclip");
+  if (r.hidden_webclips?.length) return showHiddenClips(r, clips);
   const body = el("div");
-  body.appendChild(localizedEl("p", null, () => t("editor.resultMismatch", {device: D()})));
-  if (r.error) body.appendChild(diagnostic(r.error));
-  const pre = el("pre");
-  pre.style.cssText = "white-space:pre-wrap;font-size:12px;max-height:40vh;overflow:auto";
-  pre.textContent = JSON.stringify(r.mismatches || {}, null, 1);
-  body.appendChild(pre);
-  body.appendChild(localizedEl("p", null, () => t("editor.backupSaved", {backup: r.backup})));
+  const compared = r.mismatches && Object.keys(r.mismatches).length;
+  const outcome = () => compared ? t("editor.resultMismatch", {device: D()}) : t("editor.resultUnknown");
+  localized($("#operation-status"), outcome);
+  body.appendChild(localizedEl("p", null, outcome));
+  resultDetails(body, r);
   modal({ title: () => t("editor.checkResult"), body, actions: [{ label: () => t("common.ok"), primary: true, value: () => null }] });
+}
+
+function resultDetails(body, result) {
+  if (result.error) body.appendChild(diagnostic(result.error));
+  if (result.mismatches && Object.keys(result.mismatches).length)
+    body.appendChild(el("pre", "diagnostic", JSON.stringify(result.mismatches, null, 1)));
+  if (result.backup) body.appendChild(localizedEl("p", null, () => t("editor.backupSaved", {backup: result.backup})));
 }
 
 // iOS keeps web clips that are off the Home Screen but never reports them over USB; when a
 // write frees a spot, it puts one there. Home Screen Organizer remembers them from now on.
 async function showHiddenClips(r, ids) {
   const body = el("div");
-  body.appendChild(localizedEl("p", null, () => t("editor.hiddenClipsBody", {device: D(), count: number(ids.length)})));
+  const message = () => t("editor.hiddenClipsBody", {device: D(), count: number(r.hidden_webclips.length)});
+  localized($("#operation-status"), message);
+  body.appendChild(localizedEl("p", null, message));
   const ul = el("ul", "moves");
   for (const n of r.hidden_webclips) ul.appendChild(el("li", null, n));
   body.appendChild(ul);
   body.appendChild(localizedEl("p", null, () => t("editor.hiddenClipsHint")));
-  const act = await modal({ title: () => t("editor.hiddenClipsTitle"), body, actions: [
-    { label: () => t("editor.keepHere"), value: () => "keep" },
-    { label: () => t("editor.sendToLibrary"), primary: true, value: () => "library" },
-  ] });
+  resultDetails(body, r);
+  const actions = [{ label: () => t(ids.length ? "editor.keepHere" : "common.close") }];
+  if (ids.length) actions.push({ label: () => t("editor.sendToLibrary"), primary: true, value: () => "library" });
+  const act = await modal({ title: () => t("editor.hiddenClipsTitle"), body, actions });
   if (act !== "library") return;
-  if (!(await op("move_many", { ids, target: "library" }))) return;
-  try {
-    const res = await withBusy(() => t("editor.writing", {device: D()}), () => api("/api/apply", { token: V.diff.apply_token }));
-    setView(res.view);
-    res.result.ok ? toast(() => t("editor.clipsInLibrary"), "ok") : showResult(res.result);
-  } catch (e) { showError(e); }
+  if (await op("move_many", { ids, target: "library" })) await review();
+}
+
+function backupLabel(name) {
+  const m = name.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-before-(apply|restore)-([a-f0-9]{32})\.plist$/);
+  if (!m) return name;
+  const [year, month, day, hour, minute, second] = m.slice(1, 7).map(Number);
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(hour, minute, second, 0);
+  if (!year || date.getUTCFullYear() !== year || date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day ||
+      hour > 23 || minute > 59 || second > 59) return name;
+  const when = ScreenOrganizerI18n.formatDate(date, {timeZone: "UTC", year:"numeric", month:"numeric", day:"numeric"});
+  const time = ScreenOrganizerI18n.formatDate(date, {timeZone: "UTC", hour:"2-digit", minute:"2-digit"});
+  return when + " " + time + " · " + t(m[7] === "apply" ? "editor.beforeApply" : "editor.beforeRestore") + " · " + m[8];
 }
 
 async function showBackups() {
   const { backups } = await api("/api/backups");
   const body = el("div");
   if (!backups.length) body.appendChild(localizedEl("p", null, () => t("editor.noBackups")));
-  for (const b of backups) {
+  for (const name of backups) {
     const row = el("div", "backup-row");
-    const m = b.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-(.*)\.plist$/);
-    row.appendChild(localizedEl("span", null, () => m ? `${ScreenOrganizerI18n.formatDate(new Date(+m[1], +m[2] - 1, +m[3]))} ${new Intl.DateTimeFormat(ScreenOrganizerI18n.locale, {hour: "2-digit", minute: "2-digit"}).format(new Date(2000, 0, 1, +m[4], +m[5]))} · ${m[7].replace(/-/g, " ")}` : b));
     const btn = localizedEl("button", null, () => t("editor.restore"));
     btn.disabled = Boolean(V && V.read_only);
-    btn.onclick = async () => {
-      $("#modal").hidden = true;
-      if (!(await confirmBox(() => t("editor.restoreTitle"), () => t("editor.restoreBody", {device: D()}), () => t("editor.restore")))) return;
-      try {
-        const res = await withBusy(() => t("editor.restoring"), () => api("/api/restore", { name: b }));
-        setView(res.view);
-        res.result.ok ? toast(() => t("editor.restored"), "ok") : showResult(res.result);
-      } catch (e) { showError(e); }
-    };
-    row.appendChild(btn);
+    btn.setAttribute("data-backup", name);
+    row.append(localizedEl("span", null, () => backupLabel(name)), btn);
     body.appendChild(row);
   }
-  modal({ title: () => t("editor.backups"), body, actions: [{ label: () => t("common.close"), primary: true, value: () => null }] });
+  const name = await modal({ title: () => t("editor.backups"), body, actions: [{ label: () => t("common.close") }] });
+  if (!name || !(await confirmBox(() => t("editor.restoreTitle"), () => t("editor.restoreBody", {device: D()}), () => t("editor.restore")))) return;
+  try {
+    const res = await withBusy(() => t("editor.restoring"), () => api("/api/restore", { name }));
+    setView(res.view);
+    res.result.ok ? toast(() => t("editor.restored"), "ok") : showResult(res.result);
+  } catch (e) { showError(e); }
 }
 
 async function organize(name) {
@@ -940,14 +1005,14 @@ $("#keep-first").onchange = (e) => { try { localStorage.setItem("hs.keepFirst", 
 $("#search").oninput = (e) => { query = e.target.value.trim().toLowerCase(); render(); };
 $("#sel-folder").onclick = newFolderFromSelection;
 $("#sel-library").onclick = selectionToLibrary;
-$("#sel-unpin").onclick = () => op("unpin", { ids: [...sel] }).then((ok) => ok && (sel.clear(), render()));
+$("#sel-unpin").onclick = () => op("unpin", { ids: [...sel] }, () => sel.clear());
 $("#sel-clear").onclick = () => { sel.clear(); render(); };
 $("#drawer-close").onclick = () => { openFolder = null; render(); };
 $("#folder-name").onchange = (e) => {
   const name = e.target.value.trim();
   if (openFolder && name) op("rename_folder", { id: openFolder, name });
 };
-$("#folder-name").onkeydown = (e) => { if (e.key === "Enter") e.target.blur(); };
+$("#folder-name").onkeydown = (e) => { if (e.key === "Enter" && !e.isComposing) e.target.blur(); };
 $("#folder-add-page").onclick = () => {
   const f = findItem(openFolder);
   if (!f) return;
@@ -958,15 +1023,14 @@ $("#folder-add-page").onclick = () => {
 $("#folder-dissolve").onclick = async () => {
   const f = findItem(openFolder);
   if (f && await confirmBox(() => t("editor.removeFolderTitle", {name: f.name}), () => t("editor.removeFolderBody"), () => t("editor.removeFolder"), true)) {
-    openFolder = null;
-    op("dissolve_folder", { id: f.id });
+    op("dissolve_folder", { id: f.id }, () => { openFolder = null; });
   }
 };
 $("#board").addEventListener("click", (e) => {
   if (!e.target.closest(".item, .widget, button") && sel.size) { sel.clear(); render(); }
 });
 document.addEventListener("keydown", (e) => {
-  if (e.defaultPrevented || !ScreenOrganizerOnboarding.accepted || !$("#mcp-dialog").hidden || e.target.matches("input,select,textarea") || !$("#modal").hidden) return;
+  if (e.defaultPrevented || !ScreenOrganizerOnboarding.accepted || ScreenOrganizerOnboarding.dialog || e.target.matches("input,select,textarea")) return;
   const mod = e.metaKey || e.ctrlKey;
   if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); op(e.shiftKey ? "redo" : "undo"); }
   else if (e.key === "Escape") { sel.clear(); openFolder = null; render(); }
@@ -974,7 +1038,7 @@ document.addEventListener("keydown", (e) => {
   else if (mod && e.key.toLowerCase() === "f") { e.preventDefault(); $("#search").focus(); }
 });
 window.addEventListener("beforeunload", (e) => {
-  if (V && V.loaded && V.diff.items_moved) { e.preventDefault(); e.returnValue = ""; }
+  if (V && V.loaded && V.diff.has_changes) { e.preventDefault(); e.returnValue = ""; }
 });
 
 ScreenOrganizerI18n.onChange(() => {

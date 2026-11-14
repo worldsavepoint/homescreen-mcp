@@ -235,7 +235,7 @@ main { flex: 1; display: flex; min-height: 0; }
   #search { width: 100%; order: 10; }
   #library-panel { display: none !important; }
   .page { width: 100%; }
-  .grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .grid { grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr)); }
 }
 
 /* Toolbar controls share the editor's system typography and neutral surfaces. */
@@ -247,16 +247,16 @@ button:focus-visible, select:focus-visible, [tabindex]:focus-visible { outline: 
 #search { min-width: 110px; flex: 1 1 130px; max-width: 200px; }
 #organize-btn::after { content: " ▾"; }
 .onboarding { z-index: 80; }
-.onboarding .modal-card { width: min(620px, 100%); max-height: 92vh; gap: 10px; }
+.onboarding .modal-card { width: min(620px, 100%); max-height: min(92vh, calc(100vh - 32px)); overflow: auto; gap: 10px; }
 .onboarding h2, .onboarding h3, .onboarding p { margin: 0; }
 .onboarding h3 { font-size: 13px; }
 .onboarding p { color: var(--muted); }
 .onboarding-brand svg { width: 32px; height: 32px; display: block; }
-.consent-text { max-height: 32vh; overflow: auto; min-height: 0; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.consent-text { max-height: 32vh; overflow: auto; min-height: 7.5em; flex-shrink: 0; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
 .consent-text p + p { margin-top: 12px; }
 .onboarding .modal-actions { flex-wrap: wrap; margin-top: 2px; }
 .onboarding .modal-actions button { white-space: normal; }
-#mcp-dialog .modal-card { overflow: auto; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 #mcp-examples section { margin: 10px 0; }
 #mcp-examples pre { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; background: var(--panel-2); border: 1px solid var(--line); padding: 10px; border-radius: 8px; font-size: 12px; }
 #consent-language-select { align-self: flex-start; }

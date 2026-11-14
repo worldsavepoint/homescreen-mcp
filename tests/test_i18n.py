@@ -49,7 +49,9 @@ const stored = new Map(), calls = [];
 const context = {URL, Intl, Date, console,
  navigator:{languages:["de-DE"]},
  localStorage:{getItem:key=>stored.get(key) || null, setItem:(key,value)=>stored.set(key,value)},
- fetch:async url=>{ const file = String(url).split("/").pop(); calls.push(file);
+ fetch:async (url,opts)=>{ const file = String(url).split("/").pop(); calls.push(file);
+   assert.equal(opts.method,undefined);assert.equal(url,"/static/locales/"+file);
+   assert.ok(file==="manifest.json" || manifest.languages.some(l=>l.code+".json"===file));
    return {ok:true,json:async()=>file === "manifest.json" ? manifest : (catalogs[file.slice(0,-5)] || {})}; }
 };
 context.window = context;
@@ -300,3 +302,21 @@ def test_package_data_includes_registered_catalogs():
     for name in ["manifest", *(item["code"] for item in manifest["languages"])]:
         resource = f"web/locales/{name}.json"
         assert resource in packaged
+
+
+def test_registered_regional_catalog_aliases_and_saved_owner():
+    run_browser('''
+assert.equal(i18n.preference, 'zh-Hant');
+for (const [value, expected] of [['fra','fr'],['fre','fr'],['spa','es'],['zh_TW','zh-Hant'],
+ ['zh-Hans-TW','zh-Hans'],['zh-Hant-CN','zh-Hant'],['zh-Hant-HK','zh-Hant-HK'],
+ ['gsw_CH','de'],['de-1901','de-1901'],['sh','sr-Latn'],['invalid_tag$','system']]) {
+ await i18n.setLocale(value);
+ assert.equal(i18n.preference, expected, value);
+ if (expected==='zh-Hant-HK') assert.equal(i18n.t('hello'),'Regional');
+}
+''', '''
+stored.set('screenOrganizer.language','zh_TW');
+manifest.languages.find(l=>l.code==='de').aliases.push('gsw_CH');
+for(const code of ['zh-Hant-HK','de-1901','sr-Latn']) manifest.languages.push({code,name:code,aliases:[]});
+catalogs['zh-Hant-HK']={hello:'Regional'};
+''')
