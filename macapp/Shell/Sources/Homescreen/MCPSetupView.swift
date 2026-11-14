@@ -33,11 +33,19 @@ final class MCPSetupModel: ObservableObject {
     func feedback(for client: MCPClient) -> Feedback? {
         if let result = registrations[client] {
             return Feedback(primaryKey: result.code == .success ? "mcp.registered" : operationKey(result.code),
-                recoveryKey: result.recovery == .notNeeded ? nil : (result.recovery == .restored ? "mcp.restored" : "mcp.recoveryFailed"),
+                recoveryKey: result.cleanupPending ? "mcp.cleanupPending" : recoveryKey(result.recovery),
                 details: result.code == .success ? nil : "\(result.code.rawValue) · \(result.recovery.rawValue)")
         }
         guard let query = queries[client], query.code != .success && query.code != .notFound else { return nil }
         return Feedback(primaryKey: operationKey(query.code), details: query.code.rawValue)
+    }
+
+    private func recoveryKey(_ recovery: MCPRegistrationRecovery) -> String? {
+        switch recovery {
+        case .notNeeded: return nil
+        case .restored: return "mcp.restored"
+        case .failed: return "mcp.recoveryFailed"
+        }
     }
 
     private func operationKey(_ code: MCPClientOperationCode) -> String {

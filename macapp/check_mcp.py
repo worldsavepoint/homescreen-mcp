@@ -8,6 +8,18 @@ import tempfile
 import time
 
 
+def valid_tool(tool):
+    if not isinstance(tool, dict) or not isinstance(tool.get("name"), str) or not tool["name"]:
+        return False
+    schema = tool.get("inputSchema")
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return False
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+    return (isinstance(properties, dict) and all(isinstance(item, dict) for item in properties.values())
+            and isinstance(required, list) and all(isinstance(key, str) for key in required))
+
+
 def check(command, timeout):
     with tempfile.TemporaryDirectory(prefix="home-screen-mcp-check-") as data:
         environment = {**os.environ, "HOMESCREEN_READ_ONLY": "1", "HOMESCREEN_DATA": data}
@@ -66,10 +78,14 @@ def check(command, timeout):
                 raise ValueError("Unexpected MCP server identity")
             send({"method": "notifications/initialized"})
             send({"id": 2, "method": "tools/list", "params": {}})
-            tools = {tool["name"] for tool in receive(2)["tools"]}
+            descriptors = receive(2).get("tools")
+            if not isinstance(descriptors, list) or not all(valid_tool(tool) for tool in descriptors):
+                raise ValueError("Invalid MCP tool descriptor")
+            tools = {tool["name"] for tool in descriptors}
             if not {"read_phone", "show_layout", "move", "diff"} <= tools:
                 raise ValueError("Required MCP tools are missing")
             print("ios-homescreen-mcp initialized; required tools discovered")
+            return result["serverInfo"]["version"]
         finally:
             selector.close()
             if process.poll() is None:

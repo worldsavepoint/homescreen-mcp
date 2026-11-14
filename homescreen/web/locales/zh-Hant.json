@@ -241,6 +241,7 @@
   "mcp.projectConfiguration": "目前生效的專案設定",
   "mcp.updateCodex": "請更新 Codex CLI 後註冊此伺服器，或從「進階」複製設定。",
   "mcp.remoteConflict": "請先在 Claude Code 中重新命名遠端伺服器，再註冊此本機伺服器。",
+  "mcp.cleanupPending": "請重新整理狀態，以清除暫存的註冊記錄。",
   "mcp.recoveryConflict": "註冊資料在還原期間有所變更。請在用戶端中檢查這筆資料。",
   "mcp.copyFailed": "無法複製。請選取文字後複製。",
   "mcp.browserSetup": "在終端機執行設定指令，然後重新整理用戶端的 MCP 工具。",

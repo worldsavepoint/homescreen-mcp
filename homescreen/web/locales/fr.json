@@ -241,6 +241,7 @@
   "mcp.projectConfiguration": "Configuration active du projet",
   "mcp.updateCodex": "Mettez à jour la CLI de Codex pour enregistrer ce serveur ou copiez sa configuration depuis les options avancées.",
   "mcp.remoteConflict": "Renommez le serveur distant dans Claude Code avant d’enregistrer ce serveur local.",
+  "mcp.cleanupPending": "Actualisez le statut pour supprimer le fichier temporaire d’enregistrement.",
   "mcp.recoveryConflict": "L’enregistrement a changé pendant la restauration. Vérifiez cette entrée dans votre client.",
   "mcp.copyFailed": "Copie impossible. Sélectionnez et copiez le texte.",
   "mcp.browserSetup": "Exécutez la commande de configuration dans Terminal, puis actualisez les outils MCP du client.",

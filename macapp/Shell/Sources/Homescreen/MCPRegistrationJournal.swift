@@ -79,6 +79,6 @@ class MCPRegistrationJournal {
     }
 
     func clear() throws {
-        guard unlinkat(dirFD, recordName, 0) == 0, fsync(dirFD) == 0 else { throw MCPClientOperationCode.recoveryFailed }
+        guard unlinkat(dirFD, recordName, 0) == 0 || errno == ENOENT, fsync(dirFD) == 0 else { throw MCPClientOperationCode.recoveryFailed }
     }
 }

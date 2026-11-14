@@ -241,6 +241,7 @@
   "mcp.projectConfiguration": "Aktive Projektkonfiguration",
   "mcp.updateCodex": "Aktualisiere die Codex CLI, um diesen Server zu registrieren, oder kopiere die Konfiguration unter „Erweitert“.",
   "mcp.remoteConflict": "Benenne den Remoteserver in Claude Code um, bevor du diesen lokalen Server registrierst.",
+  "mcp.cleanupPending": "Aktualisiere den Status, um die temporäre Registrierungsdatei zu entfernen.",
   "mcp.recoveryConflict": "Die Registrierung wurde während der Wiederherstellung geändert. Prüfe den Eintrag in deinem Client.",
   "mcp.copyFailed": "Kopieren fehlgeschlagen. Text auswählen und kopieren.",
   "mcp.browserSetup": "Führe den Einrichtungsbefehl im Terminal aus und aktualisiere die MCP-Werkzeuge deines Clients.",

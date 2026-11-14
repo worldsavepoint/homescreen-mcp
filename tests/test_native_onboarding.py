@@ -204,7 +204,7 @@ actor Gate {
    var addFailure = false
    var calledPaths: [String] = []
    let storage = TestEntry()
-   let manager = MCPClientManager(environment: [:], homeDirectory: directory, executableLocator: { _ in executable }, runner: { path, args, _, _ in
+   let manager = MCPClientManager(environment: [:], homeDirectory: directory, executableLocator: { _ in executable }, runner: { path, args, _, _, _ in
     calledPaths.append(path)
     if args[1] == "get" {
      if let failure = queryFailure { return MCPCommandResult(exitStatus:1,failure:failure) }
@@ -270,7 +270,7 @@ actor Gate {
    let executable = CommandLine.arguments[3]
    for recoverySucceeds in [true, false] {
     var snapshot: String? = #"{"command":"/original/engine","args":["mcp"],"env":{"HOMESCREEN_READ_ONLY":"1"}}"#
-    let manager = MCPClientManager(environment:[:],homeDirectory:directory,executableLocator:{ _ in executable },runner:{ _,args,_,_ in
+    let manager = MCPClientManager(environment:[:],homeDirectory:directory,executableLocator:{ _ in executable },runner:{ _,args,_,_,_ in
      switch args[1] {
      case "get":
       return snapshot == nil ? MCPCommandResult(exitStatus:1,stdout:"No server named ios-homescreen-mcp") :
@@ -306,7 +306,7 @@ actor Gate {
    var calls: [[String]] = []
    let gate = Gate()
    let storage = TestEntry()
-   let manager = MCPClientManager(environment: [:], homeDirectory: directory, executableLocator: { _ in executable }, runner: { _, args, _, _ in
+   let manager = MCPClientManager(environment: [:], homeDirectory: directory, executableLocator: { _ in executable }, runner: { _, args, _, _, _ in
     calls.append(args)
     if args[1] == "add" {
      await gate.hold()
@@ -366,9 +366,7 @@ actor Gate {
    }
    let token = MCPChildCancellation()
    token.cancel()
-   let child = Process()
-   child.executableURL = URL(fileURLWithPath:executable); child.environment = ["MARKER":marker]
-   do { try token.launch(child); assertionFailure("cancelled child started") } catch MCPClientOperationCode.cancelled {}
+   do { _ = try token.launch(executable,arguments:[], environment:["MARKER":marker],cwd:directory.path,stdin:.nullDevice,stdout:.nullDevice,stderr:.nullDevice); assertionFailure("cancelled child started") } catch MCPClientOperationCode.cancelled {}
    assert(!FileManager.default.fileExists(atPath:marker))
   case "engine":
    let executable = URL(fileURLWithPath: CommandLine.arguments[3])
@@ -442,7 +440,7 @@ for line in sys.stdin:
     if message["method"] == "initialize":
         result = {"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"ios-homescreen-mcp","version":"1"}}
     elif message["method"] == "tools/list":
-        result = {"tools":[{"name":name} for name in ["read_phone","show_layout","move","diff"]]}
+        result = {"tools":[{"name":name,"inputSchema":{"type":"object"}} for name in ["read_phone","show_layout","move","diff"]]}
     else: continue
     print(json.dumps({"jsonrpc":"2.0","id":message["id"],"result":result}),flush=True)
 ''')
@@ -484,6 +482,7 @@ def test_panel_dismissal_cancels_and_reaps_inspections(native_binary,catalogs,tm
     child.write_text(f"#!{sys.executable}\n" + '''import os,signal,time
 from pathlib import Path
 signal.signal(signal.SIGTERM,signal.SIG_IGN)
+if os.fork(): time.sleep(6); os._exit(0)
 marker = Path(os.environ["MARKER"])
 tmp = marker.with_suffix(".tmp")
 tmp.write_text(str(os.getpid())+"|"+os.environ.get("HOMESCREEN_DATA","/no-fixture-data"))

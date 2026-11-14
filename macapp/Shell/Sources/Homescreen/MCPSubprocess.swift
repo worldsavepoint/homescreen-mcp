@@ -6,16 +6,46 @@ import Foundation
 final class MCPChildCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
-    private var process: Process?
+    private var group: pid_t?
     private let wake = Pipe()
     var descriptor: Int32 { wake.fileHandleForReading.fileDescriptor }
 
-    func launch(_ child: Process) throws {
+    func launch(_ path: String, arguments: [String], environment: [String: String], cwd: String,
+                stdin: FileHandle, stdout: FileHandle, stderr: FileHandle) throws -> pid_t {
         lock.lock()
         defer { lock.unlock() }
         if cancelled { throw MCPClientOperationCode.cancelled }
-        do { try child.run() } catch { throw MCPClientOperationCode.launchFailed }
-        process = child
+        var attributes: posix_spawnattr_t?
+        var actions: posix_spawn_file_actions_t?
+        func checked(_ result: Int32) throws {
+            if result != 0 { throw MCPClientOperationCode.launchFailed }
+        }
+        try checked(posix_spawnattr_init(&attributes))
+        defer { posix_spawnattr_destroy(&attributes) }
+        try checked(posix_spawn_file_actions_init(&actions))
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        // The child becomes its group leader atomically, before an npm launcher can fork.
+        try checked(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)))
+        try checked(posix_spawnattr_setpgroup(&attributes, 0))
+        if #available(macOS 26, *) { try checked(posix_spawn_file_actions_addchdir(&actions, cwd)) }
+        else { try checked(posix_spawn_file_actions_addchdir_np(&actions, cwd)) }
+        for (index, handle) in [stdin, stdout, stderr].enumerated() {
+            if handle.fileDescriptor >= 0 {
+                try checked(posix_spawn_file_actions_adddup2(&actions, handle.fileDescriptor, Int32(index)))
+            } else {
+                try checked(posix_spawn_file_actions_addopen(&actions, Int32(index), "/dev/null", index == 0 ? O_RDONLY : O_WRONLY, 0))
+            }
+        }
+        var argv = ([path] + arguments).map { strdup($0) } + [nil]
+        var envp = environment.map { strdup($0.key + "=" + $0.value) } + [nil]
+        defer { argv.forEach { free($0) }; envp.forEach { free($0) } }
+        guard argv.dropLast().allSatisfy({ $0 != nil }), envp.dropLast().allSatisfy({ $0 != nil }) else {
+            throw MCPClientOperationCode.launchFailed
+        }
+        var pid: pid_t = 0
+        try checked(posix_spawn(&pid, path, &actions, &attributes, &argv, &envp))
+        group = pid
+        return pid
     }
 
     func cancel() {
@@ -23,16 +53,22 @@ final class MCPChildCancellation: @unchecked Sendable {
         defer { lock.unlock() }
         guard !cancelled else { return }
         cancelled = true
-        if let child = process, child.isRunning { kill(child.processIdentifier, SIGKILL) }
+        if let group { kill(-group, SIGKILL) }
         try? wake.fileHandleForWriting.write(contentsOf: Data([1]))
     }
 
-    func reap(_ child: Process) {
+    /// Keep the leader unreaped until its group has been signalled so its PID
+    /// cannot be recycled. Orphaned descendants are collected by launchd.
+    @discardableResult func reap(_ pid: pid_t) -> Int32 {
         lock.lock()
-        process = nil
-        if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+        group = nil
+        kill(-pid, SIGKILL)
         lock.unlock()
-        child.waitUntilExit()
+        var status: Int32 = 0
+        while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
+        while kill(-pid, 0) == 0 { usleep(1000) }
+        let signal = status & 0x7f
+        return signal == 0 ? (status >> 8) & 255 : 128 + signal
     }
 }
 
@@ -127,16 +163,11 @@ enum MCPSubprocess {
     static func session<T>(_ path: String, _ arguments: [String], _ environment: [String: String], _ timeout: TimeInterval,
                            _ body: @escaping (inout MCPChildIO) throws -> T) async throws -> T {
         try await work { token in
-            let process = Process()
             let input = Pipe(), output = Pipe()
-            process.executableURL = URL(fileURLWithPath: path)
-            process.environment = environment
-            process.arguments = arguments
-            process.standardInput = input
-            process.standardOutput = output
-            process.standardError = FileHandle.nullDevice
-            try token.launch(process)
-            defer { token.reap(process) }
+            let pid = try token.launch(path, arguments: arguments, environment: environment,
+                                       cwd: FileManager.default.currentDirectoryPath,
+                                       stdin: input.fileHandleForReading, stdout: output.fileHandleForWriting, stderr: .nullDevice)
+            defer { token.reap(pid) }
             try? input.fileHandleForReading.close()
             try? output.fileHandleForWriting.close()
             let fd = input.fileHandleForWriting.fileDescriptor
@@ -150,21 +181,27 @@ enum MCPSubprocess {
 }
 
 enum MCPProcessRunner {
-    static func run(executablePath: String, arguments: [String], environment: [String: String], timeout: TimeInterval) async -> MCPCommandResult {
+    static func run(executablePath: String, arguments: [String], environment: [String: String], timeout: TimeInterval, cwd: String) async -> MCPCommandResult {
         do {
             return try await MCPSubprocess.work { token in
-                let process = Process()
                 let stdout = Pipe(), stderr = Pipe()
-                process.executableURL = URL(fileURLWithPath: executablePath)
-                process.arguments = arguments
-                process.environment = environment
-                process.standardInput = FileHandle.nullDevice
-                process.standardOutput = stdout
-                process.standardError = stderr
                 let ended = Pipe()
-                process.terminationHandler = { _ in try? ended.fileHandleForWriting.write(contentsOf: Data([1])) }
-                try token.launch(process)
-                defer { token.reap(process) }
+                let pid = try token.launch(executablePath, arguments: arguments, environment: environment, cwd: cwd,
+                                           stdin: .nullDevice, stdout: stdout.fileHandleForWriting, stderr: stderr.fileHandleForWriting)
+                let waiter = DispatchGroup()
+                waiter.enter()
+                // Observe exit without consuming status. The worker always owns waitpid.
+                DispatchQueue.global(qos: .userInitiated).async {
+                    var info = siginfo_t()
+                    while waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) < 0 && errno == EINTR {}
+                    try? ended.fileHandleForWriting.write(contentsOf: Data([1]))
+                    waiter.leave()
+                }
+                var reaped = false
+                defer {
+                    if !reaped { token.reap(pid) }
+                    waiter.wait()
+                }
                 try? stdout.fileHandleForWriting.close()
                 try? stderr.fileHandleForWriting.close()
                 var descriptors = [stdout.fileHandleForReading, stderr.fileHandleForReading, ended.fileHandleForReading].map { pollfd(fd: $0.fileDescriptor, events: Int16(POLLIN), revents: 0) }
@@ -188,7 +225,9 @@ enum MCPProcessRunner {
                         else { output[i].append(contentsOf: bytes.prefix(count)) }
                     }
                 }
-                return MCPCommandResult(exitStatus: process.terminationStatus, stdout: String(decoding: output[0], as: UTF8.self),
+                let status = token.reap(pid)
+                reaped = true
+                return MCPCommandResult(exitStatus: status, stdout: String(decoding: output[0], as: UTF8.self),
                                         stderr: String(decoding: output[1], as: UTF8.self))
             }
         } catch { return MCPCommandResult(exitStatus: -1, failure: error as? MCPClientOperationCode ?? .commandFailed) }

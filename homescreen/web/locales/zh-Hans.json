@@ -241,6 +241,7 @@
   "mcp.projectConfiguration": "当前生效的项目配置",
   "mcp.updateCodex": "请更新 Codex CLI 后注册此服务器，或从“高级”中复制配置。",
   "mcp.remoteConflict": "请先在 Claude Code 中重命名远程服务器，再注册此本地服务器。",
+  "mcp.cleanupPending": "请刷新状态以清理临时注册记录。",
   "mcp.recoveryConflict": "注册信息在恢复期间发生了变化。请在客户端中检查此条目。",
   "mcp.copyFailed": "无法复制。请选中文本后复制。",
   "mcp.browserSetup": "在终端运行设置命令，然后刷新客户端的 MCP 工具。",

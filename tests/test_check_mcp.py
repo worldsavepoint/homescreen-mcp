@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import tomllib
 
 import pytest
 
@@ -37,7 +38,7 @@ for line in sys.stdin:
     elif method == "notifications/initialized":
         continue
     elif method == "tools/list":
-        response = {"tools": [{"name": name} for name in (["read_phone"] if behavior == "tools" else ["read_phone", "show_layout", "move", "diff"])]}
+        response = {"tools": [{"name": name, "inputSchema":{"type":"object"}} for name in (["read_phone"] if behavior == "tools" else ["read_phone", "show_layout", "move", "diff"])]}
     else:
         raise AssertionError("Unexpected method " + method)
     if behavior == "error":
@@ -64,15 +65,17 @@ def test_check_initializes_discovers_tools_and_closes_process(tmp_path):
     assert "ios-homescreen-mcp" in result.stdout
 
 
-def test_real_server_initializes_and_discovers_without_device_operations(tmp_path):
-    env = {key: value for key, value in os.environ.items()
-           if not key.startswith("HOMESCREEN_")}
-    env.update(HOMESCREEN_DATA=str(tmp_path / "unused data"), HOMESCREEN_ALLOW_APPLY="0")
-    result = subprocess.run([sys.executable, str(SCRIPT), "--timeout", "30", "--",
-                             sys.executable, "-m", "homescreen.server"],
-                            cwd=ROOT, env=env, capture_output=True, text=True, timeout=35)
-    assert result.returncode == 0, result.stderr
-    assert "ios-homescreen-mcp initialized; required tools discovered" in result.stdout
+def test_real_server_initializes_and_discovers_without_device_operations(tmp_path, monkeypatch):
+    from macapp.check_mcp import check as check_server
+    fixture = tmp_path / "source.json"
+    fixture.write_text("[]")
+    monkeypatch.setenv("HOMESCREEN_FIXTURE", str(fixture))
+    monkeypatch.setenv("HOMESCREEN_READ_ONLY", "1")
+    monkeypatch.setenv("HOMESCREEN_DATA", str(tmp_path / "unused data"))
+    monkeypatch.chdir(ROOT)
+    received = check_server([sys.executable, "-m", "homescreen.server"], timeout=30)
+    expected = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    assert received == expected
     assert not (tmp_path / "unused data").exists()
 
 
@@ -88,3 +91,14 @@ def test_startup_deadline_stops_and_closes_unresponsive_process(tmp_path):
     assert result.returncode != 0
     assert "deadline" in result.stderr.lower()
     assert elapsed < 3
+
+
+def test_source_version_available_without_installed_distribution(monkeypatch):
+    from importlib.metadata import PackageNotFoundError
+    from homescreen import server
+
+    def source_only(_):
+        raise PackageNotFoundError()
+
+    monkeypatch.setattr(server, "version", source_only)
+    assert server._project_version() == tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]

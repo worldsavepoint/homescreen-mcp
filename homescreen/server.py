@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import tomllib
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Annotated, Any, Callable
 
 from mcp.server.mcpserver import Image, MCPServer
@@ -35,7 +38,17 @@ page-1 top-level placement when requested and optimizes folder contents througho
 including page-1, Dock and holding-tray folders. To sort by color, call icon_colors first;
 use get_icons for icons needing visual review."""
 
-mcp = MCPServer("ios-homescreen-mcp", instructions=INSTRUCTIONS)
+
+def _project_version() -> str:
+    try:
+        return version("home-screen-organizer")
+    except PackageNotFoundError:
+        # A source checkout can run without installing the project's wheel.
+        with (Path(__file__).resolve().parents[1] / "pyproject.toml").open("rb") as source:
+            return tomllib.load(source)["project"]["version"]
+
+
+mcp = MCPServer("ios-homescreen-mcp", instructions=INSTRUCTIONS, version=_project_version())
 
 
 def _edit(fn: Callable[[Layout], Any]) -> dict[str, Any]:

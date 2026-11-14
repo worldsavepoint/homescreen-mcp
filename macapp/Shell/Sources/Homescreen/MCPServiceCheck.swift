@@ -15,6 +15,14 @@ struct MCPServiceCheck {
     var timeout: TimeInterval = 45
     var environment: [String: String] = ProcessInfo.processInfo.environment
 
+    private static func validTool(_ entry: [String: Any]) -> Bool {
+        guard let name = entry["name"] as? String, !name.isEmpty,
+              let schema = entry["inputSchema"] as? [String: Any], schema["type"] as? String == "object" else { return false }
+        if let properties = schema["properties"], !(properties is [String: [String: Any]]) { return false }
+        if let required = schema["required"], !(required is [String]) { return false }
+        return true
+    }
+
     func run(executablePath: String) async -> MCPServiceCheckResult {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("homescreen-mcp-check-\(UUID().uuidString)")
         do {
@@ -41,7 +49,7 @@ struct MCPServiceCheck {
                 try send(["method": "notifications/initialized"])
                 try send(["id": 2, "method": "tools/list", "params": [:]])
                 let result = try io.receive(2, mcp: true)
-                guard let entries = result["tools"] as? [[String: Any]], entries.allSatisfy({ $0["name"] is String }) else { throw MCPClientOperationCode.invalidResponse }
+                guard let entries = result["tools"] as? [[String: Any]], entries.allSatisfy(Self.validTool) else { throw MCPClientOperationCode.invalidResponse }
                 let tools = Set(entries.compactMap { $0["name"] as? String })
                 let required: Set<String> = ["read_phone", "show_layout", "move", "diff"]
                 return MCPServiceCheckResult(code: required.isSubset(of: tools) ? .passed : .missingTools, tools: tools)

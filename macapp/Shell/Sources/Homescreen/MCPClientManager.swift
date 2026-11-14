@@ -48,8 +48,8 @@ struct MCPClientDetection: Sendable {
 
 struct MCPClientQuery: Sendable {
     let client: MCPClient
-    let code: MCPClientOperationCode
-    let configuration: MCPConfigurationState
+    var code: MCPClientOperationCode
+    var configuration: MCPConfigurationState
     let connection: MCPConnectionState
     var mode: MCPAccessMode? = nil
     var scope: MCPClientScope = .unknown
@@ -58,6 +58,10 @@ struct MCPClientQuery: Sendable {
     var command: String? = nil
     var arguments: [String]? = nil
     var localEnabled = false
+    var url: String? = nil
+    var enabled: Bool? = nil
+    var transportEnvironment: [String: String] = [:]
+    var forwardedNames: Set<String> = []
 }
 
 struct MCPClientRegistrationResult: Sendable {
@@ -66,6 +70,7 @@ struct MCPClientRegistrationResult: Sendable {
     let code: MCPClientOperationCode
     let query: MCPClientQuery?
     var recovery: MCPRegistrationRecovery = .notNeeded
+    var cleanupPending = false
 }
 
 struct MCPCommandResult: Sendable {
@@ -75,7 +80,7 @@ struct MCPCommandResult: Sendable {
     var failure: MCPClientOperationCode? = nil
 }
 
-typealias MCPCommandRunner = (String, [String], [String: String], TimeInterval) async -> MCPCommandResult
+typealias MCPCommandRunner = (String, [String], [String: String], TimeInterval, String) async -> MCPCommandResult
 typealias MCPEntryStoreFactory = (MCPClient, String, [String: String], URL, TimeInterval, @escaping MCPCommandRunner) -> MCPEntryStore
 
 /// Locates executables without invoking a login shell or evaluating paths as code.
@@ -160,7 +165,7 @@ struct MCPClientManager {
         }
         let store = store(client, path)
         var result = await effectiveQuery(store)
-        if result.code == .success, !Task.isCancelled, let saved = try? await store.read() {
+        if result.code == .success, !Task.isCancelled, let saved = try? await store.read(effective: true) {
             annotate(&result, snapshot: saved)
         }
         return result
@@ -169,7 +174,7 @@ struct MCPClientManager {
     private func effectiveQuery(_ store: MCPEntryStore) async -> MCPClientQuery {
         let client = store.client
         let arguments = ["mcp", "get", MCPClientRegistration.serverID] + (client == .codex ? ["--json"] : [])
-        let result = await runner(store.executable, arguments, store.environment, timeout)
+        let result = await runner(store.executable, arguments, store.environment, timeout, store.cwd)
         if let failure = result.failure { return queryFailure(client, failure) }
         if result.exitStatus != 0 {
             let text = (result.stdout + result.stderr).lowercased()
@@ -191,9 +196,20 @@ struct MCPClientManager {
             guard local ? transport["command"] is String : (["streamable_http", "sse"].contains(kind) && transport["url"] is String) else {
                 return queryFailure(client, .invalidResponse)
             }
+            var environment: [String: String] = [:]
+            var forwarded: Set<String> = []
+            if let env = transport["env"], !(env is NSNull) {
+                guard let values = env as? [String: String] else { return queryFailure(client, .invalidResponse) }
+                environment = values
+            }
+            if let names = transport["env_vars"], !(names is NSNull) {
+                guard let options = try? forwardedOptions(names) else { return queryFailure(client, .invalidResponse) }
+                forwarded = Set(options.map(\.name))
+            }
             return MCPClientQuery(client: client, code: .success, configuration: .configured, connection: .unknown,
                 mode: local && enabled.boolValue ? accessMode(transport) : nil,
-                command: transport["command"] as? String, arguments: transport["args"] as? [String], localEnabled: local && enabled.boolValue)
+                command: transport["command"] as? String, arguments: transport["args"] as? [String], localEnabled: local && enabled.boolValue, url: transport["url"] as? String, enabled: enabled.boolValue,
+                transportEnvironment: environment, forwardedNames: forwarded)
         }
         let plainOutput = result.stdout.replacingOccurrences(of: "\u{1b}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
         let lines = plainOutput.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
@@ -250,7 +266,8 @@ struct MCPClientManager {
         if let enabled = entry["enabled"] {
             guard let number = enabled as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID(), number.boolValue else { return nil }
         }
-        guard entry["url"] == nil, entry["command"] is String,
+        guard entry["environment_id"] == nil || entry["environment_id"] as? String == "local",
+              entry["url"] == nil, entry["command"] is String,
               entry["type"] == nil || entry["type"] as? String == "stdio" else { return nil }
         return accessMode(entry)
     }
@@ -259,10 +276,38 @@ struct MCPClientManager {
         let object = try? snapshot.entry.object()
         query.userConfiguration = object == nil ? .notConfigured : .configured
         query.userMode = object.flatMap(localMode)
-        if query.client == .codex {
-            if snapshot.scope == .other { query.scope = .other }
-            else if let entry = object, query.localEnabled, query.command == entry["command"] as? String,
-                    query.arguments == entry["args"] as? [String], query.mode == query.userMode { query.scope = snapshot.scope }
+        guard query.client == .codex, let observed = snapshot.effectiveEntry else { return }
+        guard let active = try? observed.object() else { query.localEnabled = false; query.mode = nil; return }
+        let enabled = active["enabled"] as? Bool ?? true
+        let local = active["url"] == nil
+        let activeEnv = active["env"] as? [String: String] ?? [:]
+        let activeForwarded = (try? forwardedOptions(active["env_vars"] ?? []).map(\.name)) ?? []
+        let agrees = query.enabled == enabled && query.command == active["command"] as? String &&
+            query.arguments == active["args"] as? [String] && query.url == active["url"] as? String &&
+            query.mode == (local && enabled ? accessMode(active) : nil) &&
+            (!local || (query.transportEnvironment == activeEnv && query.forwardedNames == Set(activeForwarded)))
+        if !agrees {
+            query.code = .invalidResponse
+            query.configuration = .unknown
+            query.localEnabled = false
+            query.mode = nil
+            return
+        }
+        query.scope = snapshot.scope
+        if !local || (active["environment_id"] != nil && active["environment_id"] as? String != "local") {
+            query.localEnabled = false
+            query.mode = nil
+        }
+    }
+
+    private func checkLaunchEnvelope(_ args: [String], store: MCPEntryStore) throws {
+        let values = [store.executable] + args + store.environment.map { $0.key + "=" + $0.value }
+        let bytes = values.reduce(0) { $0 + $1.utf8.count + 1 }
+        // Darwin also puts argv/env pointers, executable and interpreter names,
+        // alignment and auxiliary strings on the exec stack.
+        let reserve = (values.count + 2) * MemoryLayout<UnsafeRawPointer>.size + Int(PATH_MAX) * 2 + 4096
+        guard !values.contains(where: { $0.utf8.contains(0) }), bytes + reserve < sysconf(_SC_ARG_MAX) else {
+            throw MCPClientOperationCode.launchFailed
         }
     }
 
@@ -272,8 +317,9 @@ struct MCPClientManager {
             (object["type"] != nil && object["type"] as? String != "stdio")
     }
 
-    private func mergedEntry(prior: MCPOwnedEntry, enginePath: String, gates: [String: String]) throws -> MCPOwnedEntry {
+    private func mergedEntry(client: MCPClient, prior: MCPOwnedEntry, enginePath: String, gates: [String: String]) throws -> MCPOwnedEntry {
         var object = try prior.object() ?? [:]
+        if client == .codex { object.removeValue(forKey: "environment_id") }
         if object["url"] != nil {
             for field in ["url", "http_headers", "env_http_headers", "bearer_token_env_var", "http_headers_helper", "scopes", "oauth_resource", "oauth", "auth"] {
                 object.removeValue(forKey: field)
@@ -321,6 +367,9 @@ struct MCPClientManager {
         case .restoreRemoved: permitted = current.entry == .absent
         }
         guard permitted else { throw MCPClientOperationCode.recoveryConflict }
+        if store.client == .claudeCode, case .present(let json) = record.prior {
+            try checkLaunchEnvelope(["mcp", "add-json", "--scope", "user", MCPClientRegistration.serverID, json], store: store)
+        }
         record.observed = current.entry
         record.phase = .restoring
         try journal.save(record)
@@ -394,7 +443,14 @@ struct MCPClientManager {
             }
             let env = mode == .readOnly ? ["HOMESCREEN_READ_ONLY": "1"] : ["HOMESCREEN_READ_ONLY": "0", "HOMESCREEN_ALLOW_APPLY": "1"]
             let base = try MCPOwnedEntry(["command": enginePath, "args": ["mcp"], "env": env])
-            let intended = try mergedEntry(prior: snapshot.entry, enginePath: enginePath, gates: env)
+            let intended = try mergedEntry(client: client, prior: snapshot.entry, enginePath: enginePath, gates: env)
+            var add = MCPClientRegistration.arguments(client: client, executablePath: enginePath, mode: mode)
+            if client == .claudeCode {
+                let jsonPrefix = ["mcp", "add-json", "--scope", "user", MCPClientRegistration.serverID]
+                if intended != base, case .present(let json) = intended { add = jsonPrefix + [json] }
+                try checkLaunchEnvelope(add, store: store)
+                if case .present(let json) = snapshot.entry { try checkLaunchEnvelope(jsonPrefix + [json], store: store) }
+            }
             var record = MCPRegistrationRecord(client: client.rawValue, scope: "user", server: MCPClientRegistration.serverID,
                                                file: snapshot.file, prior: snapshot.entry, intended: intended)
             try journal.save(record)
@@ -418,23 +474,33 @@ struct MCPClientManager {
                 record.phase = .adding
                 try journal.save(record)
                 awaitingPostimage = true
-                if intended == base {
-                    try await store.command(MCPClientRegistration.arguments(client: client, executablePath: enginePath, mode: mode))
-                } else if client == .codex {
-                    try await store.replaceCodex(before, with: intended)
-                } else if case .present(let json) = intended {
-                    try await store.command(["mcp", "add-json", "--scope", "user", MCPClientRegistration.serverID, json])
+                let acknowledged: String?
+                if client == .codex && before.version != nil {
+                    // An RPC can produce only this key replacement. An unexpected
+                    // value without an acknowledged revision has ambiguous ownership.
+                    awaitingPostimage = false
+                    acknowledged = try await store.replaceCodex(before, with: intended)
+                } else {
+                    try await store.command(add)
+                    acknowledged = nil
                 }
                 let written = try await store.read()
                 awaitingPostimage = false
                 guard written.file == snapshot.file else { throw MCPClientOperationCode.recoveryConflict }
+                if let acknowledged, written.version != acknowledged, written.entry != intended {
+                    throw MCPClientOperationCode.recoveryConflict
+                }
                 record.observed = written.entry
                 record.phase = .observed
                 try journal.save(record)
                 guard try matches(written.entry, intended: intended, client: client), let raw = try written.entry.object(), localMode(raw) == mode, raw["command"] as? String == enginePath,
                       raw["args"] as? [String] == ["mcp"] else { throw MCPClientOperationCode.invalidResponse }
                 var verification = await effectiveQuery(store)
-                annotate(&verification, snapshot: written)
+                if client == .codex && verification.code == .success {
+                    let context = try await store.read(effective: true)
+                    guard context.file == written.file, context.entry == written.entry else { throw MCPClientOperationCode.recoveryConflict }
+                    annotate(&verification, snapshot: context)
+                } else { annotate(&verification, snapshot: written) }
                 guard verification.code == .success else { throw verification.code }
                 guard verification.configuration == .configured, verification.scope == .other ||
                         (verification.localEnabled && verification.command == enginePath && verification.arguments == ["mcp"] &&
@@ -445,8 +511,9 @@ struct MCPClientManager {
                 commit.phase = .committed
                 try journal.save(commit)
                 record = commit
-                try journal.clear()
-                return result(.success, verification)
+                var success = result(.success, verification)
+                do { try journal.clear() } catch { success.cleanupPending = true }
+                return success
             } catch {
                 let failure = error as? MCPClientOperationCode ?? .snapshotReadFailed
                 do {

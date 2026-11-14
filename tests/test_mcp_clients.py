@@ -23,6 +23,12 @@ def native_mcp_binary(tmp_path_factory):
     harness = folder / "Harness.swift"
     harness.write_text('''import Foundation
 final class InterruptibleJournal: MCPRegistrationJournal {
+    override func clear() throws {
+        let fault = ProcessInfo.processInfo.environment["TEST_CLEANUP"]
+        if fault == "before" { throw MCPClientOperationCode.recoveryFailed }
+        try super.clear()
+        if fault == "after" { throw MCPClientOperationCode.recoveryFailed }
+    }
     override func save(_ record: MCPRegistrationRecord) throws {
         try super.save(record)
         if ProcessInfo.processInfo.environment["TEST_JOURNAL_EXIT"] == record.phase.rawValue { _exit(85) }
@@ -51,7 +57,7 @@ final class InterruptibleJournal: MCPRegistrationJournal {
             let mode: MCPAccessMode = args.count > 5 && args[5] == "apply" ? .applyEnabled : .readOnly
             let result = await manager.register(client: client, executablePath: path, enginePath: args[4], mode: mode)
             output = ["code": result.code.rawValue, "mode": result.mode.rawValue, "recovery": result.recovery.rawValue,
-                      "query": result.query.map(queryJSON) as Any? ?? NSNull()]
+                      "cleanupPending":result.cleanupPending, "query": result.query.map(queryJSON) as Any? ?? NSNull()]
         } else if args[1] == "recover" {
             let result = await manager.recover(client:client,executablePath:path)
             output = ["code":result?.code.rawValue ?? "success"]
@@ -85,7 +91,7 @@ def sandbox(tmp_path):
                    if key not in {"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_CUSTOM_OAUTH_URL", "CODEX_HOME", "HOMESCREEN_DATA"}}
     return {**environment, "HOME": str(home), "PATH": str(tmp_path / "empty-path"),
             "TEST_STORE": str(tmp_path / "clients.json"), "TEST_LOG": str(tmp_path / "commands.jsonl"),
-            "TEST_PID": str(tmp_path / "child.pid"), "TEST_TIMEOUT": "3"}
+            "TEST_LAYER_OMITTED": "1", "TEST_PID": str(tmp_path / "child.pid"), "TEST_TIMEOUT": "3"}
 
 
 def execute(binary, sandbox, action, client="codex", executable="auto", *args):
@@ -139,17 +145,23 @@ if args == ["app-server"]:
             ready = True
             continue
         elif method == "config/read":
-            assert ready and params == {"includeLayers": True, "cwd": None}
+            assert ready and params["includeLayers"] and params["cwd"] in (None, os.getcwd())
+            effective = dict(entries.get(key, {}))
+            origin = {"name":{"type":"project","dotCodexFolder":"/synthetic/.codex"},"version":"p"}
+            project = {"command":"/project", "env":{"HOMESCREEN_READ_ONLY":"0","HOMESCREEN_ALLOW_APPLY":"1"}}
+            if os.getenv("TEST_PROJECT") == "irrelevant": project = {"tool_timeout_sec":13}
+            if os.getenv("TEST_PROJECT") == "remote": project = {"environment_id":"remote-box"}
+            if params["cwd"] and os.getenv("TEST_PROJECT"): effective.update(project)
             layer = {"name": {"type": "user", "file": str(target), "profile": None}, "disabledReason": None,
                      "version": version(), "config": {"mcp_servers": entries, "privateSetting": "excluded"}}
-            result = {"layers": [layer], "origins": {}, "config": {}}
+            result = {"layers": [layer], "origins": {}, "config": {"mcp_servers": {key: effective} if effective else {}}}
             if os.getenv("TEST_BAD_LAYERS"): result["layers"] = [layer, layer]
             if os.getenv("TEST_LAYER_PATH"): layer["name"]["file"] = "/wrong/config.toml"
             if os.getenv("TEST_LAYER_REDACTED"): layer["config"]["mcp_servers"] = {key:{"command":"/old","env":{"SECRET":"<redacted>"}}}
-            if os.getenv("TEST_LAYER_OMITTED") and not store.exists(): result["layers"] = []
-            if os.getenv("TEST_PROJECT") and key in entries:
-                result["origins"]["mcp_servers." + key + ".command"] = {"name":{"type":"project","dotCodexFolder":"/synthetic/.codex"},"version":"p"}
-                result["layers"].append({"name":result["origins"]["mcp_servers." + key + ".command"]["name"],"disabledReason":None,"version":"p","config":{"mcp_servers":{key:{"command":"/project"}}}})
+            if os.getenv("TEST_LAYER_OMITTED") and not store.exists() and not any(os.getenv(k) for k in ("TEST_BAD_LAYERS","TEST_LAYER_PATH","TEST_LAYER_REDACTED")): result["layers"] = []
+            if params["cwd"] and os.getenv("TEST_PROJECT") and key in entries:
+                for field in project: result["origins"]["mcp_servers." + key + "." + field] = origin
+                result["layers"].append({**origin,"disabledReason":None,"config":{"mcp_servers":{key:project}}})
         elif method == "config/batchWrite":
             assert ready and params["filePath"] == str(target) and params["expectedVersion"] == version()
             conflict = store.with_suffix(".conflicted")
@@ -168,10 +180,23 @@ if args == ["app-server"]:
             if value is None: entries.pop(key, None)
             elif not (requested and os.getenv("TEST_SKIP_ADD")): entries[key] = value
             store.write_text(json.dumps(entries))
+            if requested and os.getenv("TEST_INTERRUPT") == "add":
+                os.kill(os.getppid(), signal.SIGKILL)
+                sys.exit(0)
             if requested and os.getenv("TEST_PARTIAL_ADD"):
                 print(json.dumps({"id":request["id"],"error":{"code":-32603,"message":"fixture write failure"}}),flush=True)
                 continue
             result = {"status": "ok", "filePath": str(target), "version": version()}
+            external = os.getenv("TEST_AFTER_ACK")
+            if requested and external:
+                if external == "ownedError":
+                    entries[key] = {"command":"/external","args":["mcp"],"env":{}}
+                    store.write_text(json.dumps(entries))
+                    print(json.dumps({"id":request["id"],"error":{"code":-32603,"message":"ambiguous write"}}),flush=True)
+                    continue
+                if external == "owned": entries[key] = {"command":"/external","args":["mcp"],"env":{}}
+                else: entries["unrelated"]["independent"] = True
+                store.write_text(json.dumps(entries))
         else: raise AssertionError(method)
         print(json.dumps({"id":request["id"], "result":result}), flush=True)
     sys.exit(0)
@@ -200,7 +225,7 @@ if action == "get":
         print("No MCP server named 'ios-homescreen-mcp' found." if "--json" in args else "No MCP server found with name: ios-homescreen-mcp", file=sys.stderr)
         sys.exit(1)
     entry = entries["ios-homescreen-mcp"]
-    if os.getenv("TEST_PROJECT"):
+    if os.getenv("TEST_PROJECT") in {"1","irrelevant"}:
         entry = {"command":"/project","args":["mcp"],"env":{"HOMESCREEN_READ_ONLY":"0","HOMESCREEN_ALLOW_APPLY":"1"}}
     if os.getenv("TEST_EFFECTIVE"): entry = {**entry, **json.loads(os.environ["TEST_EFFECTIVE"])}
     if "--json" in args:
@@ -235,6 +260,13 @@ elif action == "add-json":
     interrupt_after("restore" if value["command"].startswith("/old") else "add")
     if os.getenv("TEST_PARTIAL_ADD") and value["command"].startswith("/new"): sys.exit(7)
 elif action == "add":
+    if entries.get("unrelated",{}).get("enabled_tools") == []: entries["unrelated"].pop("enabled_tools")
+    if os.getenv("TEST_WORKER"):
+        if os.fork():
+            time.sleep(5)
+            sys.exit(0)
+        Path(os.environ["TEST_PID"]).write_text(str(os.getpid()))
+        time.sleep(1.6)
     if "--scope" in args and "ios-homescreen-mcp" in entries:
         sys.exit(2)
     if os.environ.get("TEST_SKIP_ADD"):
@@ -472,6 +504,12 @@ for line in sys.stdin:
     elif message["method"] == "tools/list":
         tools = ["read_phone", "show_layout", "move", "diff"]
         result = {"tools": [{"name": name, "inputSchema": {"type": "object"}} for name in (tools[:1] if os.environ.get("TEST_ENGINE") == "tools" else tools)]}
+        shape = os.getenv("TEST_SCHEMA")
+        for tool in result["tools"]:
+            if shape == "missing": tool.pop("inputSchema")
+            if shape == "array": tool["inputSchema"] = {"type":"array"}
+            if shape == "properties": tool["inputSchema"]["properties"] = []
+            if shape == "required": tool["inputSchema"]["required"] = [3]
     else:
         continue
     print(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}), flush=True)
@@ -706,3 +744,124 @@ def test_restart_from_each_durable_phase(native_mcp_binary,sandbox,tmp_path,phas
     assert result.returncode == 85
     assert execute(native_mcp_binary,sandbox,"recover","claudeCode",executable)["code"] == "success"
     assert json.loads(store.read_text()) == prior
+
+
+def seed_user(sandbox, **extra):
+    store = Path(sandbox["TEST_STORE"])
+    entries = {"ios-homescreen-mcp":{"command":"/old","args":["mcp"],"env":{"HOMESCREEN_READ_ONLY":"1"},**extra},
+               "unrelated":{"command":"/keep","enabled_tools":[]}}
+    store.write_text(json.dumps(entries))
+    (Path(sandbox["HOME"])/".claude.json").write_text(json.dumps({"mcpServers":entries}))
+    return store,entries
+
+
+def test_owned_process_group_prevents_late_apply(native_mcp_binary,sandbox,tmp_path):
+    client = fake_client(tmp_path)
+    result = execute(native_mcp_binary,{**sandbox,"TEST_WORKER":"1","TEST_TIMEOUT":"0.7","TEST_LAYER_OMITTED":"1"},
+                     "register","codex",client,"/new","apply")
+    assert result["code"] == "timedOut"
+    time.sleep(1.7)
+    store = Path(sandbox["TEST_STORE"])
+    assert not store.exists() or "ios-homescreen-mcp" not in json.loads(store.read_text())
+    assert_child_stopped(sandbox)
+
+
+def test_existing_base_single_key_keeps_unrelated_allowlist(native_mcp_binary,sandbox,tmp_path):
+    store,prior = seed_user(sandbox)
+    result = execute(native_mcp_binary,sandbox,"register","codex",fake_client(tmp_path),"/new")
+    assert result["code"] == "success"
+    assert json.loads(store.read_text())["unrelated"] == prior["unrelated"]
+    assert not any(cmd[:2] == ["mcp","add"] for cmd in commands(sandbox))
+
+
+@pytest.mark.parametrize("external",["owned","ownedError","unrelated"])
+def test_codex_compares_acknowledged_write_revision(native_mcp_binary,sandbox,tmp_path,external):
+    store,_ = seed_user(sandbox,tool_timeout_sec=3)
+    result = execute(native_mcp_binary,{**sandbox,"TEST_AFTER_ACK":external},"register","codex",fake_client(tmp_path),"/new")
+    saved = json.loads(store.read_text())
+    if external in {"owned","ownedError"}:
+        assert result["code"] == ("recoveryConflict" if external == "owned" else "commandFailed") and result["recovery"] == "failed"
+        assert saved["ios-homescreen-mcp"]["command"] == "/external"
+        journal = Path(sandbox["HOME"])/"Library/Application Support/homescreen-mcp/registration/codex.json"
+        assert journal.exists()
+    else:
+        assert result["code"] == "success" and saved["unrelated"]["independent"]
+
+
+@pytest.mark.parametrize("fault",["","TEST_PARTIAL_ADD"])
+def test_codex_selects_local_executor_and_restores_old_remote(native_mcp_binary,sandbox,tmp_path,fault):
+    store,old = seed_user(sandbox,environment_id="remote-box")
+    env = {**sandbox,fault:"1"} if fault else sandbox
+    result = execute(native_mcp_binary,env,"register","codex",fake_client(tmp_path),"/new")
+    saved = json.loads(store.read_text())
+    if fault:
+        assert result["code"] == "commandFailed" and saved == old
+    else:
+        assert result["code"] == "success" and saved["ios-homescreen-mcp"].get("environment_id","local") == "local"
+
+
+def test_project_provenance_cannot_explain_unrelated_effective_differences(native_mcp_binary,sandbox,tmp_path):
+    store,old = seed_user(sandbox)
+    result = execute(native_mcp_binary,{**sandbox,"TEST_PROJECT":"irrelevant"},"register","codex",fake_client(tmp_path),"/new")
+    assert result["code"] == "invalidResponse"
+    assert json.loads(store.read_text()) == old
+
+
+def test_oversize_claude_argv_rejected_before_remove(native_mcp_binary,sandbox,tmp_path):
+    store,old = seed_user(sandbox,advanced="x"*os.sysconf("SC_ARG_MAX"))
+    result = execute(native_mcp_binary,sandbox,"register","claudeCode",fake_client(tmp_path),"/new")
+    assert result["code"] != "success" and result["recovery"] == "notNeeded"
+    assert json.loads(store.read_text()) == old
+    assert all(cmd[1] == "get" for cmd in commands(sandbox))
+    assert not (Path(sandbox["HOME"])/"Library/Application Support/homescreen-mcp/registration/claudeCode.json").exists()
+
+
+@pytest.mark.parametrize("fault",["before","after"])
+def test_committed_cleanup_failure_preserves_success(native_mcp_binary,sandbox,tmp_path,fault):
+    executable = fake_client(tmp_path)
+    result = execute(native_mcp_binary,{**sandbox,"TEST_CLEANUP":fault},"register","claudeCode",executable,"/new")
+    assert result["code"] == "success" and result["recovery"] == "notNeeded" and result["cleanupPending"]
+    assert execute(native_mcp_binary,sandbox,"recover","claudeCode",executable)["code"] == "success"
+    assert json.loads(Path(sandbox["TEST_STORE"]).read_text())["ios-homescreen-mcp"]["command"] == "/new"
+
+
+@pytest.mark.parametrize("shape",["missing","array","properties","required"])
+def test_both_checkers_reject_invalid_tool_descriptors(native_mcp_binary,sandbox,tmp_path,shape):
+    engine = fake_engine(tmp_path)
+    env = {**sandbox,"TEST_SCHEMA":shape}
+    swift = execute(native_mcp_binary,env,"check","codex",engine)
+    python = subprocess.run([sys.executable,str(ROOT/"macapp/check_mcp.py"),"--timeout","4","--",str(engine),"mcp"],
+                            env=env,capture_output=True,timeout=8)
+    assert (swift["code"],python.returncode) == ("protocolError",1)
+
+
+def test_native_checker_accepts_actual_source_engine_without_source_access(native_mcp_binary,sandbox,tmp_path):
+    # The guard fails immediately if initialization/discovery creates a Session.
+    engine = tmp_path / "local-engine"
+    engine.write_text(f"#!{sys.executable}\n" + """import os,sys
+from pathlib import Path
+sys.path.insert(0, os.environ["SYNTHETIC_ENGINE_ROOT"])
+from homescreen import config
+def unexpected(*args, **kwargs):
+    raise AssertionError("Unexpected device or session activity during discovery")
+config.session = config.make_source = unexpected
+from homescreen.server import main
+assert sys.argv[1:] == ["mcp"] and os.environ["HOMESCREEN_READ_ONLY"] == "1"
+main()
+""")
+    engine.chmod(0o755)
+    fixture = tmp_path/"fixture.json"
+    fixture.write_text("[]")
+    env = {**sandbox,"SYNTHETIC_ENGINE_ROOT":str(ROOT),"TEST_TIMEOUT":"6","HOMESCREEN_FIXTURE":str(fixture)}
+    result = execute(native_mcp_binary,env,"check","codex",engine)
+    assert result["code"] == "passed" and {"read_phone","show_layout","move","diff"} <= set(result["tools"])
+    assert fixture.read_text() == "[]"
+
+
+def test_project_remote_executor_is_reported_as_effective_override(native_mcp_binary,sandbox,tmp_path):
+    executable = fake_client(tmp_path)
+    env = {**sandbox,"TEST_PROJECT":"remote"}
+    result = execute(native_mcp_binary,env,"register","codex",executable,"/new")
+    assert result["code"] == "success"
+    view = execute(native_mcp_binary,env,"scope","codex",executable)
+    assert view == {"scope":"other","user":"readOnly","effective":"","connection":"unknown"}
