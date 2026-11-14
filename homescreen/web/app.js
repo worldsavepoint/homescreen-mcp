@@ -218,7 +218,7 @@ function toast(message, kind = "", detail, backup) {
   localized($("#operation-status"), message);
   const box = $("#toast");
   const previous = box.querySelector("details");
-  if (!box.hidden && previous && (previous.open || box.contains(document.activeElement))) {
+  if (!box.hidden && previous && (pendingDiagnostic || previous.open || box.contains(document.activeElement))) {
     if (detail) pendingDiagnostic = {message, kind, detail, backup};
     return;
   }

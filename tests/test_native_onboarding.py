@@ -208,6 +208,76 @@ actor Gate {
    let draft = try await web.evaluateJavaScript("window.draft.name") as? String
    assert(draft == "Kept draft")
    config.userContentController.removeScriptMessageHandler(forName:"screenOrganizer")
+  case "language-origin":
+   NSApplication.shared.setActivationPolicy(.accessory)
+   let origin = URL(string:"http://127.0.0.1:47985/")!
+   l.setPreference("de")
+   let coordinator = WebView.Coordinator(origin:origin,localization:l,consent:accepted(),openSetup:{})
+   let config = WKWebViewConfiguration()
+   config.websiteDataStore = .nonPersistent()
+   config.userContentController.add(coordinator,name:"screenOrganizer")
+   coordinator.installBootstrap(config.userContentController)
+   let web = WKWebView(frame:.zero,configuration:config)
+   web.navigationDelegate = coordinator
+   let fixture = try String(contentsOfFile:CommandLine.arguments[3],encoding:.utf8)
+   web.loadHTMLString(fixture,baseURL:origin)
+   func waitFor(_ script: String) async throws {
+    for _ in 0..<200 {
+     if (try? await web.evaluateJavaScript(script)) as? Bool == true { return }
+     try await Task.sleep(nanoseconds:10_000_000)
+    }
+    fatalError("WebKit language fixture timed out: " + script)
+   }
+   func choose(_ code: String) async throws {
+    _ = try await web.callAsyncJavaScript("const picker=document.querySelector('#language-select');picker.value=code;await picker.onchange({target:picker});return true",
+     arguments:["code":code],in:nil,in:.page)
+    for _ in 0..<100 where l.preference != code { try await Task.sleep(nanoseconds:10_000_000) }
+    assert(l.preference == code)
+   }
+   try await waitFor("window.fixtureReady === true")
+   let capability = try await web.evaluateJavaScript("window.screenOrganizerHost.languageSync || ''") as! String
+   assert(capability == "native-origin")
+   try await waitFor("calls.some(c=>c[0]==='de' && c[1]==='native')")
+   for coalesced in [true,false] {
+    _ = try await web.evaluateJavaScript("calls.length=0")
+    try await choose("fr")
+    if !coalesced { coordinator.synchronizeLanguage(web) }
+    try await choose("de")
+    coordinator.synchronizeLanguage(web)
+    l.setPreference("fr")
+    coordinator.synchronizeLanguage(web)
+    try await waitFor("document.documentElement.lang==='fr' && document.querySelector('#language-select').value==='fr' && localStorage.getItem('screenOrganizer.language')==='fr'")
+    let nativeCalls = try await web.evaluateJavaScript("JSON.stringify(calls.filter(c=>c[1]!=='picker'))") as! String
+    assert(nativeCalls == #"[["fr","native"]]"#,nativeCalls)
+    l.setPreference("de")
+    coordinator.synchronizeLanguage(web)
+    try await waitFor("document.documentElement.lang==='de'")
+   }
+   // A failed, older delivery must not invalidate a newer delivery of the same language.
+   _ = try await web.evaluateJavaScript("""
+   const previous = ScreenOrganizerI18n.setLocale;
+   ScreenOrganizerI18n.setLocale = (code, source) => {
+     ScreenOrganizerI18n.setLocale = previous;
+     return new Promise((_, reject) => window.failOldDelivery = reject);
+   };
+   true
+   """)
+   l.setPreference("es")
+   coordinator.synchronizeLanguage(web)
+   try await waitFor("typeof failOldDelivery === 'function'")
+   l.setPreference("de")
+   coordinator.synchronizeLanguage(web)
+   l.setPreference("es")
+   coordinator.synchronizeLanguage(web)
+   try await waitFor("document.documentElement.lang==='es'")
+   _ = try await web.evaluateJavaScript("calls.length=0; failOldDelivery(Error('Older delivery failed')); true")
+   try await Task.sleep(nanoseconds:100_000_000)
+   coordinator.synchronizeLanguage(web)
+   let repeated = try await web.evaluateJavaScript("JSON.stringify(calls)") as! String
+   assert(repeated == "[]")
+   let unexpected = try await web.evaluateJavaScript("JSON.stringify(unexpectedRequests)") as! String
+   assert(unexpected == "[]")
+   config.userContentController.removeScriptMessageHandler(forName:"screenOrganizer")
   case "refresh":
    let executable = CommandLine.arguments[3]
    var queryFailure: MCPClientOperationCode?
@@ -498,3 +568,46 @@ time.sleep(60)
     result = subprocess.run([str(native_binary),"cancelInspection",str(catalogs),str(child),str(tmp_path/"started")],
                             capture_output=True,text=True,timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+def test_webkit_delivers_genuine_native_language_after_browser_round_trip(native_binary, catalogs, tmp_path):
+    web = ROOT / "homescreen/web"
+    # All resources are embedded, including the production picker and locale engine.
+    files = {path.name: json.loads(path.read_text()) for path in catalogs.glob("*.json")}
+    files["manifest.json"]["default"] = "en"
+    data = json.dumps({"/static/locales/" + key: value for key, value in files.items()})
+    fetch_catalog = """
+    window.calls = [];
+    window.unexpectedRequests = [];
+    const files = CATALOG_DATA;
+    window.fetch = async (url, options = {}) => {
+      if ((options.method || 'GET') === 'GET' && Object.hasOwn(files, url)) {
+        return {ok: true, json: async () => files[url]};
+      }
+      unexpectedRequests.push(String(url));
+      throw Error('Unexpected request');
+    };
+    """.replace("CATALOG_DATA", data)
+    record_calls = """
+    const selectLocale = ScreenOrganizerI18n.setLocale;
+    ScreenOrganizerI18n.setLocale = (...args) => {
+      calls.push(args);
+      return selectLocale(...args);
+    };
+    """
+    scripts = {
+        "i18n.js": fetch_catalog + (web / "i18n.js").read_text(),
+        "onboarding.js": record_calls + (web / "onboarding.js").read_text(),
+        "app.js": "ScreenOrganizerOnboarding.ready.then(() => window.fixtureReady = true)",
+    }
+    html = (web / "index.html").read_text().replace(
+        '<link rel="stylesheet" href="/static/app.css">',
+        """<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; img-src data:">""",
+    )
+    for name, script in scripts.items():
+        html = html.replace(f'<script src="/static/{name}"></script>', f"<script>{script}</script>")
+    fixture = tmp_path / "language.html"
+    fixture.write_text(html)
+    result = subprocess.run([str(native_binary), "language-origin", str(catalogs), str(fixture)],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr

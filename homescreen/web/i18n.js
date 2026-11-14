@@ -8,6 +8,8 @@
   const listeners = new Set(), transitions = new Set(), catalogs = new Map();
   let requested, committedTarget, pending = false, initialized = false, resolveReady, rejectReady;
   let numberFormatter, pickerIntent;
+  const host = globalThis.screenOrganizerHost;
+  const legacyHost = host?.native && host.languageSync !== "native-origin";
   let awaitingHostEcho = [];
   const dateFormatters = new Map();
   try { preference = localStorage.getItem(storageKey) || "system"; } catch (_) { /* storage unavailable */ }
@@ -119,7 +121,7 @@
     }
     const fromPicker = pickerIntent === nextPreference;
     pickerIntent = null;
-    if (fromPicker && globalThis.screenOrganizerHost?.native) {
+    if (fromPicker && legacyHost) {
       awaitingHostEcho = awaitingHostEcho.filter(value => value !== nextPreference);
       awaitingHostEcho.push(nextPreference);
     }
@@ -129,7 +131,8 @@
   }
 
   function setLocale(request, source = "host") {
-    if (source === "host" && initialized) {
+    if (source === "native") awaitingHostEcho = [];
+    if (source === "host" && legacyHost && initialized) {
       const owner = request === "system" ? request : match(request) || "system";
       const acknowledged = awaitingHostEcho.indexOf(owner);
       if (acknowledged !== -1) {
@@ -168,7 +171,6 @@
     english = await loadCatalog(manifest.default);
     initialized = true;
   })();
-  const host = globalThis.screenOrganizerHost;
   setLocale(host?.native && typeof host.languagePreference === "string" ? host.languagePreference : preference, "bootstrap").catch(rejectReady);
   globalThis.addEventListener?.("languagechange", () => {
     if (requested === "system") setLocale("system", "system");

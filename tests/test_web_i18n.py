@@ -793,7 +793,8 @@ for(const [op,key] of [['apply','editor.beforeApply'],['restore','editor.beforeR
 
 
 @pytest.mark.parametrize("old_first", [True, False])
-def test_system_picker_notifies_host_after_os_retarget(old_first):
+@pytest.mark.parametrize("capability", [None, "native-origin"])
+def test_system_picker_notifies_host_after_os_retarget(old_first, capability):
     browser('''
 const select=$('#language-select'), releases={};const fetch=context.fetch;
 context.fetch=(url,opts)=>['/static/locales/fr.json','/static/locales/es.json'].includes(url)
@@ -806,7 +807,8 @@ if(!OLD_FIRST){releases['/static/locales/fr.json']();await old;}
 assert.deepEqual(bridge.map(m=>m.preference),['system']);assert.equal(stored.get('screenOrganizer.language'),'system');
 await i18n.setLocale('system');context.navigator.languages=['en'];context.dispatchEvent({type:'languagechange'});
 await tick();assert.equal(i18n.locale,'en');assert.equal(bridge.length,1);
-'''.replace('OLD_FIRST',json.dumps(old_first)),native=True)
+'''.replace('OLD_FIRST',json.dumps(old_first)),native=True,
+            setup=f'context.screenOrganizerHost.languageSync={json.dumps(capability)};')
 
 
 def test_old_host_echo_preserves_new_picker_in_progress():
@@ -832,15 +834,19 @@ await tick();assert.equal(writes,0);assert.equal($('#modal').hidden,false);
 ''',native=True)
 
 
-def test_focused_diagnostic_retains_newest_error_until_dismissed():
+@pytest.mark.parametrize("replace_queued", [False, True])
+def test_focused_diagnostic_retains_newest_error_until_dismissed(replace_queued):
     browser('''
 const show=text=>vm.runInContext('showError(new Error('+JSON.stringify(text)+'))',context);
 show('first raw');const first=$('#toast details');first.open=true;first.querySelector('summary').focus();
-show('second raw');show('third raw');vm.runInContext('toast("Later success","ok")',context);
+show('second raw');first.open=false;$('#read').focus();if(REPLACE_QUEUED)show('third raw');
+vm.runInContext('toast("Later success","ok")',context);
 assert.equal($('#operation-status').textContent,'Later success');assert.equal($('#toast details'),first);
-$('#toast button').click();assert.ok(!$('#toast').hidden);assert.ok($('#toast').textContent.includes('third raw'));
-assert.ok($('#toast').contains(document.activeElement));$('#toast button').click();assert.ok($('#toast').hidden);
-''',native=True)
+$('#toast button').click();assert.ok(!$('#toast').hidden);
+assert.equal($('#toast pre').textContent,REPLACE_QUEUED?'third raw':'second raw');
+assert.equal(document.activeElement,$('#toast summary'));assert.equal($('#operation-status').textContent,'Later success');
+$('#toast button').click();assert.ok($('#toast').hidden);assert.equal(document.activeElement,$('#read'));
+'''.replace('REPLACE_QUEUED',json.dumps(replace_queued)),native=True)
 
 
 @pytest.mark.parametrize("operation", ["apply", "restore"])
@@ -957,3 +963,26 @@ else await i18n.setLocale(EXPECTED);
 release();await old;assert.equal(i18n.locale,EXPECTED);assert.equal(i18n.preference,EXPECTED);
 assert.deepEqual(bridge.map(m=>m.preference),SOURCE==='picker'?[EXPECTED]:[]);
 '''.replace('SOURCE',json.dumps(source)).replace('EXPECTED',json.dumps(expected)),native=True)
+
+
+def test_native_origin_host_keeps_first_real_selection_after_coalescing():
+    browser('''
+const select=$('#language-select');
+for(const code of ['fr','de']){select.value=code;await select.onchange({target:select});}
+assert.deepEqual(bridge.map(m=>m.preference),['fr','de']);
+await i18n.setLocale('fr');
+assert.equal(i18n.preference,'fr');assert.equal(i18n.locale,'fr');assert.equal(select.value,'fr');
+assert.equal(stored.get('screenOrganizer.language'),'fr');assert.equal(bridge.length,2);
+''',native=True,setup="context.screenOrganizerHost.languageSync='native-origin';")
+
+
+@pytest.mark.parametrize("capability", [None, "native-origin"])
+def test_explicit_native_request_supersedes_picker_and_retires_legacy_acknowledgment(capability):
+    browser('''
+const select=$('#language-select');select.value='fr';await select.onchange({target:select});
+const fetch=context.fetch;let release;context.fetch=(p,opts)=>p==='/static/locales/es.json'
+ ?new Promise(r=>release=()=>fetch(p,opts).then(r)):fetch(p,opts);
+select.value='es';const pending=select.onchange({target:select});
+await i18n.setLocale('pt','native');release();await pending;assert.equal(select.value,'pt');
+await i18n.setLocale('fr');assert.equal(select.value,'fr');assert.deepEqual(bridge.map(m=>m.preference),['fr']);
+''',native=True,setup=f'context.screenOrganizerHost.languageSync={json.dumps(capability)};')

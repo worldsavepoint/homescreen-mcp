@@ -212,6 +212,7 @@ struct WebView: NSViewRepresentable {
         var openSetup: () -> Void
         private var bootstrapPreference: String?
         private var synchronizedPreference: String?
+        private var languageRevision = 0
 
         init(origin: URL, localization: Localization, consent: LaunchConsent, openSetup: @escaping () -> Void) {
             self.origin = origin
@@ -223,7 +224,8 @@ struct WebView: NSViewRepresentable {
         func installBootstrap(_ controller: WKUserContentController) {
             guard bootstrapPreference != localization.preference else { return }
             bootstrapPreference = localization.preference
-            let values: [String: Any] = ["native": true, "languagePreference": localization.preference, "consentAccepted": consent.accepted]
+            let values: [String: Any] = ["native": true, "languageSync": "native-origin",
+                "languagePreference": localization.preference, "consentAccepted": consent.accepted]
             let json = String(decoding: try! JSONSerialization.data(withJSONObject: values), as: UTF8.self)
             controller.removeAllUserScripts()
             controller.addUserScript(WKUserScript(source: "window.screenOrganizerHost = \(json);", injectionTime: .atDocumentStart, forMainFrameOnly: true))
@@ -236,9 +238,11 @@ struct WebView: NSViewRepresentable {
             // Track requests before awaiting JavaScript so a quick return to the previous
             // language still reaches the web catalog loader's revision check.
             synchronizedPreference = preference
-            web.callAsyncJavaScript("if (window.ScreenOrganizerI18n) { await window.ScreenOrganizerI18n.setLocale(preference); return true; } return false;",
+            languageRevision += 1
+            let revision = languageRevision
+            web.callAsyncJavaScript("if (window.ScreenOrganizerI18n) { await window.ScreenOrganizerI18n.setLocale(preference, 'native'); return true; } return false;",
                 arguments: ["preference": preference], in: nil, in: .page) { [weak self] result in
-                    guard self?.synchronizedPreference == preference else { return }
+                    guard self?.languageRevision == revision else { return }
                     if case .success(let value) = result, value as? Bool == true { return }
                     self?.synchronizedPreference = nil
                 }
@@ -251,8 +255,11 @@ struct WebView: NSViewRepresentable {
             switch action {
             case .openMCPSetup: openSetup()
             case .setLanguage(let preference):
-                guard localization.recognizedPreference(preference) != nil else { return }
-                localization.setPreference(preference)
+                guard let owner = localization.recognizedPreference(preference) else { return }
+                // The picker commits its choice before notifying this coordinator.
+                languageRevision += 1
+                synchronizedPreference = owner
+                localization.setPreference(owner)
             }
         }
 

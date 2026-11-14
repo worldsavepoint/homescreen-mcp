@@ -224,6 +224,7 @@ main { flex: 1; display: flex; min-height: 0; }
 
 .toast { position: fixed; left: 50%; top: 70px; transform: translateX(-50%); background: var(--fg); color: var(--bg);
   padding: 10px 16px; border-radius: 12px; z-index: 60; box-shadow: var(--shadow); max-width: 80vw; }
+.toast:has(details) { max-height: calc(100vh - 82px); overflow: auto; overflow-wrap: anywhere; }
 .toast.error { background: var(--danger); color: #fff; }
 .toast.ok { background: var(--ok); color: #003d14; }
 .busy { position: fixed; inset: 0; background: rgba(0,0,0,.3); z-index: 70; display: grid; place-items: center; align-content: center; gap: 14px; color: #fff; font-weight: 600; }
