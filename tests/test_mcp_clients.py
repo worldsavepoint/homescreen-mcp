@@ -121,6 +121,12 @@ target = Path(os.environ["HOME"]) / ".codex/config.toml"
 def trace_mutation(operation):
     with store.with_suffix(".mutations").open("a") as log:
         log.write(operation + "\\n")
+def await_outside_writer(stage):
+    store.with_suffix(".boundary").write_text(stage)
+    deadline = time.monotonic() + 5
+    while not store.with_suffix(".outside-done").exists():
+        assert time.monotonic() < deadline
+        time.sleep(.005)
 if args[:2] == ["app-server", "generate-json-schema"]:
     assert args[2] == "--out"
     out = Path(args[3])
@@ -148,14 +154,41 @@ if args == ["app-server"]:
         method, params = request["method"], request["params"]
         if method == "initialize":
             assert all(params["clientInfo"][k] for k in ("name", "title", "version"))
+            boundary = os.environ.get("TEST_WRITE_BOUNDARY")
+            marker = store.with_suffix(".boundary")
+            first = (boundary == "first-eof" and not marker.exists() and Path(os.environ["TEST_PENDING_RECORD"]).exists()
+                     and json.loads(Path(os.environ["TEST_PENDING_RECORD"]).read_text())["phase"] == "versionedWritePending")
+            retry = boundary and marker.exists() and marker.read_text() == "refreshed"
+            if first or retry:
+                if boundary == "post-error": marker.write_text("ready-to-send")
+                elif boundary == "init-closed-input":
+                    os.close(0)
+                    await_outside_writer("initializing")
+                    print(json.dumps({"id":1,"result":{"userAgent":"fixture"}}),flush=True)
+                    sys.exit(0)
+                elif boundary == "partial-send": marker.write_text("ready-for-prefix")
+                else:
+                    await_outside_writer("initializing")
+                    if boundary == "init-error":
+                        print(json.dumps({"id":1,"error":{"code":-32603,"message":"Configuration was modified since last read. Fetch latest version and retry."}}),flush=True)
+                    if boundary == "init-timeout": time.sleep(60)
+                    sys.exit(0)
             initialized = True
             result = {"userAgent": "fixture"}
         elif method == "initialized":
             assert initialized and "id" not in request and params == {}
             ready = True
+            marker = store.with_suffix(".boundary")
+            if marker.exists() and marker.read_text() == "ready-for-prefix":
+                assert sys.stdin.read(1) == "{"
+                await_outside_writer("batch-prefix")
+                sys.exit(0)
             continue
         elif method == "config/read":
             assert ready and params["includeLayers"] and params["cwd"] in (None, os.getcwd())
+            boundary_mark = store.with_suffix(".boundary")
+            if boundary_mark.exists() and boundary_mark.read_text() == "refused":
+                boundary_mark.write_text("refreshed")
             marker = store.with_suffix(".read-stage")
             stage = marker.read_text() if marker.exists() else ""
             if stage == "refresh-failed":
@@ -177,6 +210,8 @@ if args == ["app-server"]:
             project = {"command":"/project", "env":{"HOMESCREEN_READ_ONLY":"0","HOMESCREEN_ALLOW_APPLY":"1"}}
             if os.getenv("TEST_PROJECT") == "irrelevant": project = {"tool_timeout_sec":13}
             if os.getenv("TEST_PROJECT") == "remote": project = {"environment_id":"remote-box"}
+            if os.getenv("TEST_PROJECT_FIELDS"):
+                project = json.loads(os.environ["TEST_PROJECT_FIELDS"])
             if os.getenv("TEST_SYSTEM_EXECUTOR"):
                 effective.setdefault("environment_id", "remote-system")
             if os.getenv("TEST_SYSTEM_ALLOW"):
@@ -203,6 +238,10 @@ if args == ["app-server"]:
                 continue
             if params["cwd"] and os.getenv("TEST_PROJECT") and key in entries:
                 for field in project: result["origins"]["mcp_servers." + key + "." + field] = origin
+                if os.getenv("TEST_SYSTEM_ENV_NAME"):
+                    for name in project["env"]:
+                        source = {"name":{"type":"system","file":"/synthetic/system.toml"}} if name == os.environ["TEST_SYSTEM_ENV_NAME"] else origin
+                        result["origins"]["mcp_servers." + key + ".env." + name] = source
                 result["layers"].append({**origin,"disabledReason":None,"config":{"mcp_servers":{key:project}}})
             if return_to_intended:
                 store.write_text(json.dumps({**entries, key:json.loads(store.with_suffix(".intended").read_text())}))
@@ -217,6 +256,19 @@ if args == ["app-server"]:
             value = edit["value"]
             requested = value is not None and value.get("command") == "/new"
             trace_mutation("delete" if value is None else "replace")
+            if os.getenv("TEST_WRITE_BOUNDARY"):
+                marker = store.with_suffix(".boundary")
+                if not marker.exists():
+                    entries["unrelated"]["independent"] = True
+                    store.write_text(json.dumps(entries))
+                    marker.write_text("refused")
+                    print(json.dumps({"id":2,"error":{"code":-32600,"message":"revision changed",
+                          "data":{"config_write_error_code":"configVersionConflict"}}}),flush=True)
+                    continue
+                if marker.read_text() == "ready-to-send":
+                    await_outside_writer("batch-received")
+                    print(json.dumps({"id":2,"error":{"code":-32603,"message":"unknown result"}}),flush=True)
+                    continue
             conflict = store.with_suffix(".conflicted")
             cas = os.getenv("TEST_CAS") if value is not None else os.getenv("TEST_UNDO_CAS")
             if cas and (not conflict.exists() or cas in {"twice","outside-intended"}):
@@ -317,6 +369,7 @@ if action == "get":
     entry = entries["ios-homescreen-mcp"]
     if os.getenv("TEST_PROJECT") in {"1","irrelevant"}:
         entry = {"command":"/project","args":["mcp"],"env":{"HOMESCREEN_READ_ONLY":"0","HOMESCREEN_ALLOW_APPLY":"1"}}
+    if os.getenv("TEST_PROJECT_FIELDS"): entry = {**entry, **json.loads(os.environ["TEST_PROJECT_FIELDS"])}
     if os.getenv("TEST_EFFECTIVE"): entry = {**entry, **json.loads(os.environ["TEST_EFFECTIVE"])}
     if "--json" in args:
         print(json.dumps({"name": "ios-homescreen-mcp", "enabled": entry.get("enabled", True), "transport": {"type": "stdio", **{k:v for k,v in entry.items() if k != "environment_id"}}}))
@@ -1496,3 +1549,120 @@ def test_genuine_write_refusal_accepts_unknown_fields_order_and_escapes(native_m
     assert (result["code"],result["recovery"]) == ("commandFailed","restored")
     assert json.loads(Path(sandbox["TEST_STORE"]).read_text()) == SENTINEL
     assert mutations(sandbox) == ["add","replace","delete"]
+
+
+@pytest.mark.parametrize("fault,existing,save,code", [
+    ("init-error",False,"","versionConflict"), ("init-eof",True,"","invalidResponse"),
+    ("init-timeout",True,"","timedOut"), ("init-closed-input",True,"","invalidResponse"),
+    ("post-error",True,"","commandFailed"), ("partial-send",True,"","invalidResponse"),
+    ("first-eof",True,"","invalidResponse"), ("init-eof",False,"exit",""),
+    ("init-eof",True,"before","snapshotReadFailed"), ("init-error",True,"after","snapshotReadFailed"),
+])
+def test_batch_dispatch_boundary_preserves_outside_registration(native_mcp_binary, sandbox, tmp_path, fault, existing, save, code):
+    cli = fake_client(tmp_path)
+    store, prior = (seed_user(sandbox, extra={"flags":[True,1,False,0]}) if existing else (Path(sandbox["TEST_STORE"]), SENTINEL))
+    if fault == "partial-send":
+        prior[SERVER_ID]["large_setting"] = "x" * (256 * 1024)
+        store.write_text(json.dumps(prior))
+    journal = journal_file(sandbox)
+    env = {**sandbox, "TEST_WRITE_BOUNDARY":fault, "TEST_PENDING_RECORD":str(journal)}
+    if save == "exit": env["TEST_JOURNAL_EXIT"] = "conflicted"
+    elif save: env["TEST_SAVE_FAIL_" + save.upper()] = "conflicted"
+    with subprocess.Popen([native_mcp_binary,"register","codex",cli,"/new"],env=env,stdout=subprocess.PIPE) as process:
+        wait_for_fixture_stage(process,store,{"post-error":"batch-received","partial-send":"batch-prefix"}.get(fault,"initializing"))
+        outside = json.loads(store.read_text())
+        outside[SERVER_ID] = {**prior.get(SERVER_ID,{}), **LOCAL}
+        store.write_text(json.dumps(outside))
+        store.with_suffix(".outside-done").touch()
+        output = process.communicate(timeout=10)[0]
+        if save == "exit": assert process.returncode == 85
+        else:
+            assert process.returncode == 0
+            result = json.loads(output)
+            recovery = "restored" if fault in {"post-error","partial-send"} else "failed"
+            assert (result["code"],result["recovery"]) == (code,recovery)
+    attempts = ([] if existing else ["add"]) + ([] if fault == "first-eof" else ["replace"])
+    if fault in {"post-error","partial-send"}:
+        assert mutations(sandbox) == attempts + (["replace"] if fault == "post-error" else []) + ["replace"]
+        assert json.loads(store.read_text()) == {**outside,SERVER_ID:prior[SERVER_ID]} and not journal.exists()
+        return
+    assert mutations(sandbox) == attempts and json.loads(store.read_text()) == outside
+    assert json.loads(journal.read_text())["phase"] == ("versionedWritePending" if save == "before" else "conflicted")
+    if save == "before": return
+    for action, args in [("recover",[]), ("register",["/other"])]:
+        assert execute(native_mcp_binary,sandbox,action,"codex",cli,*args)["code"] == "recoveryConflict"
+        assert json.loads(store.read_text()) == outside and mutations(sandbox) == attempts
+    store.write_text(json.dumps(prior))
+    assert execute(native_mcp_binary,sandbox,"recover","codex",cli)["code"] == "success"
+    assert not journal.exists() and mutations(sandbox) == attempts
+
+
+def wait_for_fixture_stage(process, store, expected):
+    marker = store.with_suffix(".boundary")
+    deadline = time.monotonic() + 7
+    while not marker.exists() or marker.read_text() != expected:
+        assert process.poll() is None and time.monotonic() < deadline
+        time.sleep(.005)
+
+
+def test_restoration_retry_with_unsent_batch_records_conflict(native_mcp_binary,sandbox,tmp_path):
+    store, prior = seed_user(sandbox)
+    cli = fake_client(tmp_path)
+    interrupted(native_mcp_binary,{**sandbox,"TEST_INTERRUPT":"add"},cli,"/new",status=-9)
+    outside = json.loads(store.read_text())
+    with subprocess.Popen([native_mcp_binary,"recover","codex",cli],env={**sandbox,"TEST_WRITE_BOUNDARY":"init-eof"},
+                          stdout=subprocess.PIPE) as process:
+        wait_for_fixture_stage(process,store,"initializing")
+        outside["unrelated"]["independent"] = True
+        store.write_text(json.dumps(outside))
+        store.with_suffix(".outside-done").touch()
+        output = process.communicate(timeout=10)[0]
+        assert process.returncode == 0 and json.loads(output)["code"] == "invalidResponse"
+    assert json.loads(journal_file(sandbox).read_text())["phase"] == "conflicted"
+    assert execute(native_mcp_binary,sandbox,"recover","codex",cli)["code"] == "recoveryConflict"
+    assert mutations(sandbox) == ["replace","replace"] and json.loads(store.read_text()) == outside
+    store.write_text(json.dumps(prior))
+    assert execute(native_mcp_binary,sandbox,"recover","codex",cli)["code"] == "success"
+    assert mutations(sandbox) == ["replace","replace"]
+
+
+@pytest.mark.parametrize("case", ["env","root","get-first","get-second","origin-first","origin-second"])
+def test_project_unicode_settings_preserve_effective_verification(native_mcp_binary,sandbox,tmp_path,case):
+    store, prior = seed_user(sandbox, own_option={"flags":[True,1]})
+    cli = fake_client(tmp_path)
+    first,second = "caf\u00e9","cafe\u0301"
+    pair = {first:"first",second:"second"}
+    gates = {"HOMESCREEN_READ_ONLY":"0","HOMESCREEN_ALLOW_APPLY":"1"}
+    project = {"env":gates, **pair} if case == "root" else {"env":{**gates,**pair}}
+    env = {**sandbox,"TEST_PROJECT":"custom","TEST_PROJECT_FIELDS":json.dumps(project)}
+    if case.startswith("get"):
+        changed = first if case == "get-first" else second
+        env["TEST_EFFECTIVE"] = json.dumps({"env":{**project["env"],changed:"different"}})
+    if case.startswith("origin"):
+        env["TEST_SYSTEM_ENV_NAME"] = first if case == "origin-first" else second
+    result = execute(native_mcp_binary,env,"register","codex",cli,"/new")
+    if case in {"env","root"}:
+        assert (result["code"],result["recovery"]) == ("success","notNeeded")
+        assert execute(native_mcp_binary,env,"scope","codex",cli) == {
+            "scope":"other","user":"readOnly","effective":"applyEnabled","connection":"unknown"}
+        assert json.loads(store.read_text()) == {**prior,SERVER_ID:{**prior[SERVER_ID],**LOCAL}}
+        assert mutations(sandbox) == ["replace"]
+    else:
+        assert (result["code"],result["recovery"]) == ("invalidResponse","restored")
+        assert json.loads(store.read_text()) == prior and mutations(sandbox) == ["replace","replace"]
+    assert not journal_file(sandbox).exists()
+
+
+def test_journal_writable_unicode_environment_is_checked_before_recovery(native_mcp_binary,sandbox,tmp_path):
+    cli = fake_client(tmp_path)
+    store, _ = seed_user(sandbox)
+    interrupted(native_mcp_binary,{**sandbox,"TEST_INTERRUPT":"add"},cli,"/new",status=-9)
+    before = store.read_bytes()
+    journal = journal_file(sandbox)
+    record = json.loads(journal.read_text())
+    prior = json.loads(record["prior"]["present"]["_0"])
+    prior["env"].update({"caf\u00e9":"first","cafe\u0301":"second"})
+    record["prior"]["present"]["_0"] = json.dumps(prior)
+    journal.write_text(json.dumps(record))
+    assert execute(native_mcp_binary,sandbox,"recover","codex",cli)["code"] == "snapshotReadFailed"
+    assert store.read_bytes() == before and mutations(sandbox) == ["replace"]

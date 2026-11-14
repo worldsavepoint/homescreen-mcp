@@ -69,7 +69,7 @@ struct MCPClientQuery: Sendable {
     var localEnabled = false
     var url: String? = nil
     var enabled: Bool? = nil
-    var transportEnvironment: [String: String] = [:]
+    var transportEnvironment: [Data: Data] = [:]
     var forwardedNames: Set<String> = []
 }
 
@@ -205,12 +205,8 @@ struct MCPClientManager {
             guard local ? transport["command"] is String : (["streamable_http", "sse"].contains(kind) && transport["url"] is String) else {
                 return queryFailure(client, .invalidResponse)
             }
-            var environment: [String: String] = [:]
             var forwarded: Set<String> = []
-            if let env = transport["env"], !(env is NSNull) {
-                guard let values = env as? [String: String] else { return queryFailure(client, .invalidResponse) }
-                environment = values
-            }
+            guard let environment = try? mcpEnvironment(transport["env"]) else { return queryFailure(client, .invalidResponse) }
             if let names = transport["env_vars"], !(names is NSNull) {
                 guard let options = try? forwardedOptions(names) else { return queryFailure(client, .invalidResponse) }
                 forwarded = Set(options.map(\.name))
@@ -285,10 +281,12 @@ struct MCPClientManager {
         query.userConfiguration = object == nil ? .notConfigured : .configured
         query.userMode = object.flatMap(localMode)
         guard query.client == .codex, let observed = snapshot.effectiveEntry else { return }
-        guard let active = try? observed.object() else { query.localEnabled = false; query.mode = nil; return }
+        guard let fields = try? observed.dictionary(), let active = fields as? [String: Any] else {
+            query.localEnabled = false; query.mode = nil; return
+        }
         let enabled = active["enabled"] as? Bool ?? true
         let local = active["url"] == nil
-        let activeEnv = active["env"] as? [String: String] ?? [:]
+        let activeEnv = try? mcpEnvironment(fields["env"])
         let activeForwarded = (try? forwardedOptions(active["env_vars"] ?? []).map(\.name)) ?? []
         let agrees = query.enabled == enabled && query.command == active["command"] as? String &&
             query.arguments == active["args"] as? [String] && query.url == active["url"] as? String &&
@@ -444,6 +442,8 @@ struct MCPClientManager {
                 guard fresh.file == record.file, fresh.entry == record.prior else { throw code }
                 try journal.clear()
                 return
+            } catch MCPCodexWriteError.notDispatched(let code) {
+                throw code
             } catch MCPCodexWriteError.rejectedBeforePersistence { throw MCPClientOperationCode.commandFailed }
         } else {
             if current.entry != .absent {
@@ -575,7 +575,7 @@ struct MCPClientManager {
                         throw MCPClientOperationCode.commandFailed
                     } catch MCPCodexWriteError.changedEntry(let entry) {
                         try changedEntry(entry, record: &record, journal: journal)
-                    } catch MCPCodexWriteError.terminalVersionRefusal(let code) {
+                    } catch MCPCodexWriteError.terminalVersionRefusal(let code), MCPCodexWriteError.notDispatched(let code) {
                         try markConflict(&record, journal: journal, code: code)
                     }
                     try savePhase(.acknowledged, record: &record, journal: journal)

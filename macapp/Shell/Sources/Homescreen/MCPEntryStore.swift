@@ -8,12 +8,11 @@ enum MCPOwnedEntry: Equatable, Codable {
 
     init(_ object: Any?) throws {
         guard let object else { self = .absent; return }
-        let dictionary = try Self.dictionary(object)
+        guard let dictionary = object as? NSDictionary else { throw MCPClientOperationCode.snapshotReadFailed }
         self = .present(String(decoding: try JSONSerialization.data(withJSONObject: dictionary, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self))
     }
 
-    private static func dictionary(_ object: Any) throws -> NSDictionary {
-        guard let dictionary = object as? NSDictionary else { throw MCPClientOperationCode.snapshotReadFailed }
+    private static func validateWritable(_ dictionary: NSDictionary) throws {
         // Merging touches the owned root and its environment as Swift dictionaries.
         // Distinct Unicode scalar spellings can collapse to one Swift key.
         for fields in [dictionary, dictionary["env"] as? NSDictionary].compactMap({ $0 }) {
@@ -21,7 +20,6 @@ enum MCPOwnedEntry: Equatable, Codable {
                 throw MCPClientOperationCode.snapshotReadFailed
             }
         }
-        return dictionary
     }
 
     static func == (left: Self, right: Self) -> Bool {
@@ -32,20 +30,46 @@ enum MCPOwnedEntry: Equatable, Codable {
         }
     }
 
-    func object() throws -> [String: Any]? {
+    func dictionary() throws -> NSDictionary? {
         guard case .present(let json) = self else { return nil }
-        let dictionary = try Self.dictionary(JSONSerialization.jsonObject(with: Data(json.utf8)))
-        guard let value = dictionary as? [String: Any] else {
+        guard let dictionary = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? NSDictionary else {
             throw MCPClientOperationCode.snapshotReadFailed
         }
+        return dictionary
+    }
+
+    func object() throws -> [String: Any]? {
+        guard let raw = try dictionary() else { return nil }
+        try Self.validateWritable(raw)
+        guard let value = raw as? [String: Any] else { throw MCPClientOperationCode.snapshotReadFailed }
         return value
     }
 
-    static func from(_ container: [String: Any], table: String) throws -> Self {
-        guard let value = container[table] else { return .absent }
-        guard let entries = value as? [String: Any] else { throw MCPClientOperationCode.snapshotReadFailed }
-        return try Self(entries[MCPClientRegistration.serverID])
+    static func fields(in container: [String: Any], table: String) throws -> NSDictionary? {
+        guard let value = container[table] else { return nil }
+        guard let entries = value as? NSDictionary else { throw MCPClientOperationCode.snapshotReadFailed }
+        guard let object = entries[MCPClientRegistration.serverID] else { return nil }
+        guard let fields = object as? NSDictionary else { throw MCPClientOperationCode.snapshotReadFailed }
+        return fields
     }
+
+    static func from(_ container: [String: Any], table: String) throws -> Self {
+        guard let fields = try fields(in: container, table: table) else { return .absent }
+        try validateWritable(fields)
+        return try Self(fields)
+    }
+}
+
+/// Configuration protocols preserve environment names with distinct UTF-8 spellings.
+func mcpEnvironment(_ object: Any?) throws -> [Data: Data] {
+    guard let object, !(object is NSNull) else { return [:] }
+    guard let fields = object as? NSDictionary else { throw MCPClientOperationCode.invalidResponse }
+    var values = [Data: Data]()
+    for (name, raw) in fields {
+        guard let key = name as? String, let value = raw as? String else { throw MCPClientOperationCode.invalidResponse }
+        values[Data(key.utf8)] = Data(value.utf8)
+    }
+    return values
 }
 
 struct MCPUserSnapshot {
@@ -57,6 +81,7 @@ struct MCPUserSnapshot {
 }
 
 enum MCPCodexWriteError: Error {
+    case notDispatched(MCPClientOperationCode)
     case rejectedBeforePersistence
     case versionRefused
     case terminalVersionRefusal(MCPClientOperationCode)
@@ -141,16 +166,20 @@ struct MCPEntryStore {
             guard let root = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else { throw MCPClientOperationCode.snapshotReadFailed }
             return try MCPUserSnapshot(file: url.path, entry: .from(root, table: "mcpServers"))
         }
-        let result = try await rpc("config/read", ["includeLayers": true, "cwd": effective ? cwd as Any : NSNull()])
+        let result = try await MCPSubprocess.session(executable, ["app-server"], environment, timeout) { io in
+            try initialize(&io)
+            try io.send(["id": 2, "method": "config/read", "params": ["includeLayers": true, "cwd": effective ? cwd as Any : NSNull()]])
+            return try io.receive(2, mcp: false)
+        }
         guard let layers = result["layers"] as? [[String: Any]] else { throw MCPClientOperationCode.unsupportedClient }
         var user: MCPUserSnapshot?
         var sawUser = false
         let key = "mcp_servers." + MCPClientRegistration.serverID
-        let origins = result["origins"] as? [String: [String: Any]] ?? [:]
-        let relevant = origins.filter { $0.key == key || $0.key.hasPrefix(key + ".") }
+        let origins = result["origins"] as? NSDictionary ?? [:]
+        let relevant = origins.allKeys.compactMap { $0 as? String }.filter { $0 == key || $0.hasPrefix(key + ".") }
         var projectFiles = Set<String>()
-        let userOrigin = !relevant.isEmpty && relevant.values.allSatisfy {
-            guard let source = $0["name"] as? [String: Any] else { return false }
+        let userOrigin = !relevant.isEmpty && relevant.allSatisfy {
+            guard let origin = origins[$0] as? [String: Any], let source = origin["name"] as? [String: Any] else { return false }
             return source["type"] as? String == "user" && source["file"] as? String == codexFile.path &&
                 (source["profile"] == nil || source["profile"] is NSNull)
         }
@@ -161,11 +190,12 @@ struct MCPEntryStore {
             if let profile = name["profile"], !(profile is NSNull) { continue }
             guard kind == "user" || kind == "project" else { continue }
             guard let config = layer["config"] as? [String: Any] else { throw MCPClientOperationCode.unsupportedClient }
-            let entry = try MCPOwnedEntry.from(config, table: "mcp_servers")
             if kind == "project" {
-                if let folder = name["dotCodexFolder"] as? String, entry != .absent { projectFiles.insert(folder) }
+                let fields = try MCPOwnedEntry.fields(in: config, table: "mcp_servers")
+                if let folder = name["dotCodexFolder"] as? String, fields != nil { projectFiles.insert(folder) }
                 continue
             }
+            let entry = try MCPOwnedEntry.from(config, table: "mcp_servers")
             guard user == nil, let file = name["file"] as? String, file.hasPrefix("/"),
                   URL(fileURLWithPath: file).standardizedFileURL.path == codexFile.path,
                   let version = layer["version"] as? String, !version.isEmpty else { throw MCPClientOperationCode.unsupportedClient }
@@ -181,9 +211,9 @@ struct MCPEntryStore {
         var snapshot = user!
         if effective {
             guard let config = result["config"] as? [String: Any] else { throw MCPClientOperationCode.invalidResponse }
-            let effectiveEntry = try MCPOwnedEntry.from(config, table: "mcp_servers")
-            snapshot.effectiveEntry = effectiveEntry
-            let saved = try snapshot.entry.object() ?? [:], active = try effectiveEntry.object() ?? [:]
+            let fields = try MCPOwnedEntry.fields(in: config, table: "mcp_servers")
+            snapshot.effectiveEntry = try MCPOwnedEntry(fields)
+            let saved = try snapshot.entry.object() ?? [:], active = fields ?? [:]
             var changed: [String] = []
             // Compare registration semantics, ignoring spelling differences between
             // layer TOML defaults and the typed effective configuration.
@@ -192,12 +222,12 @@ struct MCPEntryStore {
                 let a = saved[field] ?? defaults[field], b = active[field] ?? defaults[field]
                 if try MCPOwnedEntry(["v": a ?? NSNull()]) != MCPOwnedEntry(["v": b ?? NSNull()]) { changed.append(field) }
             }
-            let lhs = saved["env"] as? [String: String] ?? [:], rhs = active["env"] as? [String: String] ?? [:]
-            changed += Set(lhs.keys).union(rhs.keys).filter { lhs[$0] != rhs[$0] }.map { "env." + $0 }
+            let lhs = try mcpEnvironment(saved["env"]), rhs = try mcpEnvironment(active["env"])
+            changed += Set(lhs.keys).union(rhs.keys).filter { lhs[$0] != rhs[$0] }.map { "env." + String(decoding: $0, as: UTF8.self) }
             let projectExplainsChange = !changed.isEmpty && changed.allSatisfy { field in
                 var path = key + "." + field
                 while path.count >= key.count {
-                    if let origin = relevant[path]?["name"] as? [String: Any] {
+                    if let entry = origins[path] as? [String: Any], let origin = entry["name"] as? [String: Any] {
                         guard origin["type"] as? String == "project", let file = origin["dotCodexFolder"] as? String else { return false }
                         return projectFiles.contains(file)
                     }
@@ -211,16 +241,12 @@ struct MCPEntryStore {
         return snapshot
     }
 
-    func rpc(_ method: String, _ params: [String: Any]) async throws -> [String: Any] {
-        try await MCPSubprocess.session(executable, ["app-server"], environment, timeout) { io in
-            try io.send(["id": 1, "method": "initialize", "params": ["clientInfo": [
-                "name": "screen_organizer", "title": "Screen Organizer", "version": "1.3.0"]]])
-            let handshake = try io.receive(1, mcp: false)
-            guard handshake["userAgent"] is String else { throw MCPClientOperationCode.unsupportedClient }
-            try io.send(["method": "initialized", "params": [:]])
-            try io.send(["id": 2, "method": method, "params": params])
-            return try io.receive(2, mcp: false, codexBatchWrite: method == "config/batchWrite")
-        }
+    private func initialize(_ io: inout MCPChildIO) throws {
+        try io.send(["id": 1, "method": "initialize", "params": ["clientInfo": [
+            "name": "screen_organizer", "title": "Screen Organizer", "version": "1.3.0"]]])
+        let handshake = try io.receive(1, mcp: false)
+        guard handshake["userAgent"] is String else { throw MCPClientOperationCode.unsupportedClient }
+        try io.send(["method": "initialized", "params": [:]])
     }
 
     @discardableResult func replaceCodex(_ snapshot: MCPUserSnapshot, with desired: MCPOwnedEntry, retryUnrelated: Bool = true) async throws -> String {
@@ -235,18 +261,33 @@ struct MCPEntryStore {
             guard fresh.version != nil, fresh.version != snapshot.version else { throw MCPCodexWriteError.terminalVersionRefusal(.recoveryConflict) }
             do { return try await write(fresh, desired) }
             catch MCPCodexWriteError.versionRefused { throw MCPCodexWriteError.terminalVersionRefusal(.recoveryConflict) }
+            catch MCPCodexWriteError.notDispatched(let code) { throw MCPCodexWriteError.terminalVersionRefusal(code) }
         }
     }
 
     private func write(_ snapshot: MCPUserSnapshot, _ prior: MCPOwnedEntry) async throws -> String {
-        guard let version = snapshot.version else { throw MCPClientOperationCode.recoveryConflict }
+        guard let version = snapshot.version else { throw MCPCodexWriteError.notDispatched(.recoveryConflict) }
         if let writeOverride {
             do { return try await writeOverride(snapshot, prior) }
             catch MCPClientOperationCode.versionConflict { throw MCPCodexWriteError.versionRefused }
         }
-        let edit: [String: Any] = ["keyPath": "mcp_servers." + MCPClientRegistration.serverID,
-                                   "mergeStrategy": "replace", "value": try prior.object() as Any? ?? NSNull()]
-        let result = try await rpc("config/batchWrite", ["edits": [edit], "expectedVersion": version, "filePath": snapshot.file])
+        // The session throws for setup or an unsent batch. Once bytes reached the
+        // pipe, return the exchange's own outcome, including an indeterminate error.
+        let reply: Result<[String: Any], Error>
+        do {
+            let edit: [String: Any] = ["keyPath": "mcp_servers." + MCPClientRegistration.serverID,
+                                       "mergeStrategy": "replace", "value": try prior.object() as Any? ?? NSNull()]
+            reply = try await MCPSubprocess.session(executable, ["app-server"], environment, timeout) { io in
+                try initialize(&io)
+                var started = false
+                do {
+                    try io.send(["id": 2, "method": "config/batchWrite",
+                                 "params": ["edits": [edit], "expectedVersion": version, "filePath": snapshot.file]]) { started = true }
+                    return .success(try io.receive(2, mcp: false, codexBatchWrite: true))
+                } catch where started { return .failure(error) }
+            }
+        } catch { throw MCPCodexWriteError.notDispatched(error as? MCPClientOperationCode ?? .snapshotReadFailed) }
+        let result = try reply.get()
         guard ["ok", "okOverridden"].contains(result["status"] as? String ?? ""),
               result["filePath"] as? String == snapshot.file, let revision = result["version"] as? String, !revision.isEmpty else { throw MCPClientOperationCode.recoveryFailed }
         return revision

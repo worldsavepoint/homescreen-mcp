@@ -193,7 +193,7 @@ struct MCPChildIO {
         }
     }
 
-    func send(_ object: [String: Any]) throws {
+    func send(_ object: [String: Any], onFirstWrite: (() -> Void)? = nil) throws {
         var bytes = try JSONSerialization.data(withJSONObject: object)
         bytes.append(10)
         guard bytes.count <= Self.limit else { throw MCPClientOperationCode.invalidResponse }
@@ -205,6 +205,7 @@ struct MCPChildIO {
                 let count = write(fd, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
                 if count < 0 && (errno == EINTR || errno == EAGAIN) { continue }
                 guard count > 0 else { throw MCPClientOperationCode.invalidResponse }
+                if offset == 0 { onFirstWrite?() }
                 offset += count
             }
         }
