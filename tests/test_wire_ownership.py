@@ -311,3 +311,140 @@ def test_failed_send_with_matching_order_and_unchanged_anchors_can_verify(tmp_pa
     src.set_icon_state = delivered
     assert apply(s)["ok"] and not s._pending_path.exists()
     assert s.require().pins == {"a": 7}
+
+
+@pytest.mark.parametrize("flat", [False, True])
+@pytest.mark.parametrize("where", ["same-page", "other-page", "distinct"])
+def test_legacy_alias_claims_are_counted_across_apps_and_widgets(tmp_path, flat, where):
+    from fake_phone import widget
+    from homescreen.session import node_pins
+
+    src = FrameSource(False)
+    src.raw = [[], [app_with_wire("bundle-one", "wire-one"), app("keep", "Keep")]]
+    s, _ = loaded(tmp_path, src)
+    saved = {"bundle-one": 7, "keep": 3}
+    memory = saved if flat else {"version": 2, "grid": s.grid.to_dict(), "pages": [saved]}
+    s._gaps_path.write_text(json.dumps(memory))
+    item = {**widget("Sample", "small"), "uniqueIdentifier": "other" if where == "distinct" else "bundle-one"}
+    if where == "other-page":
+        src.raw.append([item])
+    else:
+        src.raw[1].append(item)
+    run(s.read())
+    ambiguous = where == "same-page" or (flat and where == "other-page")
+    assert s.require().pins == ({"keep": 3} if ambiguous else {"keep": 3, "bundle-one": 7})
+    if ambiguous:
+        with pytest.raises(LayoutError, match="ambiguous|identify|identifiers"):
+            node_pins(s.require(), memory, by_memory=True, strict=True)
+
+
+def test_flat_folder_name_alias_cannot_be_claimed_by_an_app(tmp_path):
+    src = FrameSource(False)
+    src.raw = [[], [app_with_wire("folder:Tools", "wire"), folder("Tools", [app("a", "A")])]]
+    s, _ = loaded(tmp_path, src)
+    s._gaps_path.write_text(json.dumps({"folder:Tools": 7}))
+    run(s.read())
+    assert s.require().pins == {}
+
+
+def test_typed_app_pin_is_independent_of_matching_widget_wire(tmp_path):
+    from fake_phone import widget
+
+    src = FrameSource(False)
+    src.raw = [[], [app_with_wire("bundle-one", "wire-one")]]
+    s, _ = loaded(tmp_path, src)
+    s.edit(lambda l: l.pin("bundle-one", 1, 7))
+    assert apply(s)["ok"]
+    src.raw["iconLists"][0].append({**widget("Sample", "small"), "uniqueIdentifier": "bundle-one"})
+    run(s.read())
+    assert s.require().pins == {"bundle-one": 7}
+    s.edit(lambda l: l.pin("widget:bundle-one", 1, 15))
+    assert apply(s)["ok"]
+    assert s.require().pins == {"bundle-one": 7, "widget:bundle-one": 15}
+
+
+@pytest.mark.parametrize("operation", ["apply", "restore", "direct"])
+@pytest.mark.parametrize("overlap", [False, True])
+def test_root_archive_checks_final_inventory_owners_before_send(tmp_path, operation, overlap):
+    src = FrameSource()
+    target = [[], [app_with_wire("one", "two" if overlap else "wire-one")]]
+    src.raw = target if operation != "restore" else [[], [app("one", "One"), app("two", "Two")]]
+    async def installed():
+        return {"one": {}, "two": {}}
+    src.installed_apps = installed
+    s, _ = loaded(tmp_path, src)
+    backup = s._backup(target, [], "older") if operation == "restore" else None
+    before, backups = reviewed(s), s.backups()
+    def write():
+        if backup:
+            return run(s.restore(backup.name))
+        if operation == "direct":
+            return run(src.write(target, []))
+        return apply(s)
+    if overlap:
+        with pytest.raises(LayoutError, match="identifier"):
+            write()
+        assert src.payloads == [] and not s._pending_path.exists()
+        assert reviewed(s) == before and s.backups() == backups
+    else:
+        result = write()
+        assert operation == "direct" or result["ok"]
+        assert src.payloads[-1]["ignored"] == ["two"]
+        if operation != "direct":
+            assert s.require().pages[0][0].bundle_id == "one" and s.require().library[0].bundle_id == "two"
+
+
+def test_root_archive_prepares_inventory_once_before_publication(tmp_path):
+    src = FrameSource()
+    src.raw = [[], [app("one", "One")]]
+    s, _ = loaded(tmp_path, src)
+    old = s._backup
+    published = False
+    def backup(*args, **kwargs):
+        nonlocal published
+        published = True
+        return old(*args, **kwargs)
+    s._backup = backup
+    observed = []
+    async def inventory():
+        observed.append(published)
+        return {"one": {}, "extra": {}} if len(observed) >= 3 else {"one": {}}
+    src.installed_apps = inventory
+    assert apply(s)["ok"]
+    assert not any(observed) and len(observed) == 3
+    assert src.payloads[-1]["ignored"] == ["extra"]
+
+
+def test_same_bundle_repetition_across_page_and_library_keeps_multiplicity(tmp_path):
+    src = FrameSource()
+    src.raw = [[], [app("one", "One")]]
+    s, _ = loaded(tmp_path, src)
+    lib = [app("one", "One"), app_with_wire("one", "another"), app("one", "One")]
+    backup = s._backup(src.raw, lib, "previous")
+    assert run(s.restore(backup.name))["ok"]
+    assert src.payloads[-1]["ignored"] == ["one", "another", "one"]
+
+
+def test_literal_root_string_cannot_claim_another_apps_display_id():
+    with pytest.raises(LayoutError, match="identifier"):
+        to_root_archive([[], ["two", app_with_wire("one", "two")]], [])
+    assert to_root_archive([[], ["two", app("two", "Two")]], [])["iconLists"] == [["two", "two"]]
+
+
+@pytest.mark.parametrize("container", ["dock", "folder"])
+def test_root_identifier_ownership_includes_all_serialized_containers(container):
+    odd = app_with_wire("one", "two")
+    state = [[odd], []] if container == "dock" else [[], [folder("Tools", [odd])]]
+    with pytest.raises(LayoutError, match="identifier"):
+        to_root_archive(state, [app("two", "Two")])
+
+
+@pytest.mark.parametrize("dictionary", [False, True])
+def test_other_phone_formats_preserve_explicit_odd_bundle_fields(tmp_path, dictionary):
+    src = FrameSource()
+    state = [[], [app_with_wire("one", "two"), app("two", "Two")]]
+    src.raw = {"buttonBar": [], "iconLists": state[1:], "ignored": []} if dictionary else state
+    src.write_mode = "list"
+    s, _ = loaded(tmp_path, src)
+    assert apply(s)["ok"]
+    assert [n.bundle_id for n in s.require().pages[0]] == ["one", "two"]

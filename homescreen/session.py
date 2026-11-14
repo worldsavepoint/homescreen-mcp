@@ -257,35 +257,42 @@ def node_pins(lay: Layout, keyed: dict[str, Any] | list[dict[str, int]], by_memo
     def owners(nodes: list[Node], values: dict[str, Any]):
         keys = _memory_keys(nodes, values, typed_apps=typed_apps) if by_memory and scoped else {
             n.id: (memory_key(n) if by_memory else pin_key(n)) for n in nodes}
-        # Old memory used bundle IDs. A display alias is also readable if a single item owns it.
-        if by_memory and not typed_apps:
-            aliases = Counter(key for node in nodes for key in {keys[node.id], pin_key(node)} if key)
-            for node in nodes:
-                wire = pin_key(node)
-                if node.bundle_id:
-                    possible = {key for key in {node.bundle_id, wire} if key in values and aliases[key] == 1}
-                    keys[node.id] = possible.pop() if len(possible) == 1 else None
-        return keys, Counter(keys.values()), Counter(n.name for n in nodes if n.kind == "folder")
+        if not by_memory or typed_apps:
+            return keys, Counter(keys.values())
+
+        # Qualify each historical key against every possible owner, even when another
+        # alias of that owner is also present. Page-scoped and flat files use the same rule.
+        names = Counter(n.name for n in nodes if n.kind == "folder")
+        candidates = {}
+        for n in nodes:
+            aliases = {keys[n.id]}
+            if n.bundle_id:
+                aliases.add(pin_key(n))
+            if not scoped and n.kind == "folder" and names[n.name] == 1:
+                aliases.add(f"folder:{n.name}")
+                aliases.add("folder-content:" + json.dumps(
+                    [n.name, [[child.id for child in page] for page in n.children]], separators=(",", ":")))
+            candidates[n.id] = aliases.intersection(values)
+        counts = Counter(key for aliases in candidates.values() for key in aliases)
+        if strict and any(count > 1 for count in counts.values()):
+            raise LayoutError("ambiguous pin identifier on a layout page")
+        for nid, aliases in candidates.items():
+            unique = [key for key in aliases if counts[key] == 1]
+            keys[nid] = unique[0] if len(unique) == 1 else None
+        return keys, counts
 
     wanted: dict[str, int] = {}
     global_owners = None if scoped else owners([n for page in lay.pages for n in page], keyed)
     matched_global = set()
     for index, page in enumerate(lay.pages):
         values = (keyed[index] if index < len(keyed) else {}) if scoped else keyed
-        keys, identities, names = global_owners or owners(page, values)
+        keys, identities = global_owners or owners(page, values)
         matched = set()
         invalid = False
         for n in page:
             key = keys[n.id]
-            if by_memory:
-                # Older global files used child model IDs or just a folder name. An
-                # enumeration can change on reorder, so require a unique folder name.
-                if not scoped and key not in values and n.kind == "folder" and names[n.name] == 1:
-                    legacy = "folder-content:" + json.dumps(
-                        [n.name, [[child.id for child in p] for p in n.children]], separators=(",", ":"))
-                    key = legacy if legacy in values else f"folder:{n.name}"
             if key and key in values:
-                if identities[keys[n.id]] != 1:
+                if identities[key] != 1:
                     if strict:
                         raise LayoutError("ambiguous pin identifier on a layout page")
                     continue
@@ -1072,6 +1079,11 @@ class Session:
             raise LayoutError("the phone's layout changed during the final prewrite read; read again")
         if not current.same_placement(final):
             raise LayoutError("the phone's exported gaps changed during the final prewrite read; read again")
+        prepared_write = None
+        prepare_write = getattr(self.source, "prepare_write", None)
+        if prepare_write is not None:
+            target_lib, prepared_write = await asyncio.wait_for(
+                prepare_write(target, target_lib, want_pins, self.grid), OPERATION_TIMEOUT)
         info = await self._assert_identity()
         self._check_placement(requested, saved, info)
         check_write = getattr(self.source, "check_write", None)
@@ -1093,7 +1105,9 @@ class Session:
                            "backup": backup.name, "status": "pending"}).encode())
         write_error = None
         try:
-            await asyncio.wait_for(self.source.write(target, target_lib, want_pins, self.grid), OPERATION_TIMEOUT)
+            operation = (prepared_write() if prepared_write is not None
+                         else self.source.write(target, target_lib, want_pins, self.grid))
+            await asyncio.wait_for(operation, OPERATION_TIMEOUT)
         except Exception as e:
             write_error = str(e) or type(e).__name__
         verification_note = "Readback compares the layout fields returned by the selected source."

@@ -26,6 +26,7 @@ import plistlib
 import re
 import subprocess
 import uuid
+from collections.abc import Awaitable, Callable
 from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any, Protocol
@@ -122,13 +123,19 @@ def _leaf_id(x: dict[str, Any]) -> str:
     return x.get("displayIdentifier") or x.get("bundleIdentifier")
 
 
-def _modern(x: Any) -> Any:
+def _archive_leaf(wire: str, bundle: str, owners: dict[str, str]) -> str:
+    if owners.setdefault(wire, bundle) != bundle:
+        raise LayoutError("the USB root archive uses one display identifier for different apps")
+    return wire
+
+
+def _modern(x: Any, owners: dict[str, str]) -> Any:
     """A list-format item as SpringBoard stores it on disk: apps and web clips become their
     identifier string; widgets lose the empty iconLists phones attach; folders recurse."""
+    if isinstance(x, str):
+        return _archive_leaf(x, x, owners)
     if not isinstance(x, dict):
         return x
-    if x.get(DISK_MARK):
-        return _leaf_id(x)
     if is_widget(x):
         out = {k: v for k, v in widget_wire_fields(x).items() if k != "iconLists" or v}
         # Over USB a single widget's uniqueIdentifier isn't exported. Its configuration (which
@@ -138,9 +145,10 @@ def _modern(x: Any) -> Any:
         return out
     if is_folder(x):
         out = {k: v for k, v in x.items() if k not in (NAME_MARK, "iconLists")}
-        out["iconLists"] = [[_modern(i) for i in page] for page in x["iconLists"] if page]
+        out["iconLists"] = [[_modern(i, owners) for i in page] for page in x["iconLists"] if page]
         return out
-    return _leaf_id(x)
+    wire = _leaf_id(x)
+    return _archive_leaf(wire, x.get("bundleIdentifier") or wire, owners)
 
 
 def to_root_archive(state: list[Any], library: list[Any],
@@ -150,10 +158,11 @@ def to_root_archive(state: list[Any], library: list[Any],
     View keeps its value on the phone; page ids and gaps are replaced (iOS doesn't report gaps
     over USB, so the phone's own gaps are lost either way).
     grid supplies the loaded page dimensions; omitted metrics use the iPhone grid."""
+    owners: dict[str, str] = {}
     out = {
-        "buttonBar": [_modern(x) for x in state[0]],
-        "iconLists": [[_modern(x) for x in page] for page in state[1:]],
-        "ignored": [_modern(x) for x in library],
+        "buttonBar": [_modern(x, owners) for x in state[0]],
+        "iconLists": [[_modern(x, owners) for x in page] for page in state[1:]],
+        "ignored": [_modern(x, owners) for x in library],
     }
     if pins and any(pins):
         ids = [str(uuid.uuid4()).upper() for _ in out["iconLists"]]
@@ -415,8 +424,10 @@ class PhoneSource:
     pins: dict[str, int] | None = None  # ordinary USB list reads do not report gaps
 
     @_bounded
-    async def write(self, state: list[Any], library: list[Any] | None,
-                    pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> None:
+    async def prepare_write(
+        self, state: list[Any], library: list[Any] | None, pins: list[dict[str, int]] | None, grid: Grid | None
+    ) -> tuple[list[Any] | None, Callable[[], Awaitable[None]]]:
+        """Build the target once, including the installed apps retained by the root writer."""
         require_writable()
         self.check_write(pins, library)
         if self._last_dict is not None:
@@ -424,14 +435,23 @@ class PhoneSource:
         elif self.write_mode == "list":
             payload = state
         else:
-            # Safety net: any installed app in neither the layout nor the library (an old
-            # backup, an app installed meanwhile) goes to the library, never onto a page.
             library = list(library or [])
             listed = {_installed_bundle(x) for x in library if isinstance(x, dict)}
-            library += [x for x in library_from_installed(state, await self.installed_apps())
-                        if x["bundleIdentifier"] not in listed]
+            library.extend(x for x in library_from_installed(state, await self.installed_apps())
+                           if x["bundleIdentifier"] not in listed)
             payload = to_root_archive(state, library, pins, grid)
-        await self._call(lambda sb: sb.set_icon_state(payload))
+
+        async def send() -> None:
+            require_writable()
+            await self._call(lambda sb: sb.set_icon_state(payload))
+
+        return library, send
+
+    @_bounded
+    async def write(self, state: list[Any], library: list[Any] | None,
+                    pins: list[dict[str, int]] | None = None, grid: Grid | None = None) -> None:
+        _, send = await self.prepare_write(state, library, pins, grid)
+        await send()
 
     @_bounded
     async def icon_png(self, bundle_id: str) -> bytes | None:
