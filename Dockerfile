@@ -1,4 +1,4 @@
-# Source inspection only. USB device operation runs locally on macOS.
+# Starts the stdio MCP server for source inspection. USB device operation runs locally on macOS.
 FROM python:3.12-slim
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./

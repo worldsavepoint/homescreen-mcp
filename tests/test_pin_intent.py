@@ -48,7 +48,9 @@ def test_exported_map_must_keep_requested_pin_even_at_natural_cell(tmp_path, ope
     if reported == "retained":
         assert result["status"] == "verified"
         assert session.require().pins == {"example.a": cell}
-        assert json.loads(session._gaps_path.read_text()) == {"example.a": cell}
+        assert json.loads(session._gaps_path.read_text()) == {
+            "version": 2, "grid": {"cols": 4, "rows": 6, "dock": 4, "folder": 9},
+            "pages": [{"example.a": cell}]}
         assert not session._pending_path.exists()
     else:
         assert result["status"] == "unknown"

@@ -28,7 +28,8 @@ For fixed positions, inspect grid and call place_at with 1-based page/row/column
 Use move for sequential item order. For sequential arrange, call close_gaps on pinned items
 first; arrange retains fixed positions for items staying on the same page. On iOS 16, use
 these sequential-order edits.
-Moving an item clears its fixed position. USB reads omit phone-created gaps; apply uses the draft's positions.
+Moving an item clears its fixed position. Dictionary reads retain exported fixed locations;
+unreported/list observations use remembered positions. Apply uses the draft's positions.
 Preserve page 1 and Dock placement unless the user requests changes. optimize_by_usage preserves
 page-1 top-level placement when requested and optimizes folder contents throughout the draft,
 including page-1, Dock and holding-tray folders. To sort by color, call icon_colors first;

@@ -100,14 +100,15 @@ def pin_key(node: Node) -> str | None:
 def memory_key(node: Node) -> str | None:
     """Folders can omit UUIDs on readback; their name and ordered contents identify gaps."""
     if node.kind == "folder":
-        return "folder-content:" + json.dumps([node.name, [[child.id for child in page]
+        return "folder-content:" + json.dumps([node.name, [[_node_structure(child) for child in page]
                                                          for page in node.children]], separators=(",", ":"))
     return pin_key(node)
 
 
-def memory_pins(lay: Layout) -> dict[str, int]:
-    return {key: lay.pins[node.id] for page in lay.pages for node in page
-            if node.id in lay.pins and (key := memory_key(node))}
+def memory_pins(lay: Layout) -> dict[str, Any]:
+    return {"version": 2, "grid": lay.grid.to_dict(),
+            "pages": [{key: lay.pins[node.id] for node in page
+                       if node.id in lay.pins and (key := memory_key(node))} for page in lay.pages]}
 
 
 def pins_by_page(lay: Layout) -> list[dict[str, int]]:
@@ -123,12 +124,14 @@ def pins_by_page(lay: Layout) -> list[dict[str, int]]:
             key = pin_key(n)
             if not key:
                 raise LayoutError(f"{n.kind} {n.name!r} has no wire identifier for its pin; use ordinary page order")
+            if sum(pin_key(item) == key for item in page) != 1:
+                raise LayoutError("ambiguous pin identifier on a layout page")
             d[key] = lay.pins[n.id]
         out.append(d)
     return out
 
 
-def node_pins(lay: Layout, keyed: dict[str, int], by_memory: bool = False,
+def node_pins(lay: Layout, keyed: dict[str, Any] | list[dict[str, int]], by_memory: bool = False,
               strict: bool = False) -> dict[str, int]:
     """Resolve wire pins. Reads may discard stale gaps; write comparison must reject them."""
     if isinstance(keyed, ObservedPins):
@@ -139,26 +142,76 @@ def node_pins(lay: Layout, keyed: dict[str, int], by_memory: bool = False,
                 raise
             lay.pins = {}
             return lay.pins
+        keyed = keyed.pages(len(lay.pages))
+    saved_grid = lay.grid
+    if by_memory and isinstance(keyed, dict) and "version" in keyed:
+        try:
+            if keyed["version"] != 2:
+                raise ValueError("unsupported gap memory version")
+            saved_grid = Grid(**keyed["grid"])
+            if any(type(value) is not int or value <= 0 for value in saved_grid.to_dict().values()):
+                raise ValueError("invalid gap memory grid")
+            keyed = keyed["pages"]
+            if not isinstance(keyed, list):
+                raise ValueError("invalid gap memory pages")
+        except (KeyError, TypeError, ValueError):
+            if strict:
+                raise LayoutError("invalid saved pin memory")
+            lay.pins = {}
+            return lay.pins
+    scoped = isinstance(keyed, list)
+    if scoped and any(not isinstance(page, dict) for page in keyed):
+        raise LayoutError("pins must identify items on each page")
+    if strict and scoped and any(keyed[len(lay.pages):]):
+        raise LayoutError("pin identifiers do not match the layout's page items")
     wanted: dict[str, int] = {}
-    matched = set()
-    if by_memory:
-        identities = Counter(memory_key(n) for page in lay.pages for n in page)
-        names = Counter(n.name for page in lay.pages for n in page if n.kind == "folder")
-    for page in lay.pages:
+    key_for = memory_key if by_memory else pin_key
+    global_nodes = [n for page in lay.pages for n in page]
+    matched_global = set()
+    for index, page in enumerate(lay.pages):
+        values = (keyed[index] if index < len(keyed) else {}) if scoped else keyed
+        candidates = page if scoped else global_nodes
+        identities = Counter(key_for(n) for n in candidates)
+        names = Counter(n.name for n in candidates if n.kind == "folder")
+        matched = set()
+        invalid = False
         for n in page:
-            key = memory_key(n) if by_memory else pin_key(n)
+            key = key_for(n)
             if by_memory:
-                if identities[key] != 1:
+                # Older global files used child model IDs or just a folder name. An
+                # enumeration can change on reorder, so require a unique folder name.
+                if not scoped and key not in values and n.kind == "folder" and names[n.name] == 1:
+                    legacy = "folder-content:" + json.dumps(
+                        [n.name, [[child.id for child in p] for p in n.children]], separators=(",", ":"))
+                    key = legacy if legacy in values else f"folder:{n.name}"
+            if key and key in values:
+                if identities[key_for(n)] != 1:
+                    if strict:
+                        raise LayoutError("ambiguous pin identifier on a layout page")
                     continue
-                # Older gap files used only folder names. Migrate only unambiguous names.
-                if key not in keyed and n.kind == "folder" and names[n.name] == 1:
-                    key = f"folder:{n.name}"
-            if key and key in keyed:
-                if strict and (type(keyed[key]) is not int or not 0 <= keyed[key] < lay.grid.slots):
-                    raise LayoutError(f"invalid pin cell for {n.name!r} on the loaded grid")
-                wanted[n.id] = int(keyed[key])
+                cell = values[key]
+                if type(cell) is not int or not 0 <= cell < saved_grid.slots:
+                    if strict:
+                        raise LayoutError(f"invalid pin cell for {n.name!r} on the loaded grid")
+                    invalid = True
+                    continue
+                row, column = divmod(cell, saved_grid.cols)
+                width, height = lay.dims(n)
+                if (column + width > min(saved_grid.cols, lay.grid.cols)
+                        or row + height > min(saved_grid.rows, lay.grid.rows)):
+                    if strict:
+                        raise LayoutError("saved pin footprint does not fit the loaded grid")
+                    invalid = True
+                    continue
+                wanted[n.id] = row * lay.grid.cols + column
                 matched.add(key)
-    if strict and matched != set(keyed):
+        if strict and scoped and matched != set(values):
+            raise LayoutError("pin identifiers do not match the layout's page items")
+        if invalid:
+            for n in page:
+                wanted.pop(n.id, None)
+        matched_global.update(matched)
+    if strict and not scoped and matched_global != set(keyed):
         raise LayoutError("pin identifiers do not match the layout's page items")
     lay.pins = wanted
     for page in lay.pages:  # a page whose remembered gaps no longer fit loses them
@@ -175,7 +228,7 @@ def _node_structure(node: Node) -> Any:
         return [node.name, [[_node_structure(child) for child in page] for page in node.children]]
     if node.kind == "widget":
         return "widget:" + widget_configuration(node.raw)
-    return node.id
+    return node.bundle_id or node.id
 
 
 def _pin_intents(lay: Layout) -> set[str]:
@@ -184,7 +237,8 @@ def _pin_intents(lay: Layout) -> set[str]:
             for index, page in enumerate(lay.pages) for node in page if node.id in lay.pins}
 
 
-def placed_structure(state: list[Any], library: list[Any] | None, keyed_pins: dict[str, int] | None,
+def placed_structure(state: list[Any], library: list[Any] | None,
+                     keyed_pins: dict[str, Any] | list[dict[str, int]] | None,
                      grid: Grid | None = None, by_memory: bool = False) -> str:
     """Like model.structure, but each page lists its items in grid order (row by row) after
     gaps are applied. iOS reorders a page's list by position when it has gaps, so list order
@@ -236,13 +290,14 @@ class Session:
             os.close(fd)
         self._draft_key = device
         self.layout: Layout | None = None
+        self._draft_error: str | None = None
         self.device_id: str | None = device
         self.info: dict[str, Any] = {}
         self.grid = Grid()
         self._observed_placement: ObservedPins | None = None
         self.usage: dict[str, Any] | None = None  # Screen Time opens, loaded on request
-        self._undo: list[tuple[Any, ...]] = []
-        self._redo: list[tuple[Any, ...]] = []
+        self._undo: list[dict[str, Any]] = []
+        self._redo: list[dict[str, Any]] = []
         self._load_draft()
 
     # ---- persistence ------------------------------------------------------------
@@ -277,6 +332,8 @@ class Session:
         actual = info.get("UniqueDeviceID")
         if not isinstance(actual, str) or not actual or actual != self.device_id:
             raise LayoutError("device identity changed or is unavailable; explicitly read the intended device again")
+        if Grid.from_metrics(info.get("icon_metrics")) != self.grid:
+            raise LayoutError("device grid changed; explicitly read the intended device again")
 
     @property
     def draft_path(self) -> Path:
@@ -292,10 +349,7 @@ class Session:
 
     def _save_draft(self) -> None:
         assert self.layout is not None
-        blob = {"device": self.device_id, "info": self.info, "source": self.layout.source, "state": self.layout.to_state(),
-                "source_library": self.layout.source_library, "library": self.layout.to_library(),
-                "bank": self.layout.to_bank(), "pins": self.layout.pins, "source_pins": self.layout.source_pins,
-                "grid": self.grid.to_dict()}
+        blob = {"device": self.device_id, "info": self.info, **self.layout.snapshot()}
         if self._observed_placement is not None:
             blob["source_placement"] = self._observed_placement.archive
         blob = {k: v for k, v in blob.items() if v is not None}  # plists have no null
@@ -308,13 +362,36 @@ class Session:
             self.info = blob.get("info", {})
             self.grid = Grid(**blob["grid"]) if "grid" in blob else Grid()
             self._observed_placement = disk_pins(blob["source_placement"]) if "source_placement" in blob else None
-            self.layout = Layout(blob["state"], source=blob["source"], library=blob.get("library"),
-                                 source_library=blob.get("source_library"), bank=blob.get("bank"),
-                                 pins=blob.get("pins"), source_pins=blob.get("source_pins"), grid=self.grid)
+            try:
+                lay = Layout.from_snapshot(blob)
+                original = lay.original()  # validate source identity independently
+                for view in (lay, original):
+                    if set(view.pins) - view.nodes.keys():
+                        raise LayoutError("saved draft pin identity is unavailable; call read again")
+                if "identity" not in blob or "source_identity" not in blob:
+                    # Legacy enumeration IDs cannot prove ownership after reordering.
+                    for view in (lay, original):
+                        for nid in view.pins:
+                            node = view.nodes[nid]
+                            wire = node.raw.get("uniqueIdentifier") or (
+                                node.raw.get("displayIdentifier") if node.kind == "widget" else None)
+                            stable = (node.bundle_id == nid if node.kind in ("app", "webclip") else
+                                      wire is not None and nid == f"{node.kind}:{wire}")
+                            # A numeric wire suffix can collide with a generated ID from
+                            # another node before the legacy draft was reordered.
+                            prefix, _, suffix = nid.partition(":")
+                            if prefix in {"app", "webclip", "widget", "folder", "other"} and suffix.isdecimal():
+                                stable = False
+                            stable &= sum(pin_key(other) == pin_key(node) for other in view.nodes.values()) == 1
+                            if not stable:
+                                raise LayoutError("saved draft pin identity is ambiguous; call read again")
+                self.layout = lay
+            except LayoutError as e:
+                self._draft_error = str(e)
 
     def require(self) -> Layout:
         if self.layout is None:
-            raise LayoutError("no layout loaded yet; call read first")
+            raise LayoutError(self._draft_error or "no layout loaded yet; call read first")
         return self.layout
 
     def edited(self) -> None:
@@ -322,28 +399,23 @@ class Session:
 
     # ---- edits with undo ----------------------------------------------------------
 
-    def _snap(self) -> tuple[Any, ...]:
-        lay = self.require()
-        return (copy.deepcopy(lay.to_state()), copy.deepcopy(lay.to_library()), copy.deepcopy(lay.to_bank()),
-                dict(lay.pins))
+    def _snap(self) -> dict[str, Any]:
+        return self.require().snapshot()
 
-    def _load_snap(self, snap: tuple[Any, ...]) -> None:
-        lay = self.require()
-        self.layout = Layout(snap[0], lay.page_slots, lay.dock_slots, source=lay.source,
-                             library=snap[1], source_library=lay.source_library, bank=snap[2],
-                             pins=snap[3], source_pins=lay.source_pins, grid=lay.grid)
+    def _load_snap(self, snap: dict[str, Any]) -> None:
+        self.layout = Layout.from_snapshot(copy.deepcopy(snap))
 
     def edit(self, fn: Callable[[Layout], Any]) -> Any:
         """Run fn on the draft as one undoable step. If it raises, the draft is left untouched."""
-        before = self._snap()
+        before = copy.deepcopy(self.require())
         try:
             out = fn(self.require())
             self._check_placement()
             self._prepare_widget_pins(self.require())
         except Exception:
-            self._load_snap(before)
+            self.layout = before
             raise
-        self._undo.append(before)
+        self._undo.append(before.snapshot())
         del self._undo[:-MAX_UNDO]
         self._redo.clear()
         self._save_draft()
@@ -526,6 +598,8 @@ class Session:
         verified = await asyncio.wait_for(self.source.info(), OPERATION_TIMEOUT)
         if verified.get("UniqueDeviceID") != device_id:
             raise LayoutError("device identity changed during read; no layout was loaded")
+        if Grid.from_metrics(verified.get("icon_metrics")) != grid:
+            raise LayoutError("device grid changed during read; no layout was loaded")
         Layout(state, library=library, grid=grid)  # validate the shape before committing identity
         previous = self.device_id, self.info, self.grid, self.layout, self._undo, self._redo, self._observed_placement
         try:
@@ -599,24 +673,29 @@ class Session:
     async def _write_verified(self, target: list[Any], target_lib: list[Any] | None,
                               label: str, pins: list[dict[str, int]] | None = None,
                               expected: tuple[list[Any], list[Any] | None] | None = None,
-                              expected_pins: dict[str, int] | None = None) -> dict[str, Any]:
+                              expected_pins: dict[str, int] | list[dict[str, int]] | None = None) -> dict[str, Any]:
         # Invalid requested pins must fail before a backup, pending marker or source write.
-        want_pins = {k: v for page in pins or [] for k, v in page.items()}
+        want_pins = pins or []
         placed_structure(target, target_lib, want_pins, self.grid)
         await self._assert_identity()
         current, current_lib = await self._read_source()
         baseline = expected if expected is not None else (current, current_lib)
         baseline_pins = copy.deepcopy(getattr(self.source, "pins", None))
         if baseline_pins is not None:
-            node_pins(Layout(current, library=current_lib, grid=self.grid), baseline_pins, strict=True)
+            baseline_layout = Layout(current, library=current_lib, grid=self.grid)
+            node_pins(baseline_layout, baseline_pins, strict=True)
         if structure(current, current_lib) != structure(*baseline):
             raise LayoutError("the phone's layout changed since it was read; read again and redo the edits")
-        if (expected_pins is not None and (baseline_pins is not None or isinstance(expected_pins, ObservedPins))
-                and not (same_reported_pins(baseline_pins, expected_pins) if isinstance(expected_pins, ObservedPins)
-                         else baseline_pins == expected_pins)):
-            raise LayoutError("the phone's exported gaps changed since it was read; read again and redo the edits")
+        if expected_pins is not None and (baseline_pins is not None or isinstance(expected_pins, ObservedPins)):
+            if isinstance(expected_pins, ObservedPins):
+                same_pins = same_reported_pins(baseline_pins, expected_pins)
+            else:
+                expected_layout = Layout(current, library=current_lib, grid=self.grid)
+                node_pins(expected_layout, expected_pins, strict=True)
+                same_pins = _pin_intents(baseline_layout) == _pin_intents(expected_layout)
+            if not same_pins:
+                raise LayoutError("the phone's exported gaps changed since it was read; read again and redo the edits")
         saved, saved_pins = self._prepared_layout(self._layout_from(current, current_lib))
-        backup = self._backup(saved.to_state(), saved.to_library(), label, saved_pins)
         target = self._restore_widget_ids(target)
         if target_lib is not None:
             target_lib = self._with_webclips(target, target_lib)
@@ -630,6 +709,7 @@ class Session:
         if not same_reported_pins(final_pins, baseline_pins):
             raise LayoutError("the phone's exported gaps changed during the final prewrite read; read again")
         await self._assert_identity()
+        backup = self._backup(saved.to_state(), saved.to_library(), label, saved_pins)
         # Match the library comparison to the source's layout format.
         lib_known = target_lib is not None
         _exclusive_file(self._pending_path, json.dumps({"device_id": self.device_id,
@@ -695,6 +775,8 @@ class Session:
             written = Layout(after, library=after_lib, grid=self.grid)
             node_pins(written, got_pins, by_memory=unreported, strict=True)
             self._remember_gaps(written)
+        if not ok:
+            return res
         self.layout = self._layout_from(after, after_lib)
         reported = getattr(self.source, "pins", None)
         self._observed_placement = copy.deepcopy(reported) if isinstance(reported, ObservedPins) else None
@@ -723,7 +805,7 @@ class Session:
         return await self._write_verified(prepared.to_state(), prepared.to_library(), "before-apply", pins,
                                           (lay.source, lay.source_library),
                                           self._observed_placement if self._observed_placement is not None else
-                                          {k: v for page in pins_by_page(lay.original()) for k, v in page.items()})
+                                          pins_by_page(lay.original()))
 
     def backups(self) -> list[str]:
         return sorted(p.name for p in self._dev_dir("backups").glob("*.plist"))
@@ -768,6 +850,8 @@ class Session:
                     for key, cell in page_pins.items():
                         if key not in nodes or type(cell) is not int or not 0 <= cell < old_grid.slots:
                             raise LayoutError("backup pin is outside its saved grid or does not identify an item on its page")
+                        if sum(pin_key(node) == key for node in page) != 1:
+                            raise LayoutError("ambiguous pin identifier on a backup page")
                         row, column = divmod(cell, old_grid.cols)
                         width, height = restored.dims(nodes[key])
                         if (column + width > min(old_grid.cols, self.grid.cols)
@@ -776,7 +860,7 @@ class Session:
                         mapped_page[key] = row * self.grid.cols + column
                     mapped.append(mapped_page)
                 pins = mapped
-                node_pins(restored, {k: v for page in pins for k, v in page.items()}, strict=True)
+                node_pins(restored, pins, strict=True)
             problems = restored.validate()
             for index, page in enumerate(restored.pages, 1):
                 problems += [f"page {index}: {problem}" for problem in restored.place(page)[1]]

@@ -167,6 +167,14 @@ class ObservedPins(dict):
                 if isinstance(pins, dict):
                     self.update(pins)
 
+    def pages(self, count: int) -> list[dict[str, int]]:
+        """Page-local evidence after validate(); the dict view is for legacy callers."""
+        ids = self.archive.get("listUniqueIdentifiers", [])
+        meta = self.archive.get("listMetadata", {})
+        if not meta:
+            return [{} for _ in range(count)]
+        return [meta.get(pid, {}).get("fixedLocations", {}) for pid in ids]
+
     def validate(self, page_keys: list[set[str]], grid: Grid) -> None:
         ids = self.archive.get("listUniqueIdentifiers", [])
         meta = self.archive.get("listMetadata", {})
