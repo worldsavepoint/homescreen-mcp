@@ -1,0 +1,221 @@
+"""Identify and preserve editable inputs of a completed PyInstaller freeze."""
+from collections import defaultdict
+from hashlib import sha256 as digest
+from importlib.metadata import distributions, version as package_version
+from pathlib import Path
+import re
+import sys
+import sysconfig
+import tarfile
+import zipfile
+
+from source_inputs import (cache_directory, canonical, fetch, json_bytes, read_locks, relative_name,
+                           sha256, source_member)
+
+NOTICE = re.compile(r"^(?:licenses?|licences?|copying|copyright|notice|authors|patents)(?:[._-].*)?$", re.I)
+
+
+def installed_files(packages):
+    result = {}
+    for dist in packages:
+        owner = canonical(dist.metadata["Name"])
+        for item in dist.files or ():
+            relative = str(item)
+            if relative.startswith("../") or "/__pycache__/" in relative:
+                continue
+            path = Path(dist.locate_file(item)).resolve()
+            if path in result and result[path][0] != owner:
+                raise ValueError(f"Multiple owners for installed file: {item}")
+            result[path] = (owner, dist.version, relative)
+    return result
+
+
+def wheel_material(owner, wheel, source, collected, notices, overlays):
+    """Keep grants verbatim and editable files that differ from the release source."""
+    names = set(wheel.namelist())
+    for name in sorted(names):
+        if (not name.endswith("/") and (".dist-info/licenses/" in name
+                or NOTICE.fullmatch(name.rsplit("/", 1)[-1]))):
+            put(notices / owner, name, wheel.read(name))
+    # Index only needed source suffixes, so two differently nested packages cannot collide.
+    candidates = {name.rsplit("/", 1)[-1] for name in collected}
+    original = defaultdict(set)
+
+    def consider(name, stream):
+        if name.rsplit("/", 1)[-1] not in candidates:
+            return
+        parts = name.split("/")[1:]
+        for index in range(len(parts)):
+            relative = "/".join(parts[index:])
+            if relative in collected:
+                with stream() as source_file:
+                    original[relative].add(digest(source_file.read()).hexdigest())
+                return
+
+    if zipfile.is_zipfile(source):
+        with zipfile.ZipFile(source) as archive:
+            for info in archive.infolist():
+                if not info.is_dir():
+                    consider(info.filename, lambda: archive.open(info))
+    else:
+        with tarfile.open(source) as archive:
+            for info in archive:
+                if info.isfile():
+                    consider(info.name, lambda: archive.extractfile(info))
+    for name in sorted(collected & names):
+        data = wheel.read(name)
+        if digest(data).hexdigest() not in original[name]:
+            put(overlays / owner, name, data)
+
+
+def put(root, name, data):
+    destination = root / relative_name(name)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(data)
+
+
+def files_below(root):
+    return {p.relative_to(root).as_posix(): sha256(p) for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def source_url(repository, version):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or ".." in repository:
+        raise ValueError("Supply a public owner/repository")
+    return f"https://github.com/{repository}/releases/download/v{version}/home-screen-organizer-{version}-corresponding-source.tar.gz"
+
+
+def distribution_notice(repository, version):
+    return (
+        "Screen Organizer " + version + "\n\n"
+        "Original Homescreen source: Copyright © 2026 Jonathan Kats. See LICENSE for its MIT license.\n"
+        "The combined frozen Python engine is distributed under the GNU General Public License, "
+        "version 3 or any later version. The individual components retain their own grants. "
+        "The lzss shared library is covered by the GNU Lesser General Public License version 3.\n"
+        "The per-component texts and copyright notices are in ThirdPartyLicenses in the app "
+        "and licenses/<architecture>/ThirdPartyLicenses in the MCP bundle.\n\n"
+        "Download the matching Corresponding Source, build scripts and replacement instructions:\n"
+        + source_url(repository, version) + "\n"
+    ).encode()
+
+
+def capture(analysis, pyz, executable, collection, root, output, wheel_dir, arch, repository, runtime, project_commit):
+    from PyInstaller.archive.readers import CArchiveReader
+    from PyInstaller.depend.analysis import get_bootstrap_modules
+
+    packages, native = read_locks()
+    wheel_paths = {canonical(path.name.split("-", 1)[0]): path for path in wheel_dir.glob("*.whl")}
+    installed = installed_files(distributions())
+    version = package_version("home-screen-organizer")
+    entries, owners, editable, opened = [], {}, defaultdict(set), {}
+    notices, overlays = output / "ThirdPartyLicenses", output / "overlays"
+    cache = cache_directory()
+    base = Path(sys.base_prefix).resolve()
+    sysconfig_name = sysconfig._get_sysconfigdata_name()
+    bootstrap = {name: path for name, path, kind in get_bootstrap_modules() if kind == "PYMODULE"}
+    engine_dir = Path(collection.name)
+    package = CArchiveReader(str(engine_dir / "engine"))
+    pyz_reader = package.open_embedded_archive(next(k for k, v in package.toc.items() if v[-1] == "z"))
+    project = "home-screen-organizer"
+
+    def record(section, target, path, kind, payload_hash):
+        relative_name(target)
+        if path in ("-", None):
+            entries.append([section, target, "pyinstaller", "namespace", payload_hash])
+            return
+        path = Path(path).resolve()
+        if path in installed:
+            owner, installed_version, relative = installed[path]
+            if owner == project:
+                if ".dist-info/" in relative or ".egg-info/" in relative:
+                    relative = "pyproject.toml"
+                elif (root / relative).read_bytes() != path.read_bytes():
+                    raise ValueError(f"Different project source: {relative}")
+            else:
+                pin = packages.get(owner)
+                if not pin or pin["version"] != installed_version or owner not in wheel_paths:
+                    raise ValueError(f"Missing source pin for frozen component: {owner}")
+                if owner not in opened:
+                    wheel_path = wheel_paths[owner]
+                    value = sha256(wheel_path)
+                    pinned = pin["wheels"].get(arch)
+                    if pinned != value and not (owner == "cryptography" and arch == "x86_64" and pinned is None):
+                        raise ValueError(f"Different release wheel: {owner}")
+                    opened[owner] = zipfile.ZipFile(wheel_path)
+                    owners[owner] = {"version": installed_version, "wheel": value}
+                wheel = opened[owner]
+                if relative in wheel.NameToInfo and not relative.endswith(".dist-info/RECORD"):
+                    if digest(wheel.read(relative)).hexdigest() != sha256(path):
+                        raise ValueError(f"Installed source differs from wheel: {owner}/{relative}")
+                    if kind in ("DATA", "PYMODULE", "PYSOURCE"):
+                        editable[owner].add(relative)
+                elif not (".dist-info/" in relative and relative.rsplit("/", 1)[-1]
+                          in {"INSTALLER", "RECORD", "REQUESTED"}):
+                    raise ValueError(f"Missing authenticated wheel member: {owner}/{relative}")
+        elif target == sysconfig_name and path.name == sysconfig_name + ".py":
+            owner, relative = "cpython", "generated/" + path.name
+            put(overlays / owner, relative, path.read_bytes())
+        elif path.is_relative_to(base):
+            owner, relative = "cpython", path.relative_to(base).as_posix()
+        elif path.is_relative_to(root) and path == root / "macapp/engine.py":
+            owner, relative = project, "macapp/engine.py"
+        else:
+            raise ValueError(f"Unknown source owner for frozen member: {section}/{target}")
+        entries.append([section, target, owner, relative_name(relative), payload_hash])
+
+    try:
+        if {x[0] for x in pyz.toc} != set(pyz_reader.toc):
+            raise ValueError("Frozen PYZ inventory differs from analysis")
+        for name, path, kind in pyz.toc:
+            record("pyz", name, path, kind, digest(pyz_reader.extract(name, raw=True) or b"").hexdigest())
+        carchive = {name: (path, kind) for name, path, kind in executable.pkg.toc if kind not in ("OPTION", "PYZ")}
+        if set(carchive) != {k for k, v in package.toc.items() if v[-1] != "z"}:
+            raise ValueError("Frozen bootstrap inventory differs from analysis")
+        for name, (path, kind) in carchive.items():
+            record("bootstrap", name, bootstrap.get(name, path), kind, digest(package.extract(name)).hexdigest())
+        for name, path, kind in executable.exefiles:
+            record("bootloader", name, path, kind, sha256(Path(path)))
+        for name, path, kind in collection.toc:
+            if kind == "EXECUTABLE":
+                continue
+            if kind == "SYMLINK":
+                entries.append(["link", relative_name(name), "pyinstaller", relative_name(path), digest(path.encode()).hexdigest()])
+                continue
+            final = engine_dir / "_internal" / name
+            if name == "base_library.zip":
+                source_by_name = {n: (s, t) for n, s, t in analysis._modules_outside_pyz}
+                with zipfile.ZipFile(final) as library:
+                    for item in library.infolist():
+                        module = item.filename.removesuffix(".pyc").replace("/", ".").removesuffix(".__init__")
+                        src, kind = source_by_name[module]
+                        record("base", item.filename, src, kind, digest(library.read(item)).hexdigest())
+                entries.append(["file", name, "pyinstaller", "base_library.zip", sha256(final)])
+                continue
+            record("file", name, path, kind, sha256(final))
+        for owner, wheel in sorted(opened.items()):
+            source = fetch(packages[owner]["source"], cache)
+            wheel_material(owner, wheel, source, editable[owner], notices, overlays)
+            if owner == "developer-disk-image":
+                metadata = next(n for n in wheel.namelist() if n.endswith(".dist-info/METADATA"))
+                put(notices / owner, "METADATA", wheel.read(metadata))
+                parent = opened["pymobiledevice3"]
+                member = next(n for n in parent.namelist() if n.endswith(".dist-info/licenses/LICENSE"))
+                put(notices / owner, "COPYING", parent.read(member))
+            elif owner == "bpylist2":
+                put(notices / owner, "README.rst", source_member(source, "bpylist2-4.1.1/README.rst"))
+            elif owner == "loguru":
+                data = next(x for x in native["assets"] if x["id"] == "loguru-license")
+                put(notices / owner, "LICENSE", fetch(data, cache).read_bytes())
+            if not (notices / owner).is_dir():
+                raise ValueError(f"Missing license for frozen component: {owner}")
+        from native_sources import add_native_notices
+        add_native_notices(native, arch, owners, notices, cache)
+        index = {owner: {"version": item["version"], "license": packages[owner]["license"]}
+                 for owner, item in sorted(owners.items())}
+        (notices / "components.json").write_bytes(json_bytes(index))
+        public = {"projectCommit": project_commit, "engine": sha256(engine_dir / "engine"), "version": version, "arch": arch, "runtime": runtime, "owners": owners, "members": sorted(entries),
+                  "notices": files_below(notices), "overlays": files_below(overlays)}
+        (output / "inventory.json").write_bytes(json_bytes(public))
+        (output / "THIRD-PARTY-NOTICES.txt").write_bytes(distribution_notice(repository, version))
+    finally:
+        for wheel in opened.values():
+            wheel.close()

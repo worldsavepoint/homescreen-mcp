@@ -15,7 +15,7 @@ from release import ARCHITECTURES, ROOT, project_version
 APP = "Screen Organizer.app"
 RESOURCES = f"{APP}/Contents/Resources/"
 ENGINE = RESOURCES + "engine/"
-NOTICES = ("LICENSE", "dependencies.txt", "requirements-build.lock")
+NOTICES = ("LICENSE", "dependencies.txt", "requirements-build.lock", "THIRD-PARTY-NOTICES.txt", "ThirdPartyLicenses/components.json")
 INTEL_NOTICES = ("OPENSSL-LICENSE.txt", "requirements-cryptography-x86_64.lock")
 
 
@@ -99,8 +99,11 @@ def engine_entries(archive, arch, version):
         if name.startswith(ENGINE):
             destination = f"server/{arch}/" + name[len(ENGINE):]
             mapped.append((info, destination + ("/" if info.is_dir() else "")))
-        elif name in {RESOURCES + notice for notice in NOTICES + (INTEL_NOTICES if arch == "x86_64" else ())}:
-            if stat.S_ISLNK(info.external_attr >> 16) or info.is_dir():
+        elif (name in {RESOURCES + notice for notice in NOTICES + (INTEL_NOTICES if arch == "x86_64" else ())}
+              or name.startswith(RESOURCES + "ThirdPartyLicenses/")):
+            if info.is_dir():
+                continue
+            if stat.S_ISLNK(info.external_attr >> 16):
                 raise ValueError(f"Expected notice file: {name}")
             mapped.append((info, f"licenses/{arch}/" + name[len(RESOURCES):]))
     plist = plistlib.loads(archive.read(f"{APP}/Contents/Info.plist"))
@@ -140,7 +143,7 @@ def assemble(assets_dir, output_dir, repository, version):
             "manifest_version": "0.3", "name": "home-screen-organizer", "display_name": "Screen Organizer",
             "version": version, "description": "Arrange iPhone Home Screen apps, folders, widgets and the App Library from your Mac.",
             "author": {"name": "Jonathan Kats", "url": "https://github.com/kats1123/homescreen-mcp"},
-            "homepage": url, "repository": {"type": "git", "url": url}, "support": url + "/issues", "license": "MIT",
+            "homepage": url, "repository": {"type": "git", "url": url}, "support": url + "/issues", "license": "GPL-3.0-or-later",
             "server": {"type": "binary", "entry_point": "server/launch.sh", "mcp_config": {
                 "command": "/bin/sh", "args": ["${__dirname}/server/launch.sh"], "env": {"HOMESCREEN_READ_ONLY": "1"}}},
             "compatibility": {"platforms": ["darwin"]},
@@ -150,6 +153,10 @@ def assemble(assets_dir, output_dir, repository, version):
         with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as destination:
             write_file(destination, "manifest.json", json.dumps(manifest, indent=2) + "\n")
             write_file(destination, "LICENSE", (ROOT / "LICENSE").read_bytes())
+            text = archives[0][0].read(RESOURCES + "THIRD-PARTY-NOTICES.txt")
+            if archives[1][0].read(RESOURCES + "THIRD-PARTY-NOTICES.txt") != text:
+                raise ValueError("The native source download notices differ")
+            write_file(destination, "THIRD-PARTY-NOTICES.txt", text)
             write_file(destination, "server/launch.sh", (ROOT / "macapp/mcp_launcher.sh").read_bytes(), 0o755)
             for archive, entries in archives:
                 for info, name in entries:

@@ -104,14 +104,13 @@ macapp/build.sh
 `macapp/build.sh` selects `arm64` or `x86_64` from `uname -m`. Set
 `HOMESCREEN_BUILD_ARCH=arm64` or `HOMESCREEN_BUILD_ARCH=x86_64` to select the
 matching native host architecture explicitly. `HOMESCREEN_BUILD_PYTHON` selects
-the Python 3.12 executable.
+a previously extracted, verified release Python executable. The default downloads and checks the pinned native CPython distribution.
 
 The script creates a fresh temporary virtual environment, installs wheels from
 the architecture's hashed lock, adds the local source, and rebuilds the Python
 engine and Swift launcher. On Intel, it calls `prepare_intel.sh` when the recorded
 Intel wheel or generated lock needs preparation. The app bundle
-includes `dependencies.txt` (the installed package inventory), the installed
-`requirements-build.lock`, and the MIT license. Intel bundles also include the
+includes `dependencies.txt` (the installed package inventory), its release wheel lock, the original MIT license, and the combined engine’s distribution notice and upstream license texts. Intel bundles also include the
 cryptography source lock and `OPENSSL-LICENSE.txt`.
 
 ## Language resources
@@ -221,8 +220,7 @@ For end-user installation and per-client stdio configuration, see the
 [MCP setup guide](../docs/MCP.md#standalone-mcpb).
 
 The standalone `home-screen-organizer-<version>-macos.mcpb` contains both native
-engines, their bundled dependencies, the MIT license and per-architecture license
-and dependency records. It requires macOS 14 or later. An MCPB-compatible client
+engines, their dependencies, the original MIT license and the complete per-architecture notice trees. The combined engine is distributed under GPL version 3 or later. It requires macOS 14 or later. An MCPB-compatible client
 can install this archive directly; Python and a separate app installation are not
 required. The launcher selects `arm64` or `x86_64` from the Mac's native architecture.
 
@@ -267,6 +265,21 @@ python3.12 macapp/check_mcp.py -- /bin/sh "$PWD/extracted-mcpb/server/launch.sh"
 ```
 
 The check initializes the server, compares its version with the project version, and lists tools using a temporary layout fixture, read-only data directory and startup deadline. It then terminates the server.
+
+## Corresponding Source
+
+The app includes `THIRD-PARTY-NOTICES.txt` and `ThirdPartyLicenses/` in its Resources directory. The MCPB includes the same explanatory notice at its root and copies each signed notice tree to `licenses/<architecture>/ThirdPartyLicenses/`. The original source remains available under Jonathan Kats’s MIT license.
+
+Each native build writes `build/<architecture>/source-inputs.zip` alongside the build directory’s app. CI uploads these sanitized inputs in separate architecture artifacts. After both native builds and MCPB assembly, create the single matching source download with the exact clean checkout:
+
+```sh
+VERSION=$(python3.12 macapp/release.py version)
+COMMIT=$(git rev-parse HEAD)
+python3.12 macapp/source_archive.py assemble --inputs artifacts --release release --version "$VERSION" --commit "$COMMIT" --repository worldsavepoint/ios-homescreen-organizer
+python3.12 macapp/release.py verify --input-dir release --tag "v$VERSION" --commit "$COMMIT" --repository worldsavepoint/ios-homescreen-organizer
+```
+
+`HOMESCREEN_SOURCE_CACHE` selects a directory for SHA-verified immutable downloads. `HOMESCREEN_WHEELHOUSE` selects an existing local wheelhouse verified against the release lock. Updated dependency versions require new source hashes, notice checks and a freeze on each native architecture. Chardet uses its publisher’s pure-Python wheel. Rebuilding an editable component, preparing Cargo for offline use and replacing the pylzss shared library are described in the [source archive guide](SOURCE.md).
 
 ## Automatic releases
 

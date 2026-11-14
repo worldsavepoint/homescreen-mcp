@@ -41,10 +41,14 @@ def read_roots(folder, inputs=()):
         roots = [Path(value) for value in record["roots"]]
         if not roots or any(not root.is_absolute() or root.parent == root for root in roots):
             raise ValueError
+        if any(b"\0" in os.fsencode(root) for root in roots):
+            raise ValueError
+        for root in roots:
+            root.resolve(strict=False)
         if record["inputs"] != {file.relative_to(folder).as_posix(): digest(file) for file in inputs}:
             raise ValueError
         return roots
-    except (OSError, TypeError, ValueError, KeyError):
+    except (OSError, TypeError, ValueError, KeyError, RuntimeError):
         raise ValueError("Prepare a fresh native build to record its locations") from None
 
 

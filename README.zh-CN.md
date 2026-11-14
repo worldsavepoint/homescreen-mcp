@@ -4,7 +4,7 @@
 <p align="center">
   <a href="https://github.com/worldsavepoint/ios-homescreen-organizer/releases"><img alt="发行版" src="https://img.shields.io/badge/download-Releases-blue"></a>
   <a href="#compatibility"><img alt="支持 iOS 16 及以上版本" src="https://img.shields.io/badge/iOS-16%2B-007AFF"></a>
-  <a href="LICENSE"><img alt="MIT 许可证" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <a href="LICENSE"><img alt="原始源码采用 MIT 许可证" src="https://img.shields.io/badge/original_source-MIT-blue"></a>
   <a href="macapp/BUILDING.md"><img alt="macOS 14 或更高版本" src="https://img.shields.io/badge/macOS-14%2B-222222"></a>
 </p>
 <p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
@@ -119,7 +119,7 @@ HOMESCREEN_READ_ONLY=1 '/Applications/Screen Organizer.app/Contents/Resources/en
 
 <strong>Jonathan Kats</strong> 创建了 Homescreen。原始 App、编辑器、截图和 SpringBoard 研究来自[上游项目](https://github.com/kats1123/homescreen-mcp)及其贡献者。本 fork 维护设备会话、备份、本地编辑器、Mac 启动器与发行流程。感谢 [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) 提供 USB 接口。
 
-[MIT](LICENSE) · Copyright © 2026 Jonathan Kats。保留原始许可证与版权声明。
+Homescreen 原始源码采用 [MIT 许可证](LICENSE)。Copyright © 2026 Jonathan Kats。随附的 Python 引擎按 GPL 第 3 版或更高版本分发。发行版附有各组件的许可证、对应源码和重新构建说明。[下载对应源码](https://github.com/worldsavepoint/ios-homescreen-organizer/releases/download/v1.3.0/home-screen-organizer-1.3.0-corresponding-source.tar.gz)。
 
 [反馈本 fork 的问题](https://github.com/worldsavepoint/ios-homescreen-organizer/issues)时，请附安装方式、复现步骤及脱敏后的错误信息。[上游源码](https://github.com/kats1123/homescreen-mcp) · [上游问题反馈](https://github.com/kats1123/homescreen-mcp/issues) · [上游发行版](https://github.com/kats1123/homescreen-mcp/releases)。
 
@@ -129,7 +129,7 @@ Screen Organizer 与 Apple Inc. 无关联，未获其认可或赞助。
 
 Mac、macOS、iPhone、iPad 和 Screen Time 是 Apple Inc. 的商标。IOS 是 Cisco 在美国及其他国家或地区的商标或注册商标，由 Apple 经许可使用。
 
-本工具使用的私有设备接口可能随 iOS 更新而变化。应用或恢复布局前会保存主屏幕布局备份，并尝试通过回读核对结果。请另行保留 iPhone 或 iPad 最新的完整备份。使用风险由使用者自行承担；软件依据 [MIT 许可证](LICENSE)按原样（AS IS）提供。
+本工具使用的私有设备接口可能随 iOS 更新而变化。应用或恢复布局前会保存主屏幕布局备份，并尝试通过回读核对结果。请另行保留 iPhone 或 iPad 最新的完整备份。适用的担保条款见随附的许可证。
 
 <p align="center">
   <sub>README 访问计数</sub><br>

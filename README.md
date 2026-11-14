@@ -4,7 +4,7 @@
 <p align="center">
   <a href="https://github.com/worldsavepoint/ios-homescreen-organizer/releases"><img alt="Releases" src="https://img.shields.io/badge/download-Releases-blue"></a>
   <a href="#compatibility"><img alt="iOS 16 or later" src="https://img.shields.io/badge/iOS-16%2B-007AFF"></a>
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <a href="LICENSE"><img alt="Original source licensed under MIT" src="https://img.shields.io/badge/original_source-MIT-blue"></a>
   <a href="macapp/BUILDING.md"><img alt="macOS 14 or later" src="https://img.shields.io/badge/macOS-14%2B-222222"></a>
 </p>
 <p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
@@ -119,7 +119,7 @@ The primary commands are `home-screen-organizer` and `home-screen-mcp`. Existing
 
 **Jonathan Kats** created Homescreen. The original app, editor, screenshots and SpringBoard research come from the [upstream project](https://github.com/kats1123/homescreen-mcp) and its contributors. This fork maintains device sessions, backups, the local editor, the Mac launcher and distribution. Thanks to [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) for the USB interface.
 
-[MIT](LICENSE) · Copyright © 2026 Jonathan Kats. The original license and copyright notice are preserved.
+The original Homescreen source is [MIT licensed](LICENSE). Copyright © 2026 Jonathan Kats. The bundled Python engine is distributed under GPL version 3 or later. Each release includes the component licenses and matching source archive with rebuild instructions. [Download Corresponding Source](https://github.com/worldsavepoint/ios-homescreen-organizer/releases/download/v1.3.0/home-screen-organizer-1.3.0-corresponding-source.tar.gz).
 
 [Report a fork issue](https://github.com/worldsavepoint/ios-homescreen-organizer/issues) with installation method, reproduction steps and a redacted error. [Upstream source](https://github.com/kats1123/homescreen-mcp) · [upstream issues](https://github.com/kats1123/homescreen-mcp/issues) · [upstream releases](https://github.com/kats1123/homescreen-mcp/releases).
 
@@ -129,7 +129,7 @@ Screen Organizer is not affiliated with, endorsed by, or sponsored by Apple Inc.
 
 Mac, macOS, iPhone, iPad and Screen Time are trademarks of Apple Inc. IOS is a trademark or registered trademark of Cisco in the U.S. and other countries and is used by Apple under license.
 
-This tool uses private device interfaces that may change with iOS updates. It saves a Home Screen layout backup before applying or restoring a layout and attempts to verify the result by reading the layout back. Keep a separate, up-to-date full backup of your iPhone or iPad. Use the tool at your own risk; it is provided “AS IS” under the [MIT License](LICENSE).
+This tool uses private device interfaces that may change with iOS updates. It saves a Home Screen layout backup before applying or restoring a layout and attempts to verify the result by reading the layout back. Keep a separate, up-to-date full backup of your iPhone or iPad. The included licenses describe the applicable warranties.
 
 <p align="center">
   <sub>README views</sub><br>

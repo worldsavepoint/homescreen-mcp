@@ -221,3 +221,40 @@ def test_localized_xml_plist_data(tmp_path, prefix, encoding, suffix):
     else:
         with pytest.raises(ValueError, match="build path"):
             check_archive(packaged, [root])
+
+
+@pytest.mark.parametrize("kind", ["utf32-le", "utf32-be", "table-le", "table-be"])
+@pytest.mark.parametrize("suffix", ["", "/file", "-sibling"])
+def test_wide_native_localization(tmp_path, kind, suffix):
+    import base64
+    import codecs
+    import plistlib
+    import subprocess
+    from macapp.check_package_paths import check_archive
+
+    root = tmp_path / "private-root"
+    value = str(root) + suffix
+    if kind.startswith("table"):
+        escaped = value.replace("/", r"\U002f")
+        text = '"label" = "' + escaped + '";'
+        little = kind.endswith("le")
+        raw = (codecs.BOM_UTF16_LE if little else codecs.BOM_UTF16_BE) + text.encode("utf-16-le" if little else "utf-16-be")
+        expected = value
+    else:
+        little = kind.endswith("le")
+        encoded = base64.b64encode(value.encode()).decode()
+        text = ('<?xml version="1.0" encoding="UTF-32' + ("LE" if little else "BE") + '"?>'
+                '<!-- resource --><plist version="1.0"><dict><key>label</key><data>' + encoded + '</data></dict></plist>')
+        raw = (codecs.BOM_UTF32_LE if little else codecs.BOM_UTF32_BE) + text.encode("utf-32-le" if little else "utf-32-be")
+        expected = value.encode()
+    logical = subprocess.run(["/usr/bin/plutil", "-convert", "binary1", "-o", "-", "--", "-"],
+                             input=raw, check=True, capture_output=True)
+    assert plistlib.loads(logical.stdout)["label"] == expected
+    path = native_zip(tmp_path)
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr("Screen Organizer.app/Contents/Resources/en.lproj/InfoPlist.strings", raw)
+    if suffix == "-sibling":
+        check_archive(path, [root])
+    else:
+        with pytest.raises(ValueError, match="build path"):
+            check_archive(path, [root])

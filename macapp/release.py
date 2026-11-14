@@ -12,6 +12,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import tomllib
 
@@ -91,8 +92,10 @@ def package(build_dir, output_dir, version, arch):
     roots = [ROOT, build_dir, output_dir, *read_roots(build_dir), *runner_roots()]
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     basename = f"home-screen-organizer-{version}-macos-{arch}"
-    with tempfile.TemporaryDirectory(dir=output_dir.parent, prefix=".native-release-") as folder:
-        staged = Path(folder) / "assets"
+    folder = Path(tempfile.mkdtemp(dir=output_dir.parent, prefix=".native-release-"))
+    committed = False
+    try:
+        staged = folder / "assets"
         staged.mkdir()
         disk_image = staged / (basename + ".dmg")
         archive = staged / (basename + ".zip")
@@ -108,6 +111,15 @@ def package(build_dir, output_dir, version, arch):
             lines.append(f"{digest}  {asset.name}\n")
         (staged / "SHA256SUMS.txt").write_text("".join(lines))
         install_generation(staged, output_dir, arch)
+        committed = True
+    finally:
+        # Retained entries can share an inode with the live generation and with another hardlink.
+        # Ordinary unlink never resets an ACL or mode to force retirement.
+        try:
+            shutil.rmtree(folder)
+        except OSError:
+            if committed:
+                print("Release installed. A protected previous file was retained privately.", file=sys.stderr)
 
 
 def app_contents(app):
@@ -260,11 +272,12 @@ def collect(input_dir, output_dir, version):
     (output_dir / "SHA256SUMS.txt").write_text("".join(lines))
 
 
-def verify_distribution(folder, version, repository):
+def verify_distribution(folder, version, repository, commit=None):
     bundle_name = f"home-screen-organizer-{version}-macos.mcpb"
     expected = {f"home-screen-organizer-{version}-macos-{arch}.{extension}"
                 for arch in ARCHITECTURES for extension in ("dmg", "zip")}
-    expected.update((bundle_name, "server.json"))
+    source_name = f"home-screen-organizer-{version}-corresponding-source.tar.gz"
+    expected.update((bundle_name, source_name, "server.json"))
     seen = set()
     for line in (folder / "SHA256SUMS.txt").read_text().splitlines():
         digest, name = line.split("  ")
@@ -276,6 +289,13 @@ def verify_distribution(folder, version, repository):
         seen.add(name)
     if seen != expected:
         raise ValueError("Supply checksums for all release assets")
+    from source_archive import verify_tar
+    sources = verify_tar(folder / source_name, version, commit, release=True)
+    for arch in ARCHITECTURES:
+        name = f"home-screen-organizer-{version}-macos-{arch}.zip"
+        with (folder / name).open("rb") as stream:
+            if sources["architectures"][arch]["zip"] != hashlib.file_digest(stream, "sha256").hexdigest():
+                raise ValueError("The release sources match a different native archive")
     metadata = json.loads((folder / "server.json").read_text())
     with (folder / bundle_name).open("rb") as stream:
         bundle_hash = hashlib.file_digest(stream, "sha256").hexdigest()
@@ -302,6 +322,7 @@ def main():
     collect_command.add_argument("--output-dir", type=Path, required=True)
     verify_command = commands.add_parser("verify", help="Verify the complete standalone distribution and Registry metadata")
     verify_command.add_argument("--tag")
+    verify_command.add_argument("--commit")
     verify_command.add_argument("--input-dir", type=Path, required=True)
     verify_command.add_argument("--repository", required=True)
     for action in ("localize", "check-localization"):
@@ -320,7 +341,7 @@ def main():
         elif args.command == "collect":
             collect(args.input_dir.resolve(), args.output_dir.resolve(), version)
         elif args.command == "verify":
-            verify_distribution(args.input_dir.resolve(), version, args.repository)
+            verify_distribution(args.input_dir.resolve(), version, args.repository, args.commit)
         print(version)
     except (OSError, subprocess.CalledProcessError) as exc:
         if args.command == "package":

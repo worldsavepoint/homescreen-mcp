@@ -203,6 +203,8 @@ def distribution(tmp_path):
         "registryType": "mcpb", "identifier": f"https://github.com/example/project/releases/download/v{VERSION}/{bundle.name}",
         "fileSha256": hashlib.sha256(bundle.read_bytes()).hexdigest(), "transport": {"type": "stdio"}}]}
     (output / "server.json").write_text(json.dumps(metadata))
+    from source_fixture import release_source
+    release_source(output, VERSION, "a" * 40)
     refresh_distribution_checksums(output)
     return output
 
@@ -319,7 +321,9 @@ def test_invalid_build_records_have_one_package_diagnostic(tmp_path):
     (output / "note").write_text("preserve")
     invalid = ["[]", '"value"', "7", "true", "null", "{", "{}",
                json.dumps({"version": 2, "roots": {str(checkout): True}, "inputs": {}}),
-               json.dumps({"version": 2, "roots": [str(checkout)], "inputs": []})]
+               json.dumps({"version": 2, "roots": [str(checkout)], "inputs": []}),
+               json.dumps({"version": 2, "roots": ["/fixture/invalid\0path"], "inputs": {}}),
+               json.dumps({"version": 2, "roots": ["/fixture/invalid\ud800"], "inputs": {}})]
     for record in invalid:
         (build / RECORD).write_text(record)
         result = subprocess.run([sys.executable, checkout / "macapp/release.py", "package",
@@ -481,3 +485,44 @@ def test_previous_manifest_establishes_owned_native_pair(tmp_path, bad):
     (tmp_path / "SHA256SUMS.txt").write_text("".join(rows))
     with pytest.raises(ValueError, match="manifest"):
         previous_assets(tmp_path, "arm64")
+
+
+def test_protected_retirement_preserves_shared_file(tmp_path):
+    build = make_build(tmp_path)
+    output = tmp_path / "published"
+    result = release("package", "--arch", "arm64", "--build-dir", build, "--output-dir", output)
+    assert result.returncode == 0, result.stderr
+    note = output / "retained"
+    note.write_bytes(b"ordinary retained file")
+    note.chmod(0o644)
+    outside = tmp_path / "second-link"
+    os.link(note, outside)
+    subprocess.run(["chmod", "+a", "everyone deny delete", note], check=True)
+    acl = subprocess.check_output(["ls", "-lde", outside], text=True).splitlines()[1:]
+    try:
+        for _ in range(2):
+            result = release("package", "--arch", "arm64", "--build-dir", build, "--output-dir", output)
+            assert result.returncode == 0, result.stderr
+            assert (note.stat().st_mode & 0o777, outside.stat().st_mode & 0o777) == (0o644, 0o644)
+            assert note.samefile(outside) and note.read_bytes() == b"ordinary retained file"
+            assert subprocess.check_output(["ls", "-lde", outside], text=True).splitlines()[1:] == acl
+            assert all((p.stat().st_mode & 0o777) == 0o700 for p in tmp_path.glob(".native-release-*"))
+    finally:
+        subprocess.run(["chmod", "-N", outside], check=True)
+
+
+def test_distribution_requires_an_archive_with_verified_native_sources(tmp_path):
+    import io
+    import tarfile
+    output = distribution(tmp_path)
+    source = output / f"home-screen-organizer-{VERSION}-corresponding-source.tar.gz"
+    with tarfile.open(source, "w:gz") as archive:
+        manifest = json.dumps({"version": VERSION, "commit": "a" * 40, "files": {}, "architectures": {
+            arch: {"zip": hashlib.sha256((output / f"home-screen-organizer-{VERSION}-macos-{arch}.zip").read_bytes()).hexdigest()}
+            for arch in ("arm64", "x86_64")}}).encode()
+        item = tarfile.TarInfo("MANIFEST.json")
+        item.size = len(manifest)
+        archive.addfile(item, io.BytesIO(manifest))
+    refresh_distribution_checksums(output)
+    result = release("verify", "--input-dir", output, "--repository", "example/project", "--tag", f"v{VERSION}", "--commit", "a" * 40)
+    assert result.returncode != 0

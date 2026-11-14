@@ -1,0 +1,155 @@
+"""Native distributions supply the exact editable inputs and copyright notices."""
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "macapp"))
+
+
+def test_source_lock_covers_known_frozen_owners():
+    lock = ROOT / "macapp/sources/python.json"
+    assert lock.is_file(), "The release needs component source pins"
+    packages = json.loads(lock.read_text())
+    assert packages["h11"]["version"] == "0.16.0"
+    assert packages["pymobiledevice3"]["source"]["sha256"] == "097eefb68b9f04f33d564c122a78b7d2d7d71437c0a438f0a086954e755ccd29"
+    assert packages["pyinstaller-hooks-contrib"]["wheels"]["x86_64"]
+    assert packages["pylzss"]["license"] == "LGPL-3.0-only"
+    assert "asttokens" not in packages
+
+
+def test_cached_input_must_match_digest_and_size(tmp_path):
+    import source_inputs
+    content = b"verified source\n"
+    digest = hashlib.sha256(content).hexdigest()
+    pin = {"url": "https://example.org/releases/project.tar.gz", "size": len(content), "sha256": digest}
+    (tmp_path / (digest + "-project.tar.gz")).write_bytes(content)
+    assert source_inputs.fetch(pin, tmp_path, offline=True).read_bytes() == content
+    (tmp_path / (digest + "-project.tar.gz")).write_bytes(b"x" * len(content))
+    with pytest.raises(ValueError, match="verified source"):
+        source_inputs.fetch(pin, tmp_path, offline=True)
+
+
+@pytest.mark.parametrize("name", ["/outside", "a/../../outside", "a//b", r"a\b", ".git/config", "a\nline"])
+def test_public_names_reject_unsafe_members(name):
+    import source_inputs
+    with pytest.raises(ValueError):
+        source_inputs.relative_name(name)
+
+
+
+def test_exact_wheel_record_ownership_uses_full_path(tmp_path):
+    from frozen_sources import installed_files
+    from importlib.metadata import distributions
+    for name in ("first", "second"):
+        info = tmp_path / (name + "-1.0.dist-info")
+        info.mkdir()
+        (info / "METADATA").write_text("Metadata-Version: 2.1\nName: " + name + "\nVersion: 1.0\n")
+        (info / "RECORD").write_text(name + "/shared.py,,\n")
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "shared.py").write_text(name)
+    files = installed_files(distributions(path=[str(tmp_path)]))
+    assert files[tmp_path / "first/shared.py"][:2] == ("first", "1.0")
+    assert files[tmp_path / "second/shared.py"][:2] == ("second", "1.0")
+    (tmp_path / "second-1.0.dist-info/RECORD").write_text("first/shared.py,,\n")
+    with pytest.raises(ValueError, match="Multiple owners"):
+        installed_files(distributions(path=[str(tmp_path)]))
+
+
+def test_notices_and_overlays_compare_exact_wheel_bytes(tmp_path):
+    import io
+    import tarfile
+    import zipfile
+    from frozen_sources import wheel_material
+    wheel = tmp_path / "demo.whl"
+    with zipfile.ZipFile(wheel, "w") as z:
+        z.writestr("demo/payload.py", "x = 2\n")
+        z.writestr("demo/identical.py", "x = 1\n")
+        z.writestr("demo-1.0.dist-info/licenses/a/LICENSE", b"First upstream notice\n")
+        z.writestr("demo-1.0.dist-info/licenses/b/LICENSE", b"Second upstream notice\n")
+    source = tmp_path / "demo.tar.gz"
+    with tarfile.open(source, "w:gz") as tar:
+        for name in ("payload", "identical"):
+            info = tarfile.TarInfo("demo-1.0/src/demo/" + name + ".py")
+            info.size = len(b"x = 1\n")
+            tar.addfile(info, io.BytesIO(b"x = 1\n"))
+    notice = tmp_path / "notices"
+    overlays = tmp_path / "overlays"
+    with zipfile.ZipFile(wheel) as z:
+        wheel_material("demo", z, source, {"demo/payload.py", "demo/identical.py"}, notice, overlays)
+    assert (notice / "demo/demo-1.0.dist-info/licenses/a/LICENSE").read_bytes() == b"First upstream notice\n"
+    assert (notice / "demo/demo-1.0.dist-info/licenses/b/LICENSE").read_bytes() == b"Second upstream notice\n"
+    assert (overlays / "demo/demo/payload.py").read_bytes() == b"x = 2\n"
+    assert not (overlays / "demo/demo/identical.py").exists()
+
+
+
+def test_native_lock_contains_build_sources_and_pinned_interpreters():
+    native_file = ROOT / "macapp/sources/native.json"
+    assert native_file.is_file(), "Native libraries need pinned source and provider inputs"
+    native = json.loads(native_file.read_text())
+    table = {entry["id"]: entry for entry in native["assets"]}
+    for name in ("avif/aom", "avif/dav1d", "avif/libyuv", "pbs-sources/uuid", "pbs/recipe", "pillow/multibuild"):
+        assert table[name]["size"] > 0
+    assert table["openssl/4.0.3"]["sha256"] == "325b5c806167c13b40b1ffeadfe0248197c00eccc4cf123ec1e28d2d2fd216d9"
+    assert {v["role"] for v in table.values()} >= {"cargo-source", "interpreter-source", "native-build-recipe"}
+    assert native["runtime"]["arm64"]["libpython"] == "16d39098fb247e8386e112396a6ebccbcc89586155af7adce89c2f5428287ba9"
+    assert native["runtime"]["x86_64"]["libpython"] == "baf4fc3516b40b2f1a48522543bad9762a11890e23830bee9eeb9c2f51d16c25"
+
+
+
+def test_release_selects_editable_pure_chardet_on_both_architectures():
+    uri = "https://files.pythonhosted.org/packages/cc/75/88a3eb36264375ff951bd2f9397c409727ab6aa6a18e1bd933851571d421/chardet-7.7.0-py3-none-any.whl"
+    checksum = "11cf9b719ea3675a2a7d8a3071bbe4d7ea24b26bfe39a51588d515ddd05cacad"
+    for name in ("requirements-build.lock", "requirements-build-x86_64.lock"):
+        assert f"chardet @ {uri} --hash=sha256:{checksum}" in (ROOT / name).read_text().splitlines()
+
+
+
+def test_source_archive_rejects_unsafe_metadata_and_rebuilds_reproducibly(tmp_path):
+    import io
+    import tarfile
+    from source_archive import payload_tar, verify_tar
+
+    def inputs():
+        yield "project/macapp/build.sh", 0o755, io.BytesIO(b"build"), 5
+        yield "sources/h11.tar.gz", 0o644, io.BytesIO(b"source"), 6
+    hashes = []
+    for index in range(2):
+        output = tmp_path / str(index)
+        payload_tar(output, inputs(), {"version": "1.3.0", "commit": "a" * 40, "architectures": {}})
+        verify_tar(output, version="1.3.0", commit="a" * 40)
+        hashes.append(hashlib.sha256(output.read_bytes()).hexdigest())
+        with tarfile.open(output) as archive:
+            assert archive.extractfile("project/macapp/build.sh").read() == b"build"
+            assert archive.getmember("project/macapp/build.sh").mode == 0o755
+    assert hashes[0] == hashes[1]
+    with pytest.raises(ValueError):
+        verify_tar(output, version="1.3.0", commit="b" * 40)
+    with pytest.raises(ValueError):
+        payload_tar(tmp_path / "unsafe", [("../outside", 0o644, io.BytesIO(b"x"), 1)], {})
+
+
+
+def test_editable_component_extracts_under_one_directory(tmp_path):
+    import io
+    import tarfile
+    from rebuild_sources import unpack_source
+    archive = tmp_path / "editable.tar"
+    with tarfile.open(archive, "w") as tar:
+        for name in ("demo-1/setup.py", "demo-1/src/demo.py"):
+            member = tarfile.TarInfo(name)
+            member.size = len(b"x = 1\n")
+            tar.addfile(member, io.BytesIO(b"x = 1\n"))
+    output = tmp_path / "editable"
+    unpack_source(archive, output)
+    assert (output / "src/demo.py").read_text() == "x = 1\n"
+    with tarfile.open(archive, "w") as tar:
+        link = tarfile.TarInfo("demo-1/escape")
+        link.type, link.linkname = tarfile.SYMTYPE, "../../outside"
+        tar.addfile(link)
+    with pytest.raises(ValueError):
+        unpack_source(archive, tmp_path / "bad")

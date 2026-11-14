@@ -10,6 +10,7 @@ import plistlib
 import re
 import stat
 import struct
+import subprocess
 import sysconfig
 import tempfile
 from types import CodeType
@@ -23,12 +24,25 @@ class BuildPathError(ValueError):
     pass
 
 
+def wide_text(data):
+    for bom, encoding in ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),
+                          (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16")):
+        if data.startswith(bom):
+            try:
+                return data.decode(encoding)
+            except UnicodeDecodeError:
+                return None
+    return None
+
+
 def is_xml_plist(data):
     markup = data.lstrip(b" \t\r\n\0")
     if not markup.startswith((b"<", codecs.BOM_UTF8, codecs.BOM_UTF16_BE, codecs.BOM_UTF16_LE)):
         return False
     try:
-        _, root = next(ElementTree.iterparse(io.BytesIO(data), events=("start",)))
+        wide = wide_text(data)
+        stream = io.StringIO(wide) if wide is not None else io.BytesIO(data)
+        _, root = next(ElementTree.iterparse(stream, events=("start",)))
         return root.tag == "plist"
     except (ElementTree.ParseError, LookupError, StopIteration):
         return False
@@ -53,7 +67,10 @@ def check_archive(path, blocked):
 
     def check_value(value):
         if isinstance(value, str):
-            check(value.encode(errors="surrogatepass"))
+            try:
+                check(os.fsencode(value))
+            except UnicodeEncodeError:
+                check(value.encode(errors="surrogatepass"))
         elif isinstance(value, bytes):
             check(value)
         elif isinstance(value, CodeType):
@@ -75,8 +92,16 @@ def check_archive(path, blocked):
                 check_value(marshal.loads(data[16:]))
             elif data.startswith(b"bplist00"):
                 check_value(plistlib.loads(data, fmt=plistlib.FMT_BINARY))
-            elif lower.endswith(".plist") or is_xml_plist(data):
-                check_value(plistlib.loads(data, fmt=plistlib.FMT_XML))
+            elif lower.endswith(".strings") or lower.endswith(".plist") or is_xml_plist(data):
+                wide = wide_text(data)
+                if wide is not None:
+                    check_value(wide)
+                if lower.endswith(".strings") or data.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+                    result = subprocess.run(["/usr/bin/plutil", "-convert", "binary1", "-o", "-", "--", "-"],
+                                            input=data, capture_output=True, check=True, timeout=10)
+                    check_value(plistlib.loads(result.stdout))
+                else:
+                    check_value(plistlib.loads(data, fmt=plistlib.FMT_XML))
             stream = io.BytesIO(data)
             if name.lower().endswith((".zip", ".whl")) or zipfile.is_zipfile(stream):
                 with zipfile.ZipFile(stream) as nested:

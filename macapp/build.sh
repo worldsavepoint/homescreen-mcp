@@ -17,10 +17,20 @@ fi
 export HOMESCREEN_BUILD_ARCH="$ARCH"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 BUILD=$ROOT/build/$ARCH
-PYTHON=${HOMESCREEN_BUILD_PYTHON:-python3.12}
+BOOTSTRAP=${HOMESCREEN_BUILD_PYTHON:-python3.12}
 VENV=$(mktemp -d "${TMPDIR:-/tmp}/homescreen-build.XXXXXXXX")
 trap 'rm -rf "$VENV"' EXIT
 APP="$BUILD/Screen Organizer.app"
+PYTHON="$BOOTSTRAP"
+if [[ -z "${HOMESCREEN_BUILD_PYTHON:-}" ]]; then
+  PYTHON=$("$BOOTSTRAP" "$ROOT/macapp/native_sources.py" --arch "$ARCH" --destination "$VENV/runtime")
+fi
+WHEELS="$VENV/wheels"
+SOURCE_STAGE="$VENV/source-inputs"
+mkdir -p "$WHEELS" "$SOURCE_STAGE"
+export HOMESCREEN_SOURCE_COMMIT=$(git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null || true)
+export HOMESCREEN_FREEZE_WHEELS="$WHEELS" HOMESCREEN_FREEZE_SOURCES="$SOURCE_STAGE"
+export PYINSTALLER_CONFIG_DIR="$VENV/pyinstaller-cache"
 
 LOCK="$ROOT/requirements-build.lock"
 WHEEL_LINKS=()
@@ -35,7 +45,13 @@ if [[ "$ARCH" == x86_64 ]]; then
   WHEEL_LINKS=(--find-links "$DEPENDENCIES/wheels")
 fi
 "$PYTHON" -m venv "$VENV"
-"$VENV/bin/python" -m pip install --require-hashes --only-binary=:all: "${WHEEL_LINKS[@]}" -r "$LOCK"
+if [[ -n "${HOMESCREEN_WHEELHOUSE:-}" ]]; then
+  "$VENV/bin/python" "$ROOT/macapp/wheelhouse.py" "$LOCK" "$HOMESCREEN_WHEELHOUSE" "$WHEELS"
+else
+  "$VENV/bin/python" -m pip download --require-hashes --only-binary=:all: "${WHEEL_LINKS[@]}" --dest "$WHEELS" -r "$LOCK"
+fi
+"$VENV/bin/python" "$ROOT/macapp/wheelhouse.py" --install-lock "$VENV/requirements.lock" "$LOCK"
+"$VENV/bin/python" -m pip install --require-hashes --only-binary=:all: --no-index --find-links "$WHEELS" -r "$VENV/requirements.lock"
 "$VENV/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 12), "Build lock requires Python 3.12"'
 "$VENV/bin/python" -m pip install --no-deps --no-build-isolation "$ROOT"
 "$VENV/bin/python" -m pip check
@@ -65,6 +81,8 @@ if [[ "$ARCH" == x86_64 ]]; then
   cp "$DEPENDENCIES/OPENSSL-LICENSE.txt" "$APP/Contents/Resources/OPENSSL-LICENSE.txt"
 fi
 cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
+cp "$SOURCE_STAGE/THIRD-PARTY-NOTICES.txt" "$APP/Contents/Resources/"
+cp -R "$SOURCE_STAGE/ThirdPartyLicenses" "$APP/Contents/Resources/"
 "$VENV/bin/python" "$ROOT/macapp/make_icon.py" "$BUILD/AppIcon.iconset"
 iconutil -c icns "$BUILD/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -85,7 +103,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Jonathan Kats. MIT License.</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Jonathan Kats. Original Homescreen source: MIT. Bundled engine: GPL-3.0-or-later.</string>
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict></plist>
 PLIST
@@ -110,3 +128,4 @@ echo "built $APP ($(du -sh "$APP" | cut -f1)) and $DMG ($(du -sh "$DMG" | cut -f
 echo "• release archives"
 "$VENV/bin/python" "$ROOT/macapp/build_paths.py" app-record "$BUILD" "$ROOT" "$BUILD" "$VENV" "${BUILD_PATH_ARGS[@]}"
 "$VENV/bin/python" "$ROOT/macapp/release.py" package --arch "$ARCH"
+"$VENV/bin/python" "$ROOT/macapp/source_archive.py" native --inputs "$SOURCE_STAGE" --archive "$ROOT/build/release/$ARCH/home-screen-organizer-$VERSION-macos-$ARCH.zip" --output "$BUILD/source-inputs.zip"

@@ -257,7 +257,7 @@
   "consent.trademarks": "Mac, macOS, iPhone, iPad and Screen Time are trademarks of Apple Inc. IOS is a trademark or registered trademark of Cisco in the U.S. and other countries and is used by Apple under license.",
   "consent.deviceInterfaces": "This tool uses private device interfaces that may change with iOS updates.",
   "consent.backups": "A Home Screen layout backup is saved before applying or restoring a layout. The app attempts to verify the result by reading the layout back. Keep a separate, up-to-date full backup of your iPhone or iPad.",
-  "consent.warranty": "Use the tool at your own risk. It is provided “AS IS” under the MIT License, without warranty of any kind.",
+  "consent.warranty": "The original Homescreen source is licensed under MIT. The bundled engine is distributed under GPL version 3 or later. The included licenses explain the applicable warranties.",
   "consent.clientData": "Connected MCP clients can read device layouts and app information exposed by this server. Their handling of that data follows the client’s settings and policies. Review those settings before connecting.",
   "consent.declined": "Agreement declined. Close this tab to exit.",
   "mcp.sourceHint": "Use the installed home-screen-mcp executable. If your client cannot find it, replace home-screen-mcp with its absolute path in each example.",

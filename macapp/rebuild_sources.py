@@ -1,0 +1,173 @@
+"""Prepare editable components and local rebuild inputs from a release source tree."""
+import argparse
+import json
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import zipfile
+
+from source_inputs import canonical, relative_name, sha256
+
+
+def unpack_source(archive, output):
+    if output.exists():
+        raise ValueError("Select a new editable source directory")
+    with tempfile.TemporaryDirectory(dir=output.parent) as directory:
+        stage = Path(directory)
+        if zipfile.is_zipfile(archive):
+            with zipfile.ZipFile(archive) as zipped:
+                size = 0
+                seen = set()
+                for info in zipped.infolist():
+                    name = relative_name(info.filename.rstrip("/"))
+                    size += info.file_size
+                    if (name in seen or size > 2 * 1024**3 or len(seen) > 150000
+                            or stat.S_IFMT(info.external_attr >> 16) not in (0, stat.S_IFDIR, stat.S_IFREG)):
+                        raise ValueError("Unsupported upstream ZIP member")
+                    seen.add(name)
+                    if not info.is_dir():
+                        dest = stage / name
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        with zipped.open(info) as data, dest.open("xb") as stream:
+                            shutil.copyfileobj(data, stream)
+                        if info.external_attr >> 16 & 0o111:
+                            dest.chmod(0o755)
+        else:
+            with tarfile.open(archive) as tar:
+                members, seen, size = [], set(), 0
+                for item in tar:
+                    name = relative_name(item.name.rstrip("/"))
+                    size += item.size
+                    if name in seen or size > 2 * 1024**3 or len(seen) > 150000:
+                        raise ValueError("Unexpected upstream archive bounds")
+                    seen.add(name)
+                    members.append(item)
+                try:
+                    tar.extractall(stage, members=members, filter="data")
+                except tarfile.FilterError as error:
+                    raise ValueError("Unsafe upstream archive link or member") from error
+        children = list(stage.iterdir())
+        if len(children) == 1 and children[0].is_dir() and not children[0].is_symlink():
+            children[0].rename(output)
+        else:
+            stage.rename(output)
+
+
+def blob(root, entry):
+    path = root / relative_name(entry["path"])
+    if not path.is_file() or path.is_symlink() or sha256(path) != entry["sha256"]:
+        raise ValueError("Changed release source input")
+    return path
+
+
+def editable(root, owner, arch, output):
+    manifest = json.loads((root / "MANIFEST.json").read_bytes())
+    volume = json.loads((root / relative_name(manifest["architectures"][arch]["inventory"])).read_bytes())
+    if owner not in volume["owners"]:
+        raise ValueError("Select a component in the native source inventory")
+    unpack_source(blob(root, manifest["inputs"]["python/" + owner]), output)
+    for name, checksum in volume["overlays"].items():
+        package, _, relative = name.partition("/")
+        if package != owner or ".dist-info/" in relative:
+            continue
+        replacement = root / "overlays" / arch / relative_name(name)
+        if replacement.is_symlink() or sha256(replacement) != checksum:
+            raise ValueError("Changed component source overlay")
+        # Wheels use installed paths. Locate source-layout packages by their top-level directory.
+        top = relative.split("/")[0]
+        prefixes = [candidate for candidate in (output, output / "src", output / "python")
+                    if (candidate / top).exists()]
+        if not prefixes:
+            for source_root in (output / "src", output / "python"):
+                if source_root.is_dir():
+                    prefixes.append(source_root)
+        if len(prefixes) != 1:
+            raise ValueError(f"Map the wheel overlay to its source layout: {relative}")
+        target = prefixes[0] / relative_name(relative)
+        if not target.resolve().is_relative_to(output.resolve()):
+            raise ValueError("Source overlay escapes its component directory")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(replacement, target)
+
+
+def cargo_vendor(root, destination):
+    manifest = json.loads((root / "MANIFEST.json").read_bytes())
+    destination.mkdir()
+    for key, item in sorted(manifest["inputs"].items()):
+        if not key.startswith("crate/"):
+            continue
+        path = blob(root, item)
+        name, version = key[6:].rsplit("@", 1)
+        crate = destination / relative_name(name + "-" + version)
+        unpack_source(path, crate)
+        files = {p.relative_to(crate).as_posix(): sha256(p) for p in crate.rglob("*") if p.is_file()}
+        (crate / ".cargo-checksum.json").write_text(json.dumps({"package": item["sha256"], "files": files}))
+    print('[source.crates-io]\nreplace-with = "release-source"\n[source.release-source]\n'
+          + "directory = " + json.dumps(str(destination.resolve())) + "\n[net]\noffline = true")
+
+
+def local_wheel(root, source, arch, wheelhouse, output):
+    from wheelhouse import entries
+    python = sys.executable
+    wheelhouse.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as folder:
+        subprocess.run([python, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation",
+                        "--wheel-dir", folder, source.resolve()], check=True)
+        wheel, = Path(folder).glob("*.whl")
+        owner, version = wheel.name.split("-")[:2]
+        with zipfile.ZipFile(wheel) as package:
+            meta, = (name for name in package.namelist() if name.endswith(".dist-info/METADATA"))
+            from email import message_from_bytes
+            header = message_from_bytes(package.read(meta))
+        owner = canonical(owner)
+        if canonical(header["Name"]) != owner or header["Version"] != version:
+            raise ValueError("Wheel name differs from metadata")
+        lock = root / "project/requirements-build.lock"
+        if arch == "x86_64":
+            lock = root / "project/build/dependencies/x86_64/requirements-build.lock"
+        lines = []
+        replaced = False
+        for filename, checksum in entries(lock):
+            name, expected = filename.split("-")[:2]
+            if canonical(name) == owner:
+                if version != expected:
+                    raise ValueError("Rebuild the matching release component version")
+                filename, checksum = wheel.name, sha256(wheel)
+                replaced = True
+            lines.extend(["# " + filename, f"{name}=={expected} --hash=sha256:{checksum}"])
+        if not replaced:
+            raise ValueError("Wheel is absent from the release build lock")
+        shutil.copyfile(wheel, wheelhouse / wheel.name)
+        output.write_text("\n".join(lines) + "\n")
+        print(wheelhouse / wheel.name)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path.cwd())
+    commands = parser.add_subparsers(dest="command", required=True)
+    edit = commands.add_parser("component")
+    edit.add_argument("owner")
+    edit.add_argument("--arch", choices=("arm64", "x86_64"), required=True)
+    edit.add_argument("--output", type=Path, required=True)
+    cargo = commands.add_parser("cargo-vendor")
+    cargo.add_argument("--output", type=Path, required=True)
+    wheel = commands.add_parser("wheel")
+    wheel.add_argument("--arch", choices=("arm64", "x86_64"), required=True)
+    for name in ("source", "wheelhouse", "output"):
+        wheel.add_argument("--" + name, type=Path, required=True)
+    args = parser.parse_args()
+    if args.command == "component":
+        editable(args.root, canonical(args.owner), args.arch, args.output)
+    elif args.command == "cargo-vendor":
+        cargo_vendor(args.root, args.output)
+    else:
+        local_wheel(args.root, args.source, args.arch, args.wheelhouse, args.output)
+
+
+if __name__ == "__main__":
+    main()

@@ -32,3 +32,13 @@ replace_sysconfig(a.pure, CONF["code_cache"].get(id(a.pure)), workpath, module,
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="engine", console=True, target_arch=os.environ.get("HOMESCREEN_BUILD_ARCH", platform.machine()))
 coll = COLLECT(exe, a.binaries, project_metadata(a.datas, str(metadata)), name="engine")
+
+from pathlib import Path
+from frozen_sources import capture
+from native_sources import check_runtime
+
+arch = os.environ["HOMESCREEN_BUILD_ARCH"]
+capture(a, pyz, exe, coll, Path(SPECPATH).parent.resolve(), Path(os.environ["HOMESCREEN_FREEZE_SOURCES"]),
+        Path(os.environ["HOMESCREEN_FREEZE_WHEELS"]), arch,
+        os.environ.get("GITHUB_REPOSITORY", "worldsavepoint/ios-homescreen-organizer"), check_runtime(arch),
+        os.environ.get("HOMESCREEN_SOURCE_COMMIT", ""))

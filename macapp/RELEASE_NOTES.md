@@ -13,6 +13,8 @@ Choose `macos-arm64` for Apple silicon or `macos-x86_64` for Intel. Open the mat
 
 For an MCPB-compatible client, install `home-screen-organizer-1.3.0-macos.mcpb`. It includes both native engines and defaults to `HOMESCREEN_READ_ONLY=1`. To enable MCP Apply and Restore, set both `HOMESCREEN_READ_ONLY=0` and `HOMESCREEN_ALLOW_APPLY=1`, then reconnect. Before Apply, review `diff` and use its latest `apply_token`.
 
-`SHA256SUMS.txt` covers both DMGs, both ZIPs, the MCPB and `server.json`. Save it beside your download and run `shasum -a 256 --check --ignore-missing SHA256SUMS.txt`. Native CI verifies both architectures, localized app resources, signatures, checksums and discovery-only MCP startup before publication. Registry metadata retains `io.github.worldsavepoint/home-screen-organizer`.
+`SHA256SUMS.txt` covers both DMGs, both ZIPs, the MCPB, the Corresponding Source archive and `server.json`. Save it beside your download and run `shasum -a 256 --check --ignore-missing SHA256SUMS.txt`. Native CI verifies both architectures, localized app resources, signatures, checksums and discovery-only MCP startup before publication. Registry metadata retains `io.github.worldsavepoint/home-screen-organizer`.
+
+The bundled Python engine is distributed under GPL version 3 or later. The per-component notices are in the app and MCPB. Download [Corresponding Source and rebuild instructions]({{SOURCE_URL}}) for this release.
 
 Original project by [Jonathan Kats](https://github.com/kats1123/homescreen-mcp), distributed under the [MIT License](https://github.com/worldsavepoint/ios-homescreen-organizer/blob/main/LICENSE). Screen Organizer is not affiliated with, endorsed by, or sponsored by Apple Inc. IOS is a trademark or registered trademark of Cisco in the U.S. and other countries and is used by Apple under license.

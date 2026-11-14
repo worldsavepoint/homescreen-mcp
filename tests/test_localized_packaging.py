@@ -110,3 +110,9 @@ def test_package_resource_check_rejects_incomplete_or_stale_localizations(tmp_pa
         path.write_bytes(plistlib.dumps(plist))
     result = command("check-localization", app)
     assert result.returncode != 0
+
+
+def test_all_release_warranties_explain_both_grants():
+    for language in json.loads((LOCALES / "manifest.json").read_bytes())["languages"]:
+        text = json.loads((LOCALES / (language["code"] + ".json")).read_bytes())["consent.warranty"]
+        assert "MIT" in text and "GPL" in text and "3" in text

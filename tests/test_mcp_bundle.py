@@ -41,7 +41,8 @@ def assets(tmp_path, extra=None):
             member(archive, RESOURCES + "engine/_internal/libsigned.dylib", b"signed native bytes\x00" + arch.encode(), stat.S_IFREG | 0o755)
             member(archive, RESOURCES + "engine/_internal/current", b"libsigned.dylib", stat.S_IFLNK | 0o777)
             member(archive, RESOURCES + "engine/_internal/example.dist-info/licenses/LICENSE", b"third party notice")
-            for name in ("LICENSE", "dependencies.txt", "requirements-build.lock"):
+            for name in ("LICENSE", "dependencies.txt", "requirements-build.lock", "THIRD-PARTY-NOTICES.txt",
+                         "ThirdPartyLicenses/components.json", "ThirdPartyLicenses/h11/LICENSE.txt"):
                 member(archive, RESOURCES + name, b"notice " + name.encode())
             if arch == "x86_64":
                 for name in ("OPENSSL-LICENSE.txt", "requirements-cryptography-x86_64.lock"):
@@ -87,9 +88,12 @@ def test_bundle_contains_both_signed_engines_modes_symlinks_and_notices(tmp_path
             for catalog in (ROOT / "homescreen/web/locales").glob("*.json"):
                 assert archive.read(prefix + "_internal/homescreen/web/locales/" + catalog.name) == catalog.read_bytes()
         assert archive.read("licenses/x86_64/OPENSSL-LICENSE.txt") == b"Intel notice"
+        assert archive.read("THIRD-PARTY-NOTICES.txt") == b"notice THIRD-PARTY-NOTICES.txt"
+        assert archive.read("licenses/arm64/ThirdPartyLicenses/h11/LICENSE.txt") == b"notice ThirdPartyLicenses/h11/LICENSE.txt"
         assert archive.read("LICENSE") == (ROOT / "LICENSE").read_bytes()
         assert stat.S_IMODE(archive.getinfo("server/launch.sh").external_attr >> 16) == 0o755
         manifest = json.loads(archive.read("manifest.json"))
+    assert manifest["license"] == "GPL-3.0-or-later"
     assert manifest["manifest_version"] == "0.3"
     assert manifest["version"] == VERSION
     assert manifest["name"] == "home-screen-organizer"

@@ -257,7 +257,7 @@
   "consent.trademarks": "Mac, macOS, iPhone, iPad und Screen Time sind Marken von Apple Inc. IOS ist eine Marke oder eingetragene Marke von Cisco in den USA und anderen Ländern und wird von Apple unter Lizenz verwendet.",
   "consent.deviceInterfaces": "Dieses Werkzeug nutzt private Geräteschnittstellen, die sich durch iOS-Updates ändern können.",
   "consent.backups": "Vor dem Anwenden oder Wiederherstellen wird die Anordnung gesichert. Die App versucht, das Ergebnis durch erneutes Einlesen zu prüfen. Bewahre eine separate, aktuelle Vollsicherung deines iPhone oder iPad auf.",
-  "consent.warranty": "Die Nutzung erfolgt auf eigenes Risiko. Das Werkzeug wird unter der MIT-Lizenz „WIE BESEHEN“ und ohne jegliche Gewährleistung bereitgestellt.",
+  "consent.warranty": "Der ursprüngliche Homescreen-Quellcode steht unter der MIT-Lizenz. Die mitgelieferte Engine wird unter der GPL ab Version 3 vertrieben. Die beiliegenden Lizenzen enthalten die geltenden Gewährleistungsbestimmungen.",
   "consent.clientData": "Verbundene MCP-Clients können vom Server bereitgestellte Geräteanordnungen und App-Informationen lesen. Ihre Datenverarbeitung folgt den Client-Einstellungen und -Richtlinien. Prüfe diese vor dem Verbinden.",
   "consent.declined": "Vereinbarung abgelehnt. Schließe diesen Tab zum Beenden.",
   "mcp.sourceHint": "Verwende die installierte Programmdatei home-screen-mcp. Falls dein Client sie nicht findet, ersetze home-screen-mcp in jedem Beispiel durch ihren absoluten Pfad.",

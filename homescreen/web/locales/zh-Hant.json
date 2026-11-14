@@ -257,7 +257,7 @@
   "consent.trademarks": "Mac、macOS、iPhone、iPad 與 Screen Time 是 Apple Inc. 的商標。IOS 是 Cisco 在美國及其他國家或地區的商標或註冊商標，由 Apple 經授權使用。",
   "consent.deviceInterfaces": "此工具使用可能隨 iOS 更新而變動的私有裝置介面。",
   "consent.backups": "套用或回復版面配置前會儲存主畫面版面配置備份，App 會嘗試透過重新讀取版面配置驗證結果。請另外保留 iPhone 或 iPad 最新的完整備份。",
-  "consent.warranty": "使用此工具的風險由您自行承擔。本工具依據 MIT 授權條款按「現狀」提供，不附帶任何形式的擔保。",
+  "consent.warranty": "Homescreen 的原始程式碼採用 MIT 授權。隨附的引擎依 GPL 第 3 版或更新版本散布。適用的擔保條款請見隨附的授權文件。",
   "consent.clientData": "連接的 MCP 用戶端可讀取此伺服器提供的裝置版面配置與 App 資訊。用戶端依據其設定與政策處理這些資料。連接前請檢查相關設定。",
   "consent.declined": "已拒絕協議。關閉此分頁以結束。",
   "mcp.sourceHint": "使用已安裝的 home-screen-mcp 執行檔。如果用戶端找不到它，請將範例中的 home-screen-mcp 換成其絕對路徑。",
