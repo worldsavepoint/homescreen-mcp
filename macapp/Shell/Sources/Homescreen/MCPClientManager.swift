@@ -348,12 +348,23 @@ struct MCPClientManager {
 
     private func restore(_ record: inout MCPRegistrationRecord, journal: MCPRegistrationJournal, store: MCPEntryStore) async throws {
         if record.phase == .committed { try journal.clear(); return }
+        guard record.phase != .conflicted else { throw MCPClientOperationCode.recoveryConflict }
         let current = try await store.read()
         guard current.file == record.file else { throw MCPClientOperationCode.recoveryConflict }
+        // An acknowledged write retires the bootstrap snapshot, even if a later
+        // edit recreates that snapshot's exact content fingerprint.
+        if record.phase == .acknowledged && current.entry != record.intended {
+            record.phase = .conflicted
+            try journal.save(record)
+            throw MCPClientOperationCode.recoveryConflict
+        }
         if current.entry == record.prior { try journal.clear(); return }
         let permitted: Bool
         switch record.phase {
-        case .prepared, .committed: permitted = false
+        case .prepared, .committed, .conflicted: permitted = false
+        case .acknowledged: permitted = true // Checked above, before treating the prior entry as restored.
+        case .bootstrapObserved:
+            permitted = current.entry == record.observed && record.bootstrapVersion != nil && current.version == record.bootstrapVersion
         case .bootstrapping:
             guard store.client == .codex, record.prior == .absent, var initial = try record.intended.object() else {
                 throw MCPClientOperationCode.recoveryConflict
@@ -374,11 +385,17 @@ struct MCPClientManager {
         if store.client == .claudeCode, case .present(let json) = record.prior {
             try checkLaunchEnvelope(["mcp", "add-json", "--scope", "user", MCPClientRegistration.serverID, json], store: store)
         }
-        record.observed = current.entry
-        record.phase = .restoring
+        let exactBootstrap = record.phase == .bootstrapObserved ||
+            (record.phase == .adding && record.bootstrapVersion != nil && current.entry == record.observed)
+        if exactBootstrap {
+            record.phase = .bootstrapObserved
+        } else {
+            record.observed = current.entry
+            record.phase = .restoring
+        }
         try journal.save(record)
         if store.client == .codex {
-            try await store.replaceCodex(current, with: record.prior)
+            try await store.replaceCodex(current, with: record.prior, retryUnrelated: !exactBootstrap)
         } else {
             if current.entry != .absent {
                 guard try !isRemote(current.entry) else { throw MCPClientOperationCode.remoteConflict }
@@ -481,18 +498,27 @@ struct MCPClientManager {
                     guard before.entry == .absent else { throw MCPClientOperationCode.recoveryConflict }
                     record.phase = .bootstrapping
                     try journal.save(record)
-                    try await store.command(add)
+                    var commandError: Error?
+                    do { try await store.command(add) } catch { commandError = error }
                     before = try await store.read()
-                    guard before.file == record.file, before.version != nil,
-                          before.entry == base || before.entry == intended else { throw MCPClientOperationCode.recoveryConflict }
-                    record.observed = before.entry
-                    record.bootstrapVersion = before.version
+                    guard before.file == record.file else { throw MCPClientOperationCode.recoveryConflict }
+                    if before.entry != .absent {
+                        guard let revision = before.version else { throw MCPClientOperationCode.recoveryConflict }
+                        record.observed = before.entry
+                        record.bootstrapVersion = revision
+                        record.phase = .bootstrapObserved
+                        try journal.save(record)
+                    }
+                    if let commandError { throw commandError }
+                    guard before.entry == base || before.entry == intended else { throw MCPClientOperationCode.invalidResponse }
                 }
                 record.phase = .adding
                 try journal.save(record)
                 let acknowledged: String?
                 if client == .codex {
                     acknowledged = try await store.replaceCodex(before, with: intended)
+                    record.phase = .acknowledged
+                    try journal.save(record)
                 } else {
                     awaitingPostimage = true
                     try await store.command(add)
@@ -502,6 +528,8 @@ struct MCPClientManager {
                 awaitingPostimage = false
                 guard written.file == snapshot.file else { throw MCPClientOperationCode.recoveryConflict }
                 if let acknowledged, written.version != acknowledged, written.entry != intended {
+                    record.phase = .conflicted
+                    try journal.save(record)
                     throw MCPClientOperationCode.recoveryConflict
                 }
                 record.observed = written.entry

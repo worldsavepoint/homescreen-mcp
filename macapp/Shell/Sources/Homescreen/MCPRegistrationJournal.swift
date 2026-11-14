@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 enum MCPRegistrationPhase: String, Codable {
-    case prepared, bootstrapping, removing, adding, observed, restoring, restoreRemoved, committed
+    case prepared, bootstrapping, bootstrapObserved, removing, adding, acknowledged, observed, restoring, restoreRemoved, committed, conflicted
 }
 
 struct MCPRegistrationRecord: Codable {

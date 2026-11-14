@@ -56,7 +56,7 @@ def test_client_formats_preserve_engine_and_read_only_environment(setup_binary, 
     output = generate(setup_binary, executable)
     expected = {"command": executable, "args": ["mcp"], "env": {"HOMESCREEN_READ_ONLY": "1"}}
     assert json.loads(output["json"]) == {"mcpServers": {"ios-homescreen-mcp": expected}}
-    assert tomllib.loads(output["toml"]) == {"mcp_servers": {"ios-homescreen-mcp": expected}}
+    assert tomllib.loads(output["toml"]) == {"mcp_servers": {"ios-homescreen-mcp": {**expected,"environment_id":"local"}}}
     assert json.loads(output["editor"]) == {"servers": {"ios-homescreen-mcp": {"type": "stdio", **expected}}}
     assert output["copilot"] == output["vscode"]
     assert json.loads(output["vscode"]) == {
@@ -86,7 +86,8 @@ def test_apply_mode_exports_match_registration_environment(setup_binary):
     assert json.loads(output["vscode"])["mcpServers"]["ios-homescreen-mcp"]["env"] == expected
     assert json.loads(output["editor"])["servers"]["ios-homescreen-mcp"]["env"] == expected
     assert json.loads(output["copilot"])["mcpServers"]["ios-homescreen-mcp"]["env"] == expected
-    assert tomllib.loads(output["toml"])["mcp_servers"]["ios-homescreen-mcp"]["env"] == expected
+    codex = tomllib.loads(output["toml"])["mcp_servers"]["ios-homescreen-mcp"]
+    assert codex["env"] == expected and codex["environment_id"] == "local"
     assert output["launch"] == "HOMESCREEN_READ_ONLY=0 HOMESCREEN_ALLOW_APPLY=1 '/synthetic engine' mcp"
 
 

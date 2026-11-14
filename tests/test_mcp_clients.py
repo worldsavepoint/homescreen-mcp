@@ -105,7 +105,7 @@ def execute(binary, sandbox, action, client="codex", executable="auto", *args):
 def fake_client(tmp_path, name="client"):
     path = tmp_path / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"#!{sys.executable}\n" + '''import json, os, signal, sys, time
+    path.write_text(f"#!{sys.executable}\n" + '''import hashlib, json, os, signal, sys, time
 from pathlib import Path
 args = sys.argv[1:]
 with open(os.environ["TEST_LOG"], "a") as log:
@@ -130,7 +130,10 @@ if args[:2] == ["app-server", "generate-json-schema"]:
     (out / "ClientRequest.json").write_text(json.dumps({"oneOf": methods_schema, "definitions": defs}))
     sys.exit(0)
 if args == ["app-server"]:
-    version = lambda: str(store.stat().st_mtime_ns if store.exists() else 0)
+    def version():
+        data = json.loads(store.read_text()) if store.exists() else {}
+        canonical = json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+        return "sha256:" + hashlib.sha256(canonical).hexdigest()
     initialized = False
     ready = False
     for line in sys.stdin:
@@ -923,16 +926,67 @@ def test_interrupted_first_registration_recovers_owned_entry(native_mcp_binary, 
     assert "ios-homescreen-mcp" not in json.loads(store.read_text())
 
 
-def test_bootstrap_preserves_later_edit_to_implicit_executor(native_mcp_binary, sandbox, tmp_path):
+@pytest.mark.parametrize("interrupt_after_ack", [False, True])
+def test_bootstrap_preserves_later_edit_to_implicit_executor(native_mcp_binary, sandbox, tmp_path, interrupt_after_ack):
     cli = fake_client(tmp_path)
-    result = execute(native_mcp_binary, {**sandbox,"TEST_AFTER_ACK":"implicit"}, "register", "codex", cli, "/new")
-    assert result["code"] == "recoveryConflict" and result["recovery"] == "failed"
-    entry = json.loads(Path(sandbox["TEST_STORE"]).read_text())["ios-homescreen-mcp"]
+    env = {**sandbox,"TEST_AFTER_ACK":"implicit"}
+    if interrupt_after_ack:
+        proc = subprocess.run([native_mcp_binary,"register","codex",cli,"/new"], capture_output=True,
+                              env={**env,"TEST_JOURNAL_EXIT":"acknowledged"}, timeout=10)
+        assert proc.returncode == 85
+    else:
+        result = execute(native_mcp_binary, env, "register", "codex", cli, "/new")
+        assert result["code"] == "recoveryConflict" and result["recovery"] == "failed"
+    store = Path(sandbox["TEST_STORE"])
+    entry = json.loads(store.read_text())["ios-homescreen-mcp"]
     assert entry["command"] == "/new" and "environment_id" not in entry
     assert execute(native_mcp_binary, sandbox, "recover", "codex", cli)["code"] == "recoveryConflict"
+    journal = Path(sandbox["HOME"])/"Library/Application Support/homescreen-mcp/registration/codex.json"
+    assert json.loads(journal.read_text())["phase"] == "conflicted"
+    assert json.loads(store.read_text())["ios-homescreen-mcp"] == entry
 
 
 def test_first_registration_restores_bootstrap_after_rejected_executor_write(native_mcp_binary, sandbox, tmp_path):
     result = execute(native_mcp_binary, {**sandbox,"TEST_REJECT_EXECUTOR":"1"}, "register", "codex", fake_client(tmp_path), "/new")
     assert result["code"] == "commandFailed" and result["recovery"] == "restored"
     assert "ios-homescreen-mcp" not in json.loads(Path(sandbox["TEST_STORE"]).read_text())
+
+
+@pytest.mark.parametrize("cli_error", [False, True])
+def test_first_cli_wrong_apply_entry_is_restored(native_mcp_binary, sandbox, tmp_path, cli_error):
+    store = Path(sandbox["TEST_STORE"])
+    assert not store.exists() and not (Path(sandbox["HOME"])/".codex/config.toml").exists()
+    env = {**sandbox, "TEST_WRONG_ADD":"1"}
+    if cli_error:
+        env["TEST_PARTIAL_ADD"] = "1"
+    result = execute(native_mcp_binary, env, "register", "codex", fake_client(tmp_path), "/new", "apply")
+    assert result["code"] == ("commandFailed" if cli_error else "invalidResponse")
+    assert result["recovery"] == "restored"
+    assert "ios-homescreen-mcp" not in json.loads(store.read_text())
+    assert not (Path(sandbox["HOME"])/"Library/Application Support/homescreen-mcp/registration/codex.json").exists()
+
+
+@pytest.mark.parametrize("interruption, external", [("bootstrap", None), ("bootstrapObserved", None),
+                                                    ("bootstrapObserved", "owned"), ("bootstrapObserved", "revision")])
+def test_first_cli_wrong_postimage_recovery_requires_ownership(native_mcp_binary, sandbox, tmp_path, interruption, external):
+    cli = fake_client(tmp_path)
+    env = {**sandbox, "TEST_WRONG_ADD":"1",
+           ("TEST_INTERRUPT" if interruption == "bootstrap" else "TEST_JOURNAL_EXIT"):interruption}
+    process = subprocess.run([native_mcp_binary, "register", "codex", cli, "/new", "apply"],
+                             env=env, capture_output=True, timeout=10)
+    assert process.returncode != 0
+    store = Path(sandbox["TEST_STORE"])
+    entries = json.loads(store.read_text())
+    key = "ios-homescreen-mcp"
+    assert entries[key]["command"] == "/unexpected-engine" and entries[key]["env"]["HOMESCREEN_ALLOW_APPLY"] == "1"
+    if external == "owned":
+        entries[key]["command"] = "/external-engine"
+    elif external == "revision":
+        entries["unrelated"]["command"] = "/external"
+    if external:
+        store.write_text(json.dumps(entries))
+    result = execute(native_mcp_binary, sandbox, "recover", "codex", cli)
+    if interruption == "bootstrapObserved" and not external:
+        assert result["code"] == "success" and key not in json.loads(store.read_text())
+    else:
+        assert result["code"] == "recoveryConflict" and json.loads(store.read_text()) == entries

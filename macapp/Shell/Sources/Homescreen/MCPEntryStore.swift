@@ -195,9 +195,10 @@ struct MCPEntryStore {
         }
     }
 
-    @discardableResult func replaceCodex(_ snapshot: MCPUserSnapshot, with desired: MCPOwnedEntry) async throws -> String {
+    @discardableResult func replaceCodex(_ snapshot: MCPUserSnapshot, with desired: MCPOwnedEntry, retryUnrelated: Bool = true) async throws -> String {
         do { return try await write(snapshot, desired) }
         catch MCPClientOperationCode.versionConflict {
+            guard retryUnrelated else { throw MCPClientOperationCode.recoveryConflict }
             let fresh = try await read()
             guard fresh.file == snapshot.file, fresh.entry == snapshot.entry, fresh.version != snapshot.version else {
                 throw MCPClientOperationCode.recoveryConflict

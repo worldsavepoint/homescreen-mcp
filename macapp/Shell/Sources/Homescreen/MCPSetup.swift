@@ -20,6 +20,7 @@ struct MCPSetup {
             .replacingOccurrences(of: "\u{7f}", with: "\\u007f")
         return """
         [mcp_servers.ios-homescreen-mcp]
+        environment_id = "local"
         command = \(command)
         args = ["mcp"]
 
