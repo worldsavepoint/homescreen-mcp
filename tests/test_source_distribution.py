@@ -298,6 +298,21 @@ def test_local_project_can_be_refrozen_with_unmodified_dependency_lock(tmp_path)
     assert local_selections(lock, lock, {"h11"}) == {}
 
 
+def test_local_install_lock_retains_wheel_identity_without_download_location(tmp_path):
+    import subprocess
+    from wheelhouse import entries
+
+    wheel = "h11-0.16.0-py3-none-any.whl"
+    value = hashlib.sha256(b"locally modified wheel").hexdigest()
+    private = (tmp_path / "private build" / wheel).as_uri()
+    download = tmp_path / "download.lock"
+    download.write_text(f"# {wheel}\nh11 @ {private} --hash=sha256:{value}\n")
+    output = tmp_path / "install.lock"
+    subprocess.run([sys.executable, ROOT / "macapp/wheelhouse.py", "--install-lock", output, download], check=True)
+    assert list(entries(output)) == [(wheel, value)]
+    assert output.read_text() == f"# {wheel}\nh11==0.16.0 --hash=sha256:{value}\n"
+
+
 def test_git_export_ignores_local_archive_attributes(tmp_path):
     import subprocess
     from source_checkout import export_project

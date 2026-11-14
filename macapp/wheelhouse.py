@@ -47,7 +47,7 @@ if __name__ == "__main__":
         lines = []
         for wheel, checksum in entries(args.lock):
             name, version = wheel.split("-")[:2]
-            lines.append(f"{name}=={version} --hash=sha256:{checksum}\n")
+            lines.append(f"# {wheel}\n{name}=={version} --hash=sha256:{checksum}\n")
         args.install_lock.write_text("".join(lines))
     else:
         stage(args.lock, args.folder, args.destination)

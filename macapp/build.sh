@@ -97,7 +97,6 @@ cp "$SHELL_BIN" "$APP/Contents/MacOS/HomeScreenOrganizer"
 cp -R "$BUILD/dist/engine" "$APP/Contents/Resources/engine"
 "$VENV/bin/python" -c 'import importlib.metadata as m; print("\n".join(sorted(d.metadata["Name"] + "==" + d.version for d in m.distributions())))' \
   > "$APP/Contents/Resources/dependencies.txt"
-cp "$LOCK" "$APP/Contents/Resources/requirements-build.lock"
 if [[ "$ARCH" == x86_64 ]]; then
   cp "$ROOT/requirements-cryptography-x86_64.lock" "$APP/Contents/Resources/requirements-cryptography-x86_64.lock"
   cp "$DEPENDENCIES/OPENSSL-LICENSE.txt" "$APP/Contents/Resources/OPENSSL-LICENSE.txt"
@@ -106,8 +105,10 @@ cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
 cp "$SOURCE_STAGE/THIRD-PARTY-NOTICES.txt" "$APP/Contents/Resources/"
 cp -R "$SOURCE_STAGE/ThirdPartyLicenses" "$APP/Contents/Resources/"
 if [[ -n "$LOCAL_LOCK" ]]; then
+  cp "$VENV/requirements.lock" "$APP/Contents/Resources/requirements-build.lock"
   cp "$SOURCE_STAGE/LOCAL-BUILD.json" "$APP/Contents/Resources/"
 else
+  cp "$LOCK" "$APP/Contents/Resources/requirements-build.lock"
   cp "$SOURCE_STAGE/inventory.json" "$APP/Contents/Resources/SourceInventory.json"
 fi
 "$VENV/bin/python" "$ROOT/macapp/make_icon.py" "$BUILD/AppIcon.iconset"
