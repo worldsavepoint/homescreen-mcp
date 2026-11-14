@@ -1,0 +1,313 @@
+"""Owner changes between draft, source reads, archive writes and remembered placement."""
+
+import json
+import plistlib
+
+import pytest
+
+from fake_phone import app, folder
+from homescreen import device
+from homescreen.device import FileSource, SimSource, to_root_archive
+from homescreen.model import Grid, LayoutError
+from homescreen.session import Session
+from test_grid_serialization import metadata
+from test_live_frame import FrameSource, external_traps, reviewed
+from test_pin_integrity import apply, run
+from test_reviewed_session import loaded, source_traps
+from test_transaction_identity import change_read, paired_folders
+
+
+@pytest.mark.parametrize("reported", [False, True])
+@pytest.mark.parametrize("timing", [1, 2, 3, None])
+def test_folder_wire_exchanged_between_pages(tmp_path, timing, reported):
+    src = FrameSource(reported)
+    folders = [{**folder(key, [app(key, key)]), "uniqueIdentifier": key} for key in ("alpha", "beta")]
+    src.raw = to_root_archive([[], [folders[0]], [folders[1]]], [])
+    s, _ = loaded(tmp_path, src)
+    s.edit(lambda l: l.pin("folder:alpha", 1, 7))
+    before = reviewed(s)
+    def exchange(raw):
+        a, b = [p[0] for p in raw["iconLists"]]
+        a["uniqueIdentifier"], b["uniqueIdentifier"] = b["uniqueIdentifier"], a["uniqueIdentifier"]
+        if timing == 3:
+            metadata(raw)["fixedLocations"] = {"beta": 7}
+    change_read(src, timing, exchange)
+    if timing in (1, 2):
+        with pytest.raises(LayoutError, match="changed"):
+            apply(s)
+        assert src.payloads == [] and not s.backups() and not s._pending_path.exists()
+    else:
+        assert apply(s)["ok"] is (timing is None)
+        assert s._pending_path.exists() is (timing == 3)
+    if timing:
+        assert reviewed(s) == before
+
+
+@pytest.mark.parametrize("mutation", ["rename", "contents", "move-and-rename", "pre-1", "pre-2"])
+def test_remembered_folder_instance_after_its_twin_leaves(tmp_path, mutation):
+    s, src = paired_folders(tmp_path)
+    src.reported = False
+    src.raw["iconLists"].append(["spare", "other"])
+    run(s.read())
+    s.edit(lambda l: l.pin("folder:alpha", 1, 17))
+    assert apply(s)["ok"]
+    src.raw["iconLists"][0].pop()
+    run(s.read())
+    assert s.require().pins == {"folder:alpha": 17}
+    if mutation.startswith("pre"):
+        before = reviewed(s)
+        change_read(src, int(mutation[-1]), lambda raw: raw["iconLists"][0][0].update(uniqueIdentifier="beta"))
+        with pytest.raises(LayoutError, match="changed"):
+            apply(s)
+        assert len(src.payloads) == 1 and reviewed(s) == before
+        return
+    if mutation in ("rename", "move-and-rename"):
+        s.edit(lambda l: l.rename_folder("folder:alpha", "Renamed"))
+    if mutation == "contents":
+        s.edit(lambda l: l.move("spare", "folder:alpha"))
+    if mutation == "move-and-rename":
+        s.edit(lambda l: (l.move("spare", "page:1"), l.pin("folder:alpha", 2, 17)))
+    assert apply(s)["ok"]
+    s = Session(src, s.dir)
+    run(s.read())
+    assert s.require().pins == {"folder:alpha": 17}
+    for page in src.raw["iconLists"]:
+        for item in page:
+            if isinstance(item, dict) and item.get("uniqueIdentifier") == "alpha":
+                item["uniqueIdentifier"] = "beta"
+    run(s.read())
+    assert s.require().pins == {}
+
+
+def test_folder_owner_cannot_swap_via_intermediate_fresh_ids(tmp_path):
+    s, src = paired_folders(tmp_path, same_content=False)
+    read = src.read_raw
+    calls = 0
+    async def samples(version):
+        nonlocal calls
+        raw = await read(version)
+        calls += 1
+        if calls in (1, 2):
+            first, second = raw["iconLists"][0]
+            first["uniqueIdentifier"], second["uniqueIdentifier"] = (("new-a", "new-b") if calls == 1
+                                                                     else ("beta", "alpha"))
+        return raw
+    src.read_raw = samples
+    s.edit(lambda l: l.pin("folder:alpha", 1, 7))
+    with pytest.raises(LayoutError, match="changed"):
+        apply(s)
+    assert not s.backups() and not src.payloads
+
+
+def app_with_wire(bundle, wire):
+    return {**app(bundle, bundle), "displayIdentifier": wire}
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_backup_distinguishes_crossed_bundle_and_wire(tmp_path, legacy):
+    src = FrameSource()
+    src.raw = [[], [app_with_wire("one", "two"), app_with_wire("two", "wire-two")]]
+    s, _ = loaded(tmp_path, src)
+    s.edit(lambda l: l.pin("one", 1, 7))
+    assert apply(s)["ok"]
+    name = apply(s)["backup"]
+    path = s._dev_dir("backups") / name
+    if legacy:
+        blob = plistlib.loads(path.read_bytes())
+        blob["provenance"].pop("pin_keys", None)
+        path.write_bytes(plistlib.dumps(blob))
+        with pytest.raises(LayoutError, match="ambiguous"):
+            run(s.restore(name))
+        assert len(src.payloads) == 2 and not s._pending_path.exists()
+    else:
+        assert run(s.restore(name))["ok"]
+        assert metadata(src.raw)["fixedLocations"] == {"two": 7}
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_unreported_same_bundle_copies_keep_distinct_cells(tmp_path, failed):
+    src = FrameSource(False)
+    src.raw = [[], [app_with_wire("bundle", "wire-a"), app_with_wire("bundle", "wire-b")]]
+    s, _ = loaded(tmp_path, src)
+    s.edit(lambda l: (l.pin(l.pages[0][0].id, 1, 7), l.pin(l.pages[0][1].id, 1, 12)))
+    assert apply(s)["ok"]
+    assert metadata(src.raw)["fixedLocations"] == {"wire-a": 7, "wire-b": 12}
+    s = Session(src, s.dir)
+    run(s.read())
+    assert [s.require().pins[n.id] for n in s.require().pages[0]] == [7, 12]
+    s.edit(lambda l: (l.unpin(l.pages[0][0].id), l.unpin(l.pages[0][1].id),
+                      l.pin(l.pages[0][1].id, 1, 7)))
+    if failed:
+        async def reject(payload):
+            raise ConnectionError("send failed")
+        src.set_icon_state = reject
+    assert apply(s)["ok"] is (not failed)
+    assert s._pending_path.exists() is failed
+
+
+def test_unmarked_gap_memory_refuses_bundle_or_wire_cross_owner(tmp_path):
+    src = FrameSource(False)
+    src.raw = [[], [app_with_wire("one", "two"), app_with_wire("two", "wire-two")]]
+    s, _ = loaded(tmp_path, src)
+    s._gaps_path.write_text(json.dumps({"version": 2, "grid": s.grid.to_dict(), "pages": [{"two": 7}]}))
+    run(s.read())
+    assert not s.require().pins
+
+
+@pytest.mark.parametrize("wire", ["wire-ride", "ride"])
+def test_library_inventory_uses_semantic_bundle(tmp_path, wire):
+    src = FrameSource()
+    src.raw = [[], [app_with_wire("ride", wire), app("other", "Other")]]
+    async def installed():
+        return {key: {"CFBundleDisplayName": key} for key in ("ride", "other")}
+    src.installed_apps = installed
+    s, _ = loaded(tmp_path, src)
+    s.edit(lambda l: l.move("ride", "library"))
+    assert apply(s)["ok"]
+    assert src.raw["ignored"] == [wire]
+
+
+def test_page_icon_wire_cannot_hide_another_installed_bundle(tmp_path):
+    src = FrameSource()
+    src.raw = [[], [app_with_wire("one", "two")]]
+    async def installed():
+        return {"one": {}, "two": {}}
+    src.installed_apps = installed
+    s, _ = loaded(tmp_path, src)
+    assert [n.bundle_id for n in s.require().library] == ["two"]
+
+
+def test_fixture_approval_uses_canonical_path_and_rebinds_legacy(tmp_path):
+    raw = plistlib.dumps(to_root_archive([[], [app("a", "A")]], []))
+    paths = []
+    sessions = []
+    for root in ("one", "two"):
+        p = tmp_path / root / "same.plist"
+        p.parent.mkdir()
+        p.write_bytes(raw)
+        paths.append(p)
+        sessions.append(loaded(p.parent / "data", FileSource(p))[0])
+    first, second = sessions
+    with pytest.raises(LayoutError, match="token"):
+        run(second.apply(first.require().token()))
+    assert paths[1].read_bytes() == raw and not second.backups()
+    link = tmp_path / "alias.plist"
+    link.symlink_to(paths[1])
+    assert run(FileSource(link).info())["UniqueDeviceID"] == second.device_id
+    blob = plistlib.loads(second.draft_path.read_bytes())
+    blob["device"] = "fixture-same"
+    second.draft_path.write_bytes(plistlib.dumps(blob))
+    old = Session(FileSource(paths[1]), second.dir)
+    approval = old.require().token()
+    with pytest.raises(LayoutError, match="identity"):
+        run(old.apply(approval))
+    run(old.read())
+    assert old.require().token() != approval and apply(old)["ok"]
+
+
+@pytest.mark.parametrize("adapter", ["file", "simulator"])
+@pytest.mark.parametrize("cols", [4, 5])
+@pytest.mark.parametrize("operation", ["apply", "restore"])
+def test_zero_page_archive_geometry_checked_before_publication(tmp_path, monkeypatch, adapter, cols, operation):
+    rows = 6 if cols == 4 else 7
+    path = tmp_path / "IconState.plist"
+    raw = plistlib.dumps(to_root_archive([[], [app("a", "A")]], [], [{"a": 7}], Grid(cols, rows)))
+    path.write_bytes(raw)
+    src = FileSource(path)
+    if adapter == "simulator":
+        src = SimSource("synthetic")
+        src.dir = tmp_path
+        monkeypatch.setattr(src, "apps", lambda: {})
+        monkeypatch.setattr(device, "_run", lambda *args: json.dumps({"devices": {
+            "test.iOS-27-0": [{"udid": src.udid, "name": "Synthetic", "state": "Booted"}]}}))
+        # Stand in for the restart after writing the same production archive representation.
+        monkeypatch.setattr(src, "write", FileSource(path).write)
+    s, _ = loaded(tmp_path / "data", src)
+    s.edit(lambda l: (l.move("a", "library"), l.drop_empty()))
+    backup = s._backup([[]], [app("a", "A")], "empty") if operation == "restore" else None
+    def write():
+        return run(s.restore(backup.name)) if backup else apply(s)
+    if cols == 4:
+        assert write()["ok"] and run(src.read())[0] == [[]]
+    else:
+        before, backups = reviewed(s), s.backups()
+        with pytest.raises(LayoutError, match="page.*grid"):
+            write()
+        assert reviewed(s) == before and s.backups() == backups and not s._pending_path.exists()
+        assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("reported", [False, True])
+@pytest.mark.parametrize("regenerated", [False, True])
+def test_page_scoped_occurrences_of_a_shared_folder_wire(tmp_path, reported, regenerated):
+    src = FrameSource(reported)
+    folders = [{**folder(key, [app(key, key)]), "uniqueIdentifier": key if regenerated else "shared"}
+               for key in ("a", "b")]
+    src.raw = to_root_archive([[], [folders[0]], [folders[1]]], [])
+    s, _ = loaded(tmp_path, src)
+    def place(lay):
+        for index, page in enumerate(lay.pages, 1):
+            lay.pin(page[0].id, index, index + 3)
+    s.edit(place)
+    if regenerated:
+        def change(raw):
+            for index, page in enumerate(raw["iconLists"]):
+                page[0]["uniqueIdentifier"] = "shared"
+                page_id = raw["listUniqueIdentifiers"][index]
+                raw["listMetadata"][page_id]["fixedLocations"] = {"shared": index + 4}
+        change_read(src, 3, change)
+    assert apply(s)["ok"]
+    lay = s.require()
+    assert [lay.pins[page[0].id] for page in lay.pages] == [4, 5]
+
+
+def test_root_writer_preserves_library_copies_and_adds_only_missing_bundles():
+    src = FrameSource()
+    async def installed():
+        return {"ride": {}, "other": {}, "extra": {}}
+    src.installed_apps = installed
+    run(src.write([[], [app("other", "Other")]], [app_with_wire("ride", "first"), app_with_wire("ride", "second")]))
+    assert src.payloads[-1]["ignored"] == ["first", "second", "extra"]
+
+
+def test_independent_phone_metrics_allow_zero_pages_on_nondefault_grid(tmp_path):
+    s, src = loaded(tmp_path, FrameSource())
+    s.edit(lambda l: (l.move("example.a", "library"), l.drop_empty()))
+    assert apply(s)["ok"] and src.raw["iconLists"] == []
+    run(s.read())
+    assert s.grid == Grid(5, 7)
+
+
+def test_generated_recovery_backup_keeps_sticky_folder_ownership(tmp_path):
+    s, src = paired_folders(tmp_path)
+    src.reported = False
+    run(s.read())
+    s.edit(lambda l: l.pin("folder:alpha", 1, 17))
+    assert apply(s)["ok"]
+    src.raw["iconLists"][0].pop()
+    run(s.read())
+    s.edit(lambda l: l.rename_folder("folder:alpha", "Renamed"))
+    name = apply(s)["backup"]
+    assert run(s.restore(name))["ok"]
+    src.raw["iconLists"][0][0]["uniqueIdentifier"] = "beta"
+    run(s.read())
+    assert not s.require().pins
+
+
+def test_failed_send_with_matching_order_and_unchanged_anchors_can_verify(tmp_path):
+    src = FrameSource(False)
+    src.raw = [[], [app("a", "A")]]
+    s, _ = loaded(tmp_path, src)
+    s.edit(lambda l: l.pin("a", 1, 7))
+    assert apply(s)["ok"]
+    # The odd-display copy was in the library on both prewrite samples.
+    src.raw["ignored"] = [app_with_wire("bundle", "wire")]
+    run(s.read())
+    s.edit(lambda l: l.move("bundle", "page:1"))
+    send = src.set_icon_state
+    async def delivered(payload):
+        await send(payload)
+        raise ConnectionError("response lost")
+    src.set_icon_state = delivered
+    assert apply(s)["ok"] and not s._pending_path.exists()
+    assert s.require().pins == {"a": 7}

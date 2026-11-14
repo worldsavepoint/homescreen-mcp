@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import os
 import platform
@@ -89,6 +90,12 @@ def _check_list_write(pins: list[dict[str, int]] | None, library: list[Any] | No
         raise LayoutError("list-format writes cannot send fixed positions; use ordinary page order")
     if library:
         raise LayoutError("list-format writes cannot keep apps in the App Library")
+
+
+def _check_archive_frame(state: list[Any], grid: Grid | None) -> None:
+    default = Grid()
+    if len(state) == 1 and grid and (grid.cols, grid.rows) != (default.cols, default.rows):
+        raise LayoutError("keep a Home Screen page to preserve this archive's grid dimensions")
 
 
 def _fix_list_ids(d: dict[str, Any], n: int) -> None:
@@ -257,6 +264,8 @@ def model_to_disk(state: list[Any], library: list[Any] | None, base: dict[str, A
     """Rebuild the dict format; keys we don't touch (today view, ids) come from base. pins
     (per page) replace the gaps when given. grid supplies their page dimensions, with
     iPhone defaults when omitted."""
+    if keep_archive_frame:
+        _check_archive_frame(state, grid)
     if "listUniqueIdentifiers" in base:
         _validate_page_ids(base, len(base["iconLists"]))
     out = dict(base)
@@ -418,7 +427,7 @@ class PhoneSource:
             # Safety net: any installed app in neither the layout nor the library (an old
             # backup, an app installed meanwhile) goes to the library, never onto a page.
             library = list(library or [])
-            listed = {_leaf_id(x) for x in library if isinstance(x, dict)}
+            listed = {_installed_bundle(x) for x in library if isinstance(x, dict)}
             library += [x for x in library_from_installed(state, await self.installed_apps())
                         if x["bundleIdentifier"] not in listed]
             payload = to_root_archive(state, library, pins, grid)
@@ -427,6 +436,12 @@ class PhoneSource:
     @_bounded
     async def icon_png(self, bundle_id: str) -> bytes | None:
         return await self._call(lambda sb: sb.get_icon_pngdata(bundle_id))
+
+
+def _installed_bundle(item: dict[str, Any]) -> str | None:
+    if "webClipURL" in item or item.get("iconType") == "webClip":
+        return None
+    return item.get("bundleIdentifier") or item.get("displayIdentifier")
 
 
 def library_from_installed(state: list[Any], apps: dict[str, dict[str, Any]]) -> list[Any]:
@@ -438,7 +453,8 @@ def library_from_installed(state: list[Any], apps: dict[str, dict[str, Any]]) ->
                 for page in x["iconLists"]:
                     walk(page)
             elif isinstance(x, dict) and not is_widget(x):
-                placed.update(filter(None, (x.get("bundleIdentifier"), x.get("displayIdentifier"))))
+                if bundle := _installed_bundle(x):
+                    placed.add(bundle)
 
     for page in state:
         walk(page)
@@ -519,6 +535,8 @@ class SimSource:
         names = {b: a.get("CFBundleDisplayName") or a.get("CFBundleName") or b for b, a in self.apps().items()}
         self.pins = disk_pins(raw)
         return disk_to_model(raw, names)
+
+    check_archive_frame = staticmethod(_check_archive_frame)
 
     def _springboard_pid(self) -> str | None:
         for line in _run("xcrun", "simctl", "spawn", self.udid, "launchctl", "list").splitlines():
@@ -614,13 +632,16 @@ class FileSource:
         self.name = f"file:{self.path.name}"
 
     async def info(self) -> dict[str, Any]:
-        return {"DeviceName": f"fixture {self.path.name}", "UniqueDeviceID": f"fixture-{self.path.stem}",
+        identity = hashlib.sha256(os.fsencode(self.path.resolve())).hexdigest()
+        return {"DeviceName": f"fixture {self.path.name}", "UniqueDeviceID": f"file-v2-{identity}",
                 "icon_metrics": _archive_metrics(self.path)}
 
     async def read(self) -> Layout:
         raw = plistlib.loads(self.path.read_bytes())
         self.pins = disk_pins(raw) if is_dict_format(raw) else None
         return disk_to_model(raw) if is_dict_format(raw) else (raw, None)
+
+    check_archive_frame = staticmethod(_check_archive_frame)
 
     def check_write(self, pins: list[dict[str, int]] | None, library: list[Any] | None = None) -> None:
         if self.pins is None:
