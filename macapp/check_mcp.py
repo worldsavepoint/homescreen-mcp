@@ -10,8 +10,10 @@ import time
 
 def check(command, timeout):
     with tempfile.TemporaryDirectory(prefix="home-screen-mcp-check-") as data:
+        environment = {**os.environ, "HOMESCREEN_READ_ONLY": "1", "HOMESCREEN_DATA": data}
+        environment.pop("HOMESCREEN_ALLOW_APPLY", None)
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   env={**os.environ, "HOMESCREEN_READ_ONLY": "1", "HOMESCREEN_DATA": data})
+                                   env=environment)
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
         deadline = time.monotonic() + timeout
@@ -27,10 +29,17 @@ def check(command, timeout):
                 while b"\n" in pending:
                     line, pending = pending.split(b"\n", 1)
                     message = json.loads(line)
-                    if message.get("id") == identifier:
-                        if "error" in message:
-                            raise ValueError(f"MCP request failed: {message['error']}")
-                        return message["result"]
+                    if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+                        raise ValueError("Invalid MCP response")
+                    if "id" not in message and isinstance(message.get("method"), str):
+                        continue
+                    if type(message.get("id")) is not int or message["id"] != identifier:
+                        raise ValueError("Unexpected MCP response ID")
+                    if "error" in message:
+                        raise ValueError("MCP request failed")
+                    if "method" in message or not isinstance(message.get("result"), dict):
+                        raise ValueError("Invalid MCP result")
+                    return message["result"]
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not selector.select(remaining):
                     raise ValueError("MCP startup deadline exceeded")
@@ -38,12 +47,21 @@ def check(command, timeout):
                 if not chunk:
                     raise ValueError("MCP server closed before completing startup")
                 pending += chunk
+                if len(pending) > 8 * 1024 * 1024:
+                    raise ValueError("MCP response too large")
 
         try:
             send({"id": 1, "method": "initialize", "params": {
                 "protocolVersion": "2025-11-25", "capabilities": {},
                 "clientInfo": {"name": "home-screen-organizer-distribution-check", "version": "1.0.0"}}})
             result = receive(1)
+            if (result.get("protocolVersion") != "2025-11-25"
+                    or not isinstance(result.get("capabilities"), dict)
+                    or not isinstance(result["capabilities"].get("tools"), dict)
+                    or not isinstance(result.get("serverInfo"), dict)
+                    or not isinstance(result["serverInfo"].get("version"), str)
+                    or not result["serverInfo"]["version"]):
+                raise ValueError("Invalid MCP initialization")
             if result["serverInfo"]["name"] != "ios-homescreen-mcp":
                 raise ValueError("Unexpected MCP server identity")
             send({"method": "notifications/initialized"})

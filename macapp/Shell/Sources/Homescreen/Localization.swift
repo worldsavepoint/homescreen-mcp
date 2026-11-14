@@ -1,4 +1,5 @@
 import Foundation
+import JavaScriptCore
 import SwiftUI
 
 protocol LanguagePreferences {
@@ -26,6 +27,14 @@ final class Localization: ObservableObject {
     private let defaults: LanguagePreferences
     private let preferredLanguages: [String]
     private let english: [String: String]
+    // Use the system ECMA-402 implementation shared by WebKit and our catalog
+    // validator. Foundation canonicalizes several distinct tags differently.
+    private static let canonicalize = JSContext()!.evaluateScript("""
+        (value) => {
+            try { return Intl.getCanonicalLocales(value.replace(/_/g, "-"))[0] }
+            catch { return null }
+        }
+        """)!
     private var catalog: [String: String] = [:]
 
     init(catalogDirectory: URL = Bundle.main.resourceURL!.appendingPathComponent("Localization"),
@@ -41,7 +50,7 @@ final class Localization: ObservableObject {
     }
 
     func setPreference(_ value: String) {
-        preference = value == "system" || languages.contains(where: { $0.code == value }) ? value : "system"
+        preference = recognizedPreference(value) ?? "system"
         locale = resolveLocale(preference)
         catalog = Self.load(locale, from: directory)
         defaults.set(preference, forKey: "screenOrganizer.language")
@@ -52,17 +61,26 @@ final class Localization: ObservableObject {
         return preferredLanguages.compactMap(match).first ?? "en"
     }
 
+    func recognizedPreference(_ value: String) -> String? {
+        value == "system" ? "system" : match(value)
+    }
+
     private func match(_ value: String) -> String? {
-        let normalized = value.replacingOccurrences(of: "_", with: "-").lowercased()
-        guard normalized.range(of: "^[a-z]{2,8}(-[a-z0-9]{1,8})*$", options: .regularExpression) != nil else { return nil }
-        let parts = normalized.split(separator: "-").map(String.init)
+        func normalized(_ raw: String) -> String? {
+            guard let result = Self.canonicalize.call(withArguments: [raw]), result.isString else { return nil }
+            return result.toString().lowercased()
+        }
+        guard let tag = normalized(value) else { return nil }
+        if let exact = languages.first(where: { normalized($0.code) == tag }) { return exact.code }
+        let parts = tag.split(separator: "-").map(String.init)
+        let owners = languages.map { language in (language.code, (language.aliases + [language.code]).compactMap(normalized)) }
         var candidates: [String] = []
-        if parts.count > 1, parts[1] == "hans" || parts[1] == "hant" { candidates.append(parts[0] + "-" + parts[1]) }
+        if parts.first == "zh", parts.count > 1, ["hans", "hant"].contains(parts[1]) {
+            candidates.append("zh-" + parts[1])
+        }
         candidates += stride(from: parts.count, through: 1, by: -1).map { parts.prefix($0).joined(separator: "-") }
         for candidate in candidates {
-            if let language = languages.first(where: { ($0.aliases + [$0.code]).contains(where: { $0.lowercased() == candidate }) }) {
-                return language.code
-            }
+            if let owner = owners.first(where: { $0.1.contains(candidate) }) { return owner.0 }
         }
         return nil
     }

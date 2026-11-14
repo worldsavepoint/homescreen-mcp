@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// Stdio configuration for the engine included in this app bundle; read-only by default.
 struct MCPSetup {
@@ -29,11 +29,34 @@ struct MCPSetup {
         + (mode == .applyEnabled ? "\nHOMESCREEN_ALLOW_APPLY = \"1\"" : "")
     }
 
-    var vscodeJSON: String {
+    var editorJSON: String {
+        json(["servers": [MCPClientRegistration.serverID: server.merging(["type": "stdio"]) { _, value in value }]])
+    }
+
+    // Older callers used vscodeJSON for Copilot CLI's user configuration.
+    var vscodeJSON: String { copilotJSON }
+
+    var copilotJSON: String {
         var configuration = server
         configuration["type"] = "stdio"
         configuration["tools"] = ["*"]
         return json(["mcpServers": ["ios-homescreen-mcp": configuration]])
+    }
+
+    func text(format: String) -> String {
+        switch format {
+        case "toml": return codexTOML
+        case "vscode": return editorJSON
+        case "copilot": return copilotJSON
+        case "launch": return launchCommand
+        default: return cursorClaudeJSON
+        }
+    }
+
+    @MainActor @discardableResult
+    func copy(format: String, to pasteboard: NSPasteboard = .general) -> Bool {
+        pasteboard.clearContents()
+        return pasteboard.setString(text(format: format), forType: .string)
     }
 
     private var server: [String: Any] {

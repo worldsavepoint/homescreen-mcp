@@ -27,7 +27,7 @@ struct HomeScreenOrganizerApp: App {
             .environmentObject(localization)
             .environmentObject(consent)
             .frame(minWidth: 1000, minHeight: 680)
-            .onAppear { delegate.engine = engine }
+            .onAppear { delegate.engine = engine; delegate.setup = setup }
             .sheet(isPresented: $showSetup) {
                 MCPSetupView(model: setup, consent: consent)
                     .environmentObject(localization)
@@ -56,10 +56,11 @@ struct HomeScreenOrganizerApp: App {
                 Button(localization.t("mcp.openSetup")) { showSetup = true }.disabled(!consent.accepted)
                 Menu("MCP") {
                     let exports = MCPSetup(executablePath: Engine.executable.path)
-                    Button(localization.t("mcp.copyLaunch")) { copy(exports.launchCommand) }
-                    Button(localization.t("mcp.copyJSON")) { copy(exports.cursorClaudeJSON) }
-                    Button(localization.t("mcp.copyCodex")) { copy(exports.codexTOML) }
-                    Button(localization.t("mcp.copyVSCode")) { copy(exports.vscodeJSON) }
+                    Button(localization.t("mcp.copyLaunch")) { exports.copy(format: "launch") }
+                    Button(localization.t("mcp.copyJSON")) { exports.copy(format: "json") }
+                    Button(localization.t("mcp.copyCodex")) { exports.copy(format: "toml") }
+                    Button(localization.t("mcp.copyCopilot")) { exports.copy(format: "copilot") }
+                    Button(localization.t("mcp.copyVSCode")) { exports.copy(format: "vscode") }
                 }.disabled(!consent.accepted)
             }
             CommandGroup(replacing: .help) {
@@ -74,14 +75,25 @@ struct HomeScreenOrganizerApp: App {
         }
     }
 
-    private func copy(_ value: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
-    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var engine: Engine?
+    var setup: MCPSetupModel?
+    private var waitingForSetup = false
+    var terminationReply: @MainActor () -> Void = { NSApplication.shared.reply(toApplicationShouldTerminate: true) }
+
+    @MainActor func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if waitingForSetup { return .terminateLater }
+        guard let pending = setup?.prepareToQuit() else { return .terminateNow }
+        waitingForSetup = true
+        Task { @MainActor in
+            await pending.value
+            waitingForSetup = false
+            terminationReply()
+        }
+        return .terminateLater
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated { engine?.stop() }
@@ -239,7 +251,7 @@ struct WebView: NSViewRepresentable {
             switch action {
             case .openMCPSetup: openSetup()
             case .setLanguage(let preference):
-                guard preference == "system" || localization.languages.contains(where: { $0.code == preference }) else { return }
+                guard localization.recognizedPreference(preference) != nil else { return }
                 localization.setPreference(preference)
             }
         }

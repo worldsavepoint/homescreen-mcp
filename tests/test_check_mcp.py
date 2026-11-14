@@ -31,6 +31,9 @@ for line in sys.stdin:
             sys.exit(0)
         info = {"name": "wrong" if behavior == "name" else "ios-homescreen-mcp", "version": "1.2.0"}
         response = {"protocolVersion": "2025-11-25", "capabilities": {"tools": {}}, "serverInfo": info}
+        if behavior == "version": response["protocolVersion"] = "not-supported"
+        if behavior == "capability": response["capabilities"] = {}
+        if behavior == "info": info["version"] = False
     elif method == "notifications/initialized":
         continue
     elif method == "tools/list":
@@ -73,7 +76,7 @@ def test_real_server_initializes_and_discovers_without_device_operations(tmp_pat
     assert not (tmp_path / "unused data").exists()
 
 
-@pytest.mark.parametrize("behavior", ["name", "tools", "error", "eof"])
+@pytest.mark.parametrize("behavior", ["name", "tools", "error", "eof", "version", "capability", "info"])
 def test_invalid_server_fails_and_closes_process(tmp_path, behavior):
     result, _ = check(tmp_path, behavior)
     assert result.returncode != 0

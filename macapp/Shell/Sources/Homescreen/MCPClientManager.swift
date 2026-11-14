@@ -34,9 +34,9 @@ enum MCPClientAvailability: String, Sendable { case available, notFound, notExec
 enum MCPConfigurationState: String, Sendable { case configured, notConfigured, unknown }
 enum MCPConnectionState: String, Sendable { case connected, disconnected, unknown }
 enum MCPClientScope: String, Sendable { case user, other, unknown }
-enum MCPClientOperationCode: String, Sendable {
+enum MCPClientOperationCode: String, Error, Sendable {
     case success, notFound, notExecutable, launchFailed, timedOut, commandFailed, invalidResponse
-    case snapshotReadFailed, recoveryFailed
+    case snapshotReadFailed, recoveryFailed, unsupportedClient, remoteConflict, recoveryConflict, versionConflict, cancelled, operationBusy
 }
 enum MCPRegistrationRecovery: String, Sendable { case notNeeded, restored, failed }
 
@@ -53,6 +53,11 @@ struct MCPClientQuery: Sendable {
     let connection: MCPConnectionState
     var mode: MCPAccessMode? = nil
     var scope: MCPClientScope = .unknown
+    var userMode: MCPAccessMode? = nil
+    var userConfiguration: MCPConfigurationState = .unknown
+    var command: String? = nil
+    var arguments: [String]? = nil
+    var localEnabled = false
 }
 
 struct MCPClientRegistrationResult: Sendable {
@@ -71,7 +76,7 @@ struct MCPCommandResult: Sendable {
 }
 
 typealias MCPCommandRunner = (String, [String], [String: String], TimeInterval) async -> MCPCommandResult
-typealias MCPUserEntrySnapshotProvider = ([String: String], URL) throws -> String?
+typealias MCPEntryStoreFactory = (MCPClient, String, [String: String], URL, TimeInterval, @escaping MCPCommandRunner) -> MCPEntryStore
 
 /// Locates executables without invoking a login shell or evaluating paths as code.
 struct MCPExecutableLocator {
@@ -113,20 +118,25 @@ struct MCPClientManager {
     private let timeout: TimeInterval
     private let executableLocator: (MCPClient) -> String?
     private let runner: MCPCommandRunner
-    private let snapshotProvider: MCPUserEntrySnapshotProvider
+    private let storeFactory: MCPEntryStoreFactory
+    private let journalDirectory: URL
+    private let journalFactory: (URL, MCPClient) throws -> MCPRegistrationJournal
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment,
          homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
          timeout: TimeInterval = 15,
          executableLocator: ((MCPClient) -> String?)? = nil,
          runner: @escaping MCPCommandRunner = MCPProcessRunner.run,
-         snapshotProvider: @escaping MCPUserEntrySnapshotProvider = MCPClientManager.claudeUserEntry) {
+         journalFactory: @escaping (URL, MCPClient) throws -> MCPRegistrationJournal = MCPRegistrationJournal.init,
+         storeFactory: @escaping MCPEntryStoreFactory = { MCPEntryStore(client: $0, executable: $1, environment: $2, home: $3, timeout: $4, runner: $5) }) {
         self.environment = environment
         self.homeDirectory = homeDirectory
         self.timeout = max(0.01, timeout)
         self.executableLocator = executableLocator ?? MCPExecutableLocator(environment: environment, homeDirectory: homeDirectory).locate
         self.runner = runner
-        self.snapshotProvider = snapshotProvider
+        self.storeFactory = storeFactory
+        self.journalFactory = journalFactory
+        self.journalDirectory = homeDirectory.appendingPathComponent("Library/Application Support/homescreen-mcp/registration")
     }
 
     func detect(client: MCPClient, executablePath: String? = nil) async -> MCPClientDetection {
@@ -136,13 +146,30 @@ struct MCPClientManager {
         } ?? .notFound, executablePath: path)
     }
 
+    private func store(_ client: MCPClient, _ path: String) -> MCPEntryStore {
+        var env = environment
+        let directory = URL(fileURLWithPath: path).deletingLastPathComponent().path
+        env["PATH"] = ([directory] + (env["PATH"].map { [$0] } ?? [])).joined(separator: ":")
+        return storeFactory(client, path, env, homeDirectory, timeout, runner)
+    }
+
     func query(client: MCPClient, executablePath: String? = nil) async -> MCPClientQuery {
         let detection = await detect(client: client, executablePath: executablePath)
         guard detection.availability == .available, let path = detection.executablePath else {
             return queryFailure(client, detection.availability == .notFound ? .notFound : .notExecutable)
         }
+        let store = store(client, path)
+        var result = await effectiveQuery(store)
+        if result.code == .success, !Task.isCancelled, let saved = try? await store.read() {
+            annotate(&result, snapshot: saved)
+        }
+        return result
+    }
+
+    private func effectiveQuery(_ store: MCPEntryStore) async -> MCPClientQuery {
+        let client = store.client
         let arguments = ["mcp", "get", MCPClientRegistration.serverID] + (client == .codex ? ["--json"] : [])
-        let result = await runner(path, arguments, environment, timeout)
+        let result = await runner(store.executable, arguments, store.environment, timeout)
         if let failure = result.failure { return queryFailure(client, failure) }
         if result.exitStatus != 0 {
             let text = (result.stdout + result.stderr).lowercased()
@@ -155,12 +182,18 @@ struct MCPClientManager {
             guard let data = result.stdout.data(using: .utf8),
                   let entry = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   entry["name"] as? String == MCPClientRegistration.serverID,
-                  let transport = entry["transport"] as? [String: Any], transport["command"] is String else {
+                  let transport = entry["transport"] as? [String: Any],
+                  let kind = transport["type"] as? String,
+                  let enabled = entry["enabled"] as? NSNumber, CFGetTypeID(enabled) == CFBooleanGetTypeID() else {
                 return queryFailure(client, .invalidResponse)
             }
-            let env = transport["env"] as? [String: String] ?? [:]
-            return MCPClientQuery(client: client, code: .success, configuration: .configured,
-                connection: .unknown, mode: accessMode(env), scope: .user)
+            let local = kind == "stdio"
+            guard local ? transport["command"] is String : (["streamable_http", "sse"].contains(kind) && transport["url"] is String) else {
+                return queryFailure(client, .invalidResponse)
+            }
+            return MCPClientQuery(client: client, code: .success, configuration: .configured, connection: .unknown,
+                mode: local && enabled.boolValue ? accessMode(transport) : nil,
+                command: transport["command"] as? String, arguments: transport["args"] as? [String], localEnabled: local && enabled.boolValue)
         }
         let plainOutput = result.stdout.replacingOccurrences(of: "\u{1b}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
         let lines = plainOutput.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
@@ -173,178 +206,263 @@ struct MCPClientManager {
             status.contains("not connected") || status.contains("needs authentication") ||
             ["connection error", "✘ connection error"].contains(status) ? .disconnected :
             (["connected", "✓ connected", "✔ connected"].contains(status) ? .connected : .unknown)
-        let scope = lines.first(where: { $0.hasPrefix("Scope:") })?.lowercased() ?? ""
+        func field(_ key: String) -> String? {
+            lines.first(where: { $0.hasPrefix(key + ":") }).map { $0.dropFirst(key.count + 1).trimmingCharacters(in: .whitespaces) }
+        }
+        let label = field("Scope")?.lowercased().split(whereSeparator: { $0 == " " || $0 == "(" }).first
+        let scope: MCPClientScope = label == "user" ? .user : (label == "project" || label == "local" ? .other : .unknown)
         let env = Dictionary(lines.compactMap { line -> (String, String)? in
             let pair = line.split(separator: "=", maxSplits: 1).map(String.init)
             return pair.count == 2 && pair[0].hasPrefix("HOMESCREEN_") ? (pair[0], pair[1]) : nil
         }, uniquingKeysWith: { _, last in last })
         return MCPClientQuery(client: client, code: .success, configuration: .configured, connection: connection,
-            mode: accessMode(env), scope: scope.contains("user") ? .user : (scope.isEmpty ? .unknown : .other))
-    }
-
-    func register(client: MCPClient, executablePath: String? = nil, enginePath: String,
-                  mode: MCPAccessMode = .readOnly) async -> MCPClientRegistrationResult {
-        let detection = await detect(client: client, executablePath: executablePath)
-        guard detection.availability == .available, let path = detection.executablePath else {
-            return MCPClientRegistrationResult(client: client, mode: mode,
-                code: detection.availability == .notFound ? .notFound : .notExecutable, query: nil)
-        }
-        var snapshot: String?
-        if client == .claudeCode {
-            let previous = await query(client: client, executablePath: path)
-            guard previous.code == .success else {
-                return MCPClientRegistrationResult(client: client, mode: mode, code: previous.code, query: previous)
-            }
-            do { snapshot = try readUserEntrySnapshot() }
-            catch { return MCPClientRegistrationResult(client: client, mode: mode, code: .snapshotReadFailed, query: previous) }
-            if previous.configuration == .configured && previous.scope == .user && snapshot == nil {
-                return MCPClientRegistrationResult(client: client, mode: mode, code: .snapshotReadFailed, query: previous)
-            }
-            if let snapshot {
-                let removal = await runner(path, ["mcp", "remove", "--scope", "user", MCPClientRegistration.serverID], environment, timeout)
-                if let failure = operationFailure(removal) {
-                    let recovery = await restoreUserEntry(snapshot, path: path)
-                    return MCPClientRegistrationResult(client: client, mode: mode, code: recovery == .failed ? .recoveryFailed : failure,
-                        query: await query(client: client, executablePath: path), recovery: recovery)
-                }
-            }
-        }
-        let result = await runner(path, MCPClientRegistration.arguments(client: client, executablePath: enginePath, mode: mode), environment, timeout)
-        if let failure = operationFailure(result) {
-            var recovery: MCPRegistrationRecovery = .notNeeded
-            if let snapshot {
-                recovery = await restoreUserEntry(snapshot, path: path)
-            }
-            return MCPClientRegistrationResult(client: client, mode: mode,
-                code: recovery == .failed ? .recoveryFailed : failure,
-                query: await query(client: client, executablePath: path), recovery: recovery)
-        }
-        let verification = await query(client: client, executablePath: path)
-        var failure: MCPClientOperationCode? = verification.code == .success ?
-            (verification.configuration == .configured ? nil : .invalidResponse) : verification.code
-        if failure == nil && client == .claudeCode {
-            do {
-                if try !userEntryMatches(enginePath: enginePath, mode: mode) { failure = .invalidResponse }
-            } catch { failure = .snapshotReadFailed }
-        }
-        if let failure {
-            var recovery: MCPRegistrationRecovery = .notNeeded
-            if let snapshot { recovery = await restoreUserEntry(snapshot, path: path) }
-            return MCPClientRegistrationResult(client: client, mode: mode,
-                code: recovery == .failed ? .recoveryFailed : failure,
-                query: await query(client: client, executablePath: path), recovery: recovery)
-        }
-        return MCPClientRegistrationResult(client: client, mode: mode,
-            code: .success, query: verification)
-    }
-
-    /// Reads only the user-scoped project entry; CLI commands perform all mutations.
-    static func claudeUserEntry(environment: [String: String], homeDirectory: URL) throws -> String? {
-        let override = environment["CLAUDE_CONFIG_DIR"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
-        let legacy = (override ?? homeDirectory.appendingPathComponent(".claude")).appendingPathComponent(".config.json")
-        let filename = environment["CLAUDE_CODE_CUSTOM_OAUTH_URL"].map { $0.isEmpty ? ".claude.json" : ".claude-custom-oauth.json" } ?? ".claude.json"
-        let url = FileManager.default.fileExists(atPath: legacy.path) ? legacy : (override ?? homeDirectory).appendingPathComponent(filename)
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        let root = try JSONSerialization.jsonObject(with: Data(contentsOf: url))
-        guard let dictionary = root as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
-        guard let value = (dictionary["mcpServers"] as? [String: Any])?[MCPClientRegistration.serverID] else { return nil }
-        guard let entry = value as? [String: Any], JSONSerialization.isValidJSONObject(entry) else { throw CocoaError(.fileReadCorruptFile) }
-        return String(decoding: try JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
-    }
-
-    private func readUserEntrySnapshot() throws -> String? {
-        guard let snapshot = try snapshotProvider(environment, homeDirectory) else { return nil }
-        guard let data = snapshot.data(using: .utf8),
-              let entry = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
-        return String(decoding: try JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
-    }
-
-    private func userEntryMatches(enginePath: String, mode: MCPAccessMode) throws -> Bool {
-        guard let snapshot = try readUserEntrySnapshot(), let data = snapshot.data(using: .utf8),
-              let entry = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              entry["command"] as? String == enginePath, entry["args"] as? [String] == ["mcp"],
-              let environment = entry["env"] as? [String: String] else { return false }
-        return accessMode(environment) == mode
-    }
-
-    private func restoreUserEntry(_ snapshot: String, path: String) async -> MCPRegistrationRecovery {
-        do {
-            let current = try readUserEntrySnapshot()
-            if current == snapshot { return .restored }
-            if current != nil {
-                let removal = await runner(path, ["mcp", "remove", "--scope", "user", MCPClientRegistration.serverID], environment, timeout)
-                guard operationFailure(removal) == nil else { return .failed }
-            }
-            let restore = await runner(path, ["mcp", "add-json", "--scope", "user", MCPClientRegistration.serverID, snapshot], environment, timeout)
-            guard operationFailure(restore) == nil, try readUserEntrySnapshot() == snapshot else { return .failed }
-            return .restored
-        } catch { return .failed }
+            mode: accessMode(["env": env]), scope: scope, command: field("Command"),
+            arguments: field("Args")?.split(separator: " ").map(String.init),
+            localEnabled: field("Command") != nil && ["stdio", nil].contains(field("Type")?.lowercased()))
     }
 
     private func queryFailure(_ client: MCPClient, _ code: MCPClientOperationCode) -> MCPClientQuery {
         MCPClientQuery(client: client, code: code, configuration: .unknown, connection: .unknown)
     }
 
-    private func operationFailure(_ result: MCPCommandResult) -> MCPClientOperationCode? {
-        result.failure ?? (result.exitStatus == 0 ? nil : .commandFailed)
+    private func forwardedOptions(_ value: Any) throws -> [(name: String, option: Any)] {
+        guard let options = value as? [Any] else { throw MCPClientOperationCode.snapshotReadFailed }
+        return try options.map { option in
+            guard let name = (option as? String) ?? (option as? [String: Any])?["name"] as? String,
+                  !name.isEmpty else { throw MCPClientOperationCode.snapshotReadFailed }
+            return (name, option)
+        }
     }
 
-    private func accessMode(_ environment: [String: String]) -> MCPAccessMode? {
-        if environment["HOMESCREEN_READ_ONLY"] == "1" { return .readOnly }
-        if environment["HOMESCREEN_READ_ONLY"] == "0" && environment["HOMESCREEN_ALLOW_APPLY"] == "1" { return .applyEnabled }
+    private let gateNames: Set<String> = ["HOMESCREEN_READ_ONLY", "HOMESCREEN_ALLOW_APPLY"]
+
+    private func accessMode(_ entry: [String: Any]) -> MCPAccessMode? {
+        guard let env = entry["env"] as? [String: String] else { return nil }
+        if let forwarded = entry["env_vars"], !(forwarded is NSNull) {
+            guard let options = try? forwardedOptions(forwarded), options.allSatisfy({ !gateNames.contains($0.name) }) else { return nil }
+        }
+        if env["HOMESCREEN_READ_ONLY"] == "1", [nil, "0"].contains(env["HOMESCREEN_ALLOW_APPLY"]) { return .readOnly }
+        if env["HOMESCREEN_READ_ONLY"] == "0", env["HOMESCREEN_ALLOW_APPLY"] == "1" { return .applyEnabled }
         return nil
     }
-}
 
-enum MCPProcessRunner {
-    static func run(executablePath: String, arguments: [String], environment: [String: String], timeout: TimeInterval) async -> MCPCommandResult {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: runBlocking(executablePath, arguments, environment, timeout))
-            }
+    private func localMode(_ entry: [String: Any]) -> MCPAccessMode? {
+        if let enabled = entry["enabled"] {
+            guard let number = enabled as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID(), number.boolValue else { return nil }
+        }
+        guard entry["url"] == nil, entry["command"] is String,
+              entry["type"] == nil || entry["type"] as? String == "stdio" else { return nil }
+        return accessMode(entry)
+    }
+
+    private func annotate(_ query: inout MCPClientQuery, snapshot: MCPUserSnapshot) {
+        let object = try? snapshot.entry.object()
+        query.userConfiguration = object == nil ? .notConfigured : .configured
+        query.userMode = object.flatMap(localMode)
+        if query.client == .codex {
+            if snapshot.scope == .other { query.scope = .other }
+            else if let entry = object, query.localEnabled, query.command == entry["command"] as? String,
+                    query.arguments == entry["args"] as? [String], query.mode == query.userMode { query.scope = snapshot.scope }
         }
     }
 
-    private static func runBlocking(_ path: String, _ arguments: [String], _ environment: [String: String], _ timeout: TimeInterval) -> MCPCommandResult {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("mcp-client-\(UUID().uuidString)")
+    private func isRemote(_ entry: MCPOwnedEntry) throws -> Bool {
+        guard let object = try entry.object() else { return false }
+        return object["url"] != nil || object["command"] as? String == nil ||
+            (object["type"] != nil && object["type"] as? String != "stdio")
+    }
+
+    private func mergedEntry(prior: MCPOwnedEntry, enginePath: String, gates: [String: String]) throws -> MCPOwnedEntry {
+        var object = try prior.object() ?? [:]
+        if object["url"] != nil {
+            for field in ["url", "http_headers", "env_http_headers", "bearer_token_env_var", "http_headers_helper", "scopes", "oauth_resource", "oauth", "auth"] {
+                object.removeValue(forKey: field)
+            }
+        }
+        if object["type"] != nil { object["type"] = "stdio" }
+        if object["enabled"] != nil { object["enabled"] = true }
+        object["command"] = enginePath
+        object["args"] = ["mcp"]
+        var env: [String: String] = [:]
+        if let existing = object["env"] {
+            guard let values = existing as? [String: String] else { throw MCPClientOperationCode.snapshotReadFailed }
+            env = values
+        }
+        env.removeValue(forKey: "HOMESCREEN_ALLOW_APPLY")
+        env.merge(gates) { _, new in new }
+        object["env"] = env
+        if let forwarded = object["env_vars"] {
+            object["env_vars"] = try forwardedOptions(forwarded).filter { !gateNames.contains($0.name) }.map(\.option)
+        }
+        return try MCPOwnedEntry(object)
+    }
+
+    private func matches(_ current: MCPOwnedEntry, intended: MCPOwnedEntry, client: MCPClient) throws -> Bool {
+        if current == intended { return true }
+        guard client == .claudeCode, var value = try intended.object(), value["type"] == nil else { return false }
+        value["type"] = "stdio"
+        return try current == MCPOwnedEntry(value)
+    }
+
+    private func restore(_ record: inout MCPRegistrationRecord, journal: MCPRegistrationJournal, store: MCPEntryStore) async throws {
+        if record.phase == .committed { try journal.clear(); return }
+        let current = try await store.read()
+        guard current.file == record.file else { throw MCPClientOperationCode.recoveryConflict }
+        if current.entry == record.prior { try journal.clear(); return }
+        let permitted: Bool
+        switch record.phase {
+        case .prepared, .committed: permitted = false
+        case .removing: permitted = current.entry == .absent
+        case .adding:
+            permitted = try (current.entry == .absent && store.client == .claudeCode) ||
+                matches(current.entry, intended: record.intended, client: store.client)
+        case .observed, .restoring: permitted = current.entry == record.observed ||
+                (record.phase == .restoring && store.client == .claudeCode && current.entry == .absent)
+        case .restoreRemoved: permitted = current.entry == .absent
+        }
+        guard permitted else { throw MCPClientOperationCode.recoveryConflict }
+        record.observed = current.entry
+        record.phase = .restoring
+        try journal.save(record)
+        if store.client == .codex {
+            try await store.replaceCodex(current, with: record.prior)
+        } else {
+            if current.entry != .absent {
+                guard try !isRemote(current.entry) else { throw MCPClientOperationCode.remoteConflict }
+                try await store.command(["mcp", "remove", "--scope", "user", MCPClientRegistration.serverID])
+            }
+            let removed = try await store.read()
+            guard removed.file == record.file, removed.entry == .absent else { throw MCPClientOperationCode.recoveryConflict }
+            record.phase = .restoreRemoved
+            try journal.save(record)
+            if case .present(let json) = record.prior {
+                try await store.command(["mcp", "add-json", "--scope", "user", MCPClientRegistration.serverID, json])
+            }
+        }
+        let after = try await store.read()
+        guard after.file == record.file, after.entry == record.prior else { throw MCPClientOperationCode.recoveryFailed }
+        try journal.clear()
+    }
+
+    func hasPending(_ client: MCPClient) -> Bool {
+        var info = stat()
+        return lstat(journalDirectory.appendingPathComponent(client.rawValue + ".json").path, &info) == 0 || errno != ENOENT
+    }
+
+    func recover(client: MCPClient, executablePath: String?) async -> MCPClientRegistrationResult? {
+        guard hasPending(client) else { return nil }
+        let detection = await detect(client: client, executablePath: executablePath)
+        guard detection.availability == .available, let path = detection.executablePath else {
+            return MCPClientRegistrationResult(client: client, mode: .readOnly, code: .recoveryFailed, query: nil, recovery: .failed)
+        }
+        let store = store(client, path)
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            defer { try? FileManager.default.removeItem(at: directory) }
-            let stdoutURL = directory.appendingPathComponent("stdout")
-            let stderrURL = directory.appendingPathComponent("stderr")
-            _ = FileManager.default.createFile(atPath: stdoutURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
-            _ = FileManager.default.createFile(atPath: stderrURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
-            let stdout = try FileHandle(forWritingTo: stdoutURL)
-            let stderr = try FileHandle(forWritingTo: stderrURL)
-            defer { try? stdout.close(); try? stderr.close() }
-            let process = Process()
-            let finished = DispatchSemaphore(value: 0)
-            process.executableURL = URL(fileURLWithPath: path)
-            process.arguments = arguments
-            process.environment = environment
-            process.standardInput = FileHandle.nullDevice
-            process.standardOutput = stdout
-            process.standardError = stderr
-            process.terminationHandler = { _ in finished.signal() }
-            try process.run()
-            let timedOut = finished.wait(timeout: .now() + max(0.01, timeout)) == .timedOut
-            MCPSubprocess.stop(process, finished: finished)
-            return MCPCommandResult(exitStatus: process.terminationStatus,
-                stdout: String(decoding: (try? Data(contentsOf: stdoutURL)) ?? Data(), as: UTF8.self),
-                stderr: String(decoding: (try? Data(contentsOf: stderrURL)) ?? Data(), as: UTF8.self),
-                failure: timedOut ? .timedOut : nil)
-        } catch { return MCPCommandResult(exitStatus: -1, failure: .launchFailed) }
-    }
-}
-
-enum MCPSubprocess {
-    static func stop(_ process: Process, finished: DispatchSemaphore) {
-        if process.isRunning {
-            process.terminate()
-            if finished.wait(timeout: .now() + 0.2) == .timedOut && process.isRunning {
-                kill(process.processIdentifier, SIGKILL)
-            }
+            let journal = try journalFactory(journalDirectory, client)
+            guard var record = try journal.read() else { return nil }
+            try await restore(&record, journal: journal, store: store)
+            return nil
+        } catch {
+            return MCPClientRegistrationResult(client: client, mode: .readOnly, code: error as? MCPClientOperationCode ?? .recoveryFailed, query: nil, recovery: .failed)
         }
-        process.waitUntilExit()
+    }
+
+    func register(client: MCPClient, executablePath: String? = nil, enginePath: String,
+                  mode: MCPAccessMode = .readOnly) async -> MCPClientRegistrationResult {
+        func result(_ code: MCPClientOperationCode, _ query: MCPClientQuery? = nil,
+                    _ recovery: MCPRegistrationRecovery = .notNeeded) -> MCPClientRegistrationResult {
+            MCPClientRegistrationResult(client: client, mode: mode, code: code, query: query, recovery: recovery)
+        }
+        guard enginePath.hasPrefix("/") else { return result(.invalidResponse) }
+        let detection = await detect(client: client, executablePath: executablePath)
+        guard detection.availability == .available, let path = detection.executablePath else {
+            return result(detection.availability == .notFound ? .notFound : .notExecutable)
+        }
+        let store = store(client, path)
+        do {
+            let journal = try journalFactory(journalDirectory, client)
+            if var pending = try journal.read() {
+                do { try await restore(&pending, journal: journal, store: store) }
+                catch { return result(error as? MCPClientOperationCode ?? .recoveryFailed, nil, .failed) }
+            }
+            try await store.preflight()
+            let snapshot = try await store.read()
+            if client == .claudeCode {
+                guard try !isRemote(snapshot.entry) else { return result(.remoteConflict) }
+                let previous = await effectiveQuery(store)
+                guard previous.code == .success else { return result(previous.code, previous) }
+                if previous.configuration == .configured, previous.scope == .user, snapshot.entry == .absent { return result(.snapshotReadFailed, previous) }
+            }
+            let env = mode == .readOnly ? ["HOMESCREEN_READ_ONLY": "1"] : ["HOMESCREEN_READ_ONLY": "0", "HOMESCREEN_ALLOW_APPLY": "1"]
+            let base = try MCPOwnedEntry(["command": enginePath, "args": ["mcp"], "env": env])
+            let intended = try mergedEntry(prior: snapshot.entry, enginePath: enginePath, gates: env)
+            var record = MCPRegistrationRecord(client: client.rawValue, scope: "user", server: MCPClientRegistration.serverID,
+                                               file: snapshot.file, prior: snapshot.entry, intended: intended)
+            try journal.save(record)
+            var awaitingPostimage = false
+            do {
+                if client == .claudeCode && snapshot.entry != .absent {
+                    let beforeRemove = try await store.read()
+                    guard beforeRemove.file == snapshot.file, beforeRemove.entry == snapshot.entry else {
+                        throw MCPClientOperationCode.recoveryConflict
+                    }
+                    record.phase = .removing
+                    try journal.save(record)
+                    awaitingPostimage = true
+                    try await store.command(["mcp", "remove", "--scope", "user", MCPClientRegistration.serverID])
+                    awaitingPostimage = false
+                }
+                let before = try await store.read()
+                guard before.file == snapshot.file, before.entry == (client == .claudeCode ? .absent : snapshot.entry) else {
+                    throw MCPClientOperationCode.recoveryConflict
+                }
+                record.phase = .adding
+                try journal.save(record)
+                awaitingPostimage = true
+                if intended == base {
+                    try await store.command(MCPClientRegistration.arguments(client: client, executablePath: enginePath, mode: mode))
+                } else if client == .codex {
+                    try await store.replaceCodex(before, with: intended)
+                } else if case .present(let json) = intended {
+                    try await store.command(["mcp", "add-json", "--scope", "user", MCPClientRegistration.serverID, json])
+                }
+                let written = try await store.read()
+                awaitingPostimage = false
+                guard written.file == snapshot.file else { throw MCPClientOperationCode.recoveryConflict }
+                record.observed = written.entry
+                record.phase = .observed
+                try journal.save(record)
+                guard try matches(written.entry, intended: intended, client: client), let raw = try written.entry.object(), localMode(raw) == mode, raw["command"] as? String == enginePath,
+                      raw["args"] as? [String] == ["mcp"] else { throw MCPClientOperationCode.invalidResponse }
+                var verification = await effectiveQuery(store)
+                annotate(&verification, snapshot: written)
+                guard verification.code == .success else { throw verification.code }
+                guard verification.configuration == .configured, verification.scope == .other ||
+                        (verification.localEnabled && verification.command == enginePath && verification.arguments == ["mcp"] &&
+                         verification.mode == mode) else { throw MCPClientOperationCode.invalidResponse }
+                let final = try await store.read()
+                guard final.file == written.file, final.entry == written.entry else { throw MCPClientOperationCode.recoveryConflict }
+                var commit = record
+                commit.phase = .committed
+                try journal.save(commit)
+                record = commit
+                try journal.clear()
+                return result(.success, verification)
+            } catch {
+                let failure = error as? MCPClientOperationCode ?? .snapshotReadFailed
+                do {
+                    if awaitingPostimage, failure != .recoveryConflict {
+                        let post = try await store.read()
+                        guard post.file == record.file else { throw MCPClientOperationCode.recoveryConflict }
+                        record.observed = post.entry
+                        record.phase = .observed
+                        try journal.save(record)
+                    }
+                    try await restore(&record, journal: journal, store: store)
+                } catch {
+                    return result(failure, await query(client: client, executablePath: path), .failed)
+                }
+                return result(failure, await query(client: client, executablePath: path), .restored)
+            }
+        } catch { return result(error as? MCPClientOperationCode ?? .snapshotReadFailed) }
     }
 }

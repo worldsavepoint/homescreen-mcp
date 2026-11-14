@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -36,6 +37,26 @@ final class TemporaryPreferences: LanguagePreferences {
   try! JSONEncoder().encode([key:value as! String]).write(to:path)
  }
 }
+@MainActor func accepted() -> LaunchConsent {
+ let c = LaunchConsent()
+ c.observeEnd(CGRect(x:0,y:20,width:20,height:2),viewport:CGSize(width:600,height:300))
+ c.setAgreed(true); assert(c.accept())
+ return c
+}
+final class TestEntry {
+ var entry = MCPOwnedEntry.absent
+ func store(client: MCPClient, path: String, env: [String:String], home: URL, timeout: TimeInterval, runner: @escaping MCPCommandRunner) -> MCPEntryStore {
+  MCPEntryStore(client:client,executable:path,environment:env,home:home,timeout:timeout,runner:runner,
+    readOverride:{ MCPUserSnapshot(file:home.appendingPathComponent("fixture").path,entry:self.entry) },preflightOverride:{})
+ }
+}
+actor Gate {
+ var started = false
+ var release: CheckedContinuation<Void,Never>?
+ func hold() async { await withCheckedContinuation { release = $0; started = true } }
+ func waitForStart() async { while !started { await Task.yield() } }
+ func resume() { release?.resume(); release = nil }
+}
 @main struct Harness {
  @MainActor static func main() async throws {
   let directory = URL(fileURLWithPath: CommandLine.arguments[2])
@@ -47,6 +68,18 @@ final class TemporaryPreferences: LanguagePreferences {
    assert(l.t("app.name") == "螢幕整理")
    let cases = ["zh_Hant_CN":"zh-Hant", "zh-Hans-TW":"zh-Hans", "zh-SG":"zh-Hans", "zh-x-hant":"zh-Hans", "fr-CA":"fr", "pt-BR":"pt", "xx":"en", "bad--code":"en"]
    for (input, expected) in cases { assert(l.resolveLocale(input) == expected, input) }
+   for (value, expected) in ["fra":"fr","fre":"fr","spa":"es","zh-TW":"zh-Hant","zh-Hant-HK":"zh-Hant-HK","gsw_CH":"de","de-1901":"de-1901","sh":"sr-Latn"] {
+    l.setPreference(value); assert(l.preference == expected, value)
+    assert(defaults.string(forKey:"screenOrganizer.language") == expected)
+   }
+   l.setPreference("zh-Hant-HK"); assert(l.t("common.cancel") == "Regional cancel")
+   l.setPreference("zh-TW")
+   let reopened = Localization(catalogDirectory:directory,defaults:defaults,preferredLanguages:["en"])
+   assert(reopened.locale == "zh-Hant" && reopened.preference == "zh-Hant")
+   defaults.set("zh_TW",forKey:"screenOrganizer.language")
+   let fromAlias = Localization(catalogDirectory:directory,defaults:defaults,preferredLanguages:["en"])
+   assert(fromAlias.preference == "zh-Hant")
+   assert(l.recognizedPreference("en-a-foo-a-bar") == nil)
    l.setPreference("fr")
    assert(l.t("common.cancel") == "Annuler")
    assert(l.t("app.name") == "Screen Organizer")
@@ -55,6 +88,27 @@ final class TemporaryPreferences: LanguagePreferences {
    assert(defaults.string(forKey: "screenOrganizer.language") == "fr")
    l.setPreference("unapproved")
    assert(l.preference == "system" && l.locale == "zh-Hant")
+  case "japanese": assert(l.locale == "ja" && l.t("common.cancel") == "キャンセル")
+  case "contributor": assert(l.languages.contains { $0.code == l.locale })
+  case "exports":
+   let engine = "/Applications/Fixture 引用.app/engine"
+   for mode in [MCPAccessMode.readOnly,.applyEnabled] {
+    let setup = MCPSetup(executablePath:engine,mode:mode)
+    for (format,root,tools) in [("vscode","servers",false),("copilot","mcpServers",true)] {
+     let board = NSPasteboard.withUniqueName()
+     assert(setup.copy(format:format,to:board))
+     let text = board.string(forType:.string)!
+     board.releaseGlobally()
+     let payload = try JSONSerialization.jsonObject(with:Data(text.utf8)) as! [String:[String:[String:Any]]]
+     assert(Array(payload.keys) == [root])
+     let entry = payload[root]!["ios-homescreen-mcp"]!
+     assert(entry["type"] as? String == "stdio" && entry["command"] as? String == engine)
+     assert(entry["args"] as? [String] == ["mcp"])
+     assert(tools ? entry["tools"] as? [String] == ["*"] : entry["tools"] == nil)
+     let gates = mode == .readOnly ? ["HOMESCREEN_READ_ONLY":"1"] : ["HOMESCREEN_READ_ONLY":"0","HOMESCREEN_ALLOW_APPLY":"1"]
+     assert(entry["env"] as? [String:String] == gates)
+    }
+   }
   case "fallback":
    l.setPreference("fr")
    assert(l.locale == "fr" && l.t("common.cancel") == "Cancel")
@@ -128,6 +182,12 @@ final class TemporaryPreferences: LanguagePreferences {
    _ = try await web.evaluateJavaScript("window.webkit.messageHandlers.screenOrganizer.postMessage({action:'setLanguage',preference:'de'}); true")
    try await Task.sleep(nanoseconds:100_000_000)
    assert(l.preference == "de")
+   for (input,want) in [("zh_TW","zh-Hant"),("en-a-foo-a-bar","zh-Hant"),("de","de")] {
+    _ = try await web.callAsyncJavaScript("window.webkit.messageHandlers.screenOrganizer.postMessage({action:'setLanguage',preference:value});return true",
+        arguments:["value":input],in:nil,in:.page)
+    for _ in 0..<100 where l.preference != want { try await Task.sleep(nanoseconds:10_000_000) }
+    assert(l.preference == want)
+   }
    l.setPreference("fr"); coordinator.synchronizeLanguage(web)
    try await Task.sleep(nanoseconds:100_000_000)
    l.setPreference("en"); coordinator.synchronizeLanguage(web)
@@ -143,18 +203,23 @@ final class TemporaryPreferences: LanguagePreferences {
    var queryFailure: MCPClientOperationCode?
    var addFailure = false
    var calledPaths: [String] = []
+   let storage = TestEntry()
    let manager = MCPClientManager(environment: [:], homeDirectory: directory, executableLocator: { _ in executable }, runner: { path, args, _, _ in
     calledPaths.append(path)
     if args[1] == "get" {
      if let failure = queryFailure { return MCPCommandResult(exitStatus:1,failure:failure) }
-     let response: [String:Any] = ["name":"ios-homescreen-mcp","transport":["command":executable,"args":["mcp"],"env":["HOMESCREEN_READ_ONLY":"1"]]]
+     let response: [String:Any] = ["name":"ios-homescreen-mcp","enabled":true,"transport":["type":"stdio","command":executable,"args":["mcp"],"env":["HOMESCREEN_READ_ONLY":"1"]]]
      return MCPCommandResult(exitStatus:0,stdout:String(decoding:try! JSONSerialization.data(withJSONObject:response),as:UTF8.self))
     }
+    if !addFailure {
+     storage.entry = try! MCPOwnedEntry(["command":executable,"args":["mcp"],"env":["HOMESCREEN_READ_ONLY":"1"]])
+    }
     return MCPCommandResult(exitStatus:addFailure ? 1 : 0)
-   })
+   },storeFactory:storage.store)
    let model = MCPSetupModel(manager:manager,enginePath:executable)
    let c = LaunchConsent()
    c.observeEnd(CGRect(x:0,y:20,width:20,height:2),viewport:CGSize(width:600,height:300)); c.setAgreed(true); assert(c.accept())
+   assert(model.installationKey(for:.codex) == "common.unknown")
    for failure in [MCPClientOperationCode.timedOut, .commandFailed] {
     queryFailure = nil
     await model.register(.codex,consent:c)
@@ -176,7 +241,7 @@ final class TemporaryPreferences: LanguagePreferences {
    assert(model.registrations[.codex]?.code == .commandFailed)
    assert(model.queries[.codex]?.code == .success)
    assert(model.feedback(for:.codex)?.primaryKey == "mcp.operationFailed")
-   assert(model.feedback(for:.codex)?.details == "commandFailed · notNeeded")
+   assert(model.feedback(for:.codex)?.details == "commandFailed · restored")
    await model.refresh(consent:c)
    assert(model.registrations[.codex] == nil && model.queries[.codex]?.configuration == .configured)
    assert(model.feedback(for:.codex) == nil)
@@ -186,6 +251,7 @@ final class TemporaryPreferences: LanguagePreferences {
    let selected = executable + "-selected"
    await model.choose(selected,for:.codex,consent:c)
    assert(calledPaths.contains(selected))
+   assert(model.installationKey(for:.codex) == "mcp.installed")
    assert(model.detections[.codex]?.executablePath == selected)
    assert(model.registrations[.codex] == nil && model.queries[.codex]?.code == .timedOut)
    assert(model.feedback(for:.codex)?.primaryKey == "mcp.timeout" && model.feedback(for:.codex)?.details == "timedOut")
@@ -194,6 +260,12 @@ final class TemporaryPreferences: LanguagePreferences {
    assert(model.queries[.codex]?.configuration == .configured && model.queries[.codex]?.connection == .unknown)
    assert(model.checkResult == nil)
    assert(model.feedback(for:.codex) == nil)
+   await model.choose(directory.path,for:.codex,consent:c)
+   assert(model.installationKey(for:.codex) == "mcp.notExecutable")
+   let missingManager = MCPClientManager(environment:[:],homeDirectory:directory,executableLocator:{_ in nil})
+   let missing = MCPSetupModel(manager:missingManager,enginePath:executable)
+   await missing.refresh(consent:c)
+   assert(missing.installationKey(for:.codex) == "mcp.notInstalled")
   case "recovery":
    let executable = CommandLine.arguments[3]
    for recoverySucceeds in [true, false] {
@@ -209,51 +281,95 @@ final class TemporaryPreferences: LanguagePreferences {
       return MCPCommandResult(exitStatus:recoverySucceeds ? 0 : 1)
      default: return MCPCommandResult(exitStatus:1,failure:.timedOut)
      }
-    },snapshotProvider:{ _,_ in snapshot })
+    },storeFactory:{ client,path,env,home,timeout,runner in
+     MCPEntryStore(client:client,executable:path,environment:env,home:home,timeout:timeout,runner:runner,readOverride:{
+      let entry = try snapshot.map { try JSONSerialization.jsonObject(with:Data($0.utf8)) }
+      return try MCPUserSnapshot(file:home.appendingPathComponent("fixture").path,entry:MCPOwnedEntry(entry))
+     })
+    })
     let model = MCPSetupModel(manager:manager,enginePath:executable)
     let c = LaunchConsent()
     c.observeEnd(CGRect(x:0,y:20,width:20,height:2),viewport:CGSize(width:600,height:300)); c.setAgreed(true); assert(c.accept())
     await model.register(.claudeCode,consent:c)
     let feedback = model.feedback(for:.claudeCode)!
-    assert(feedback.primaryKey == (recoverySucceeds ? "mcp.timeout" : "mcp.recoveryFailed"))
+    assert(feedback.primaryKey == "mcp.timeout")
     assert(feedback.recoveryKey == (recoverySucceeds ? "mcp.restored" : "mcp.recoveryFailed"))
-    assert(feedback.details == (recoverySucceeds ? "timedOut · restored" : "recoveryFailed · failed"))
+    assert(feedback.details == (recoverySucceeds ? "timedOut · restored" : "timedOut · failed"))
     await model.refresh(consent:c)
-    assert(model.registrations[.claudeCode] == nil && model.feedback(for:.claudeCode) == nil)
+    if recoverySucceeds { assert(model.registrations[.claudeCode] == nil && model.feedback(for:.claudeCode) == nil) }
+    else { assert(model.registrations[.claudeCode]?.recovery == .failed && model.feedback(for:.claudeCode)?.recoveryKey == "mcp.recoveryFailed") }
     assert(model.checkResult == nil)
    }
   case "panel":
    let executable = CommandLine.arguments[3]
    let marker = CommandLine.arguments[4]
    var calls: [[String]] = []
+   let gate = Gate()
+   let storage = TestEntry()
    let manager = MCPClientManager(environment: [:], homeDirectory: directory, executableLocator: { _ in executable }, runner: { _, args, _, _ in
     calls.append(args)
-    try? await Task.sleep(nanoseconds:100_000_000)
+    if args[1] == "add" {
+     await gate.hold()
+     storage.entry = try! MCPOwnedEntry(["command":executable,"args":["mcp"],"env":["HOMESCREEN_READ_ONLY":"1"]])
+    }
     if args[1] == "get" {
-     let response: [String:Any] = ["name":"ios-homescreen-mcp","transport":["command":executable,"args":["mcp"],"env":["HOMESCREEN_READ_ONLY":"1"]]]
+     let response: [String:Any] = ["name":"ios-homescreen-mcp","enabled":true,"transport":["type":"stdio","command":executable,"args":["mcp"],"env":["HOMESCREEN_READ_ONLY":"1"]]]
      return MCPCommandResult(exitStatus:0,stdout:String(decoding:try! JSONSerialization.data(withJSONObject:response),as:UTF8.self))
     }
     return MCPCommandResult(exitStatus:0)
-   })
-   let model = MCPSetupModel(manager:manager,serviceCheck:MCPServiceCheck(timeout:1,environment:["MARKER":marker]),enginePath:executable)
+   },storeFactory:storage.store)
+   let model = MCPSetupModel(manager:manager,serviceCheck:MCPServiceCheck(timeout:10,environment:["MARKER":marker]),enginePath:executable)
    let c = LaunchConsent()
    await model.refresh(consent:c); await model.register(.codex,consent:c); await model.check(consent:c)
    assert(calls.isEmpty && model.checkResult == nil && !FileManager.default.fileExists(atPath:marker))
    c.observeEnd(CGRect(x:0,y:20,width:20,height:2),viewport:CGSize(width:600,height:300))
    c.setAgreed(true); assert(c.accept())
    let first = Task { await model.register(.codex,consent:c) }
-   try await Task.sleep(nanoseconds:20_000_000)
+   await gate.waitForStart()
    assert(model.busy)
+   model.dismissPanel()
+   let delegate = AppDelegate()
+   delegate.setup = model
+   var replies = 0
+   delegate.terminationReply = { replies += 1 }
+   assert(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
+   assert(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
+   assert(replies == 0)
    await model.register(.codex,consent:c)
    await model.check(consent:c)
+   await gate.resume()
    await first.value
+   while replies == 0 { await Task.yield() }; assert(replies == 1)
    assert(calls.filter { $0[1] == "add" }.count == 1)
    assert(!model.busy && model.registrations[.codex]?.code == .success)
    assert(model.queries[.codex]?.configuration == .configured && model.queries[.codex]?.connection == .unknown)
    assert(model.checkResult == nil)
    await model.check(consent:c)
-   assert(model.checkResult != nil && FileManager.default.fileExists(atPath:marker))
+   assert(model.checkResult?.code == .passed && FileManager.default.fileExists(atPath:marker), String(describing:model.checkResult?.code))
    assert(model.queries[.codex]?.connection == .unknown)
+  case "cancelInspection":
+   let executable = CommandLine.arguments[3]
+   let marker = CommandLine.arguments[4]
+   let manager = MCPClientManager(environment:["MARKER":marker],homeDirectory:directory,timeout:20,executableLocator:{ _ in executable })
+   let model = MCPSetupModel(manager:manager,serviceCheck:MCPServiceCheck(timeout:20,environment:["MARKER":marker]),enginePath:executable)
+   let c = accepted()
+   for action in ["refresh","check"] {
+    let job = Task { if action == "refresh" { await model.refresh(consent:c) } else { await model.check(consent:c) } }
+    while !FileManager.default.fileExists(atPath:marker) { await Task.yield() }
+    model.dismissPanel()
+    await job.value
+    assert(!model.busy && model.checkResult == nil && model.detections[.claudeCode] == nil)
+    let log = try String(contentsOfFile:marker).components(separatedBy:"|")
+    assert(kill(Int32(log[0])!,0) < 0 && errno == ESRCH)
+    if log.count == 2 { assert(!FileManager.default.fileExists(atPath:log[1])) }
+    try FileManager.default.removeItem(atPath:marker)
+   }
+   let token = MCPChildCancellation()
+   token.cancel()
+   let child = Process()
+   child.executableURL = URL(fileURLWithPath:executable); child.environment = ["MARKER":marker]
+   do { try token.launch(child); assertionFailure("cancelled child started") } catch MCPClientOperationCode.cancelled {}
+   assert(!FileManager.default.fileExists(atPath:marker))
   case "engine":
    let executable = URL(fileURLWithPath: CommandLine.arguments[3])
    let marker = CommandLine.arguments[4]
@@ -289,13 +405,19 @@ final class TemporaryPreferences: LanguagePreferences {
 def catalogs(tmp_path):
     target = tmp_path / "catalogs"
     shutil.copytree(ROOT / "homescreen/web/locales", target)
+    # Locale fallback assumptions belong to this fixed manifest.
+    codes = {"en":["en"],"zh-Hans":["zh","zh-CN","zh-SG"],"zh-Hant":["zh-HK","zh-TW"],
+             "zh-Hant-HK":["zh-Hant-HK"],"de-1901":["de-1901"],"sr-Latn":["sr-Latn"],"fr":["fr"],"pt":["pt"],"de":["gsw_CH"],"es":["es"]}
+    (target/"manifest.json").write_text(json.dumps({"languages":[
+        {"code":code,"name":code,"aliases":aliases} for code,aliases in codes.items()]}))
+    (target/"zh-Hant-HK.json").write_text(json.dumps({"common.cancel":"Regional cancel"}))
     en = json.loads((target / "en.json").read_text())
     en["test.fallback"] = "Hello {name}; {count}; {missing}"
     (target / "en.json").write_text(json.dumps(en))
     return target
 
 
-@pytest.mark.parametrize("mode", ["localization", "consent", "bridge", "webkit"])
+@pytest.mark.parametrize("mode", ["localization", "consent", "bridge", "webkit", "exports"])
 def test_native_contracts(native_binary, catalogs, mode):
     result = subprocess.run([str(native_binary), mode, str(catalogs)], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -311,6 +433,19 @@ def test_missing_native_catalog_falls_back_to_english(native_binary, catalogs):
 def test_child_start_order_and_serialized_panel(native_binary, catalogs, tmp_path, mode):
     child = tmp_path / "engine"
     child.write_text('#!/bin/sh\nprintf accepted > "$MARKER"\n')
+    if mode == "panel":
+        child.write_text(f"#!{sys.executable}\n" + '''import json,os,sys
+from pathlib import Path
+Path(os.environ["MARKER"]).write_text("started")
+for line in sys.stdin:
+    message = json.loads(line)
+    if message["method"] == "initialize":
+        result = {"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"ios-homescreen-mcp","version":"1"}}
+    elif message["method"] == "tools/list":
+        result = {"tools":[{"name":name} for name in ["read_phone","show_layout","move","diff"]]}
+    else: continue
+    print(json.dumps({"jsonrpc":"2.0","id":message["id"],"result":result}),flush=True)
+''')
     child.chmod(0o755)
     result = subprocess.run([str(native_binary), mode, str(catalogs), str(child), str(tmp_path / "started")],
                             capture_output=True, text=True)
@@ -325,3 +460,37 @@ def test_refresh_replaces_registration_results(native_binary, catalogs, tmp_path
     shutil.copy(executable, str(executable) + "-selected")
     result = subprocess.run([str(native_binary), mode, str(catalogs), str(executable)], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+def test_native_contributor_language_selection(native_binary, catalogs):
+    # Fixed baselines keep this experiment independent of future contributions.
+    baseline = catalogs.parent / "contribution"
+    baseline.mkdir()
+    registrations = [{"code":"en","name":"English","aliases":["en"]},
+                     {"code":"zh-Hant","name":"繁體中文","aliases":["zh-Hant","zh-HK"]},
+                     {"code":"ja","name":"日本語","aliases":["ja"]}]
+    (baseline/"manifest.json").write_text(json.dumps({"default":"en","languages":registrations}))
+    for code in ("en","zh-Hant"):
+        shutil.copy(ROOT/"homescreen/web/locales"/(code+".json"),baseline/(code+".json"))
+    japanese = json.loads((baseline/"en.json").read_text())
+    japanese["common.cancel"] = "キャンセル"
+    (baseline/"ja.json").write_text(json.dumps(japanese, ensure_ascii=False))
+    subprocess.run([sys.executable,str(ROOT/"tools/check_translations.py"),"--locales",str(baseline)],check=True)
+    subprocess.run([str(native_binary),"japanese",str(baseline)], check=True)
+    shutil.copy(ROOT/"homescreen/web/locales/manifest.json", catalogs/"manifest.json")
+    subprocess.run([str(native_binary),"contributor",str(catalogs)], check=True)
+
+def test_panel_dismissal_cancels_and_reaps_inspections(native_binary,catalogs,tmp_path):
+    child = tmp_path/"inspection"
+    child.write_text(f"#!{sys.executable}\n" + '''import os,signal,time
+from pathlib import Path
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+marker = Path(os.environ["MARKER"])
+tmp = marker.with_suffix(".tmp")
+tmp.write_text(str(os.getpid())+"|"+os.environ.get("HOMESCREEN_DATA","/no-fixture-data"))
+tmp.rename(marker)
+time.sleep(60)
+''')
+    child.chmod(0o755)
+    result = subprocess.run([str(native_binary),"cancelInspection",str(catalogs),str(child),str(tmp_path/"started")],
+                            capture_output=True,text=True,timeout=10)
+    assert result.returncode == 0, result.stderr
