@@ -17,6 +17,8 @@ import tomllib
 import zipfile
 
 from native_sources import selected_assets
+from source_checkout import tracked_blobs
+from source_tar import canonical_members
 from source_inputs import (HEX, cache_directory, fetch, json_bytes, pin_name, read_locks,
                            relative_name, sha256, source_member)
 
@@ -32,7 +34,8 @@ def asset_name(version):
 
 
 def validate_inventory(data, arch, version, packages, native):
-    if (not HEX.fullmatch(data.get("engine", "")) or set(data) != {"projectCommit", "projectFiles", "engine", "version", "arch", "runtime", "owners", "members", "notices", "overlays"}
+    fields = {"projectCommit", "projectFiles", "engine", "version", "arch", "runtime", "owners", "members", "notices", "overlays"}
+    if (set(data) != fields or not HEX.fullmatch(data["engine"])
             or data["arch"] != arch or data["version"] != version
             or not re.fullmatch(r"(?:[0-9a-f]{40})?", data["projectCommit"])):
         raise ValueError("Source inputs do not match the release version and architecture")
@@ -168,31 +171,23 @@ def payload_tar(output, entries, metadata):
 
 def verify_tar(path, version, commit=None, *, release=False, root=ROOT, repository=None, release_dir=None):
     files, modes, inventories = {}, {}, {}
-    total = 0
     manifest = None
-    with tarfile.open(path, "r|gz") as archive:
-        for member in archive:
-            name = relative_name(member.name)
-            total += member.size
-            if total > 4 * LIMIT:
-                raise ValueError("Source archive exceeds its unpacked size limit")
-            if (not member.isfile() or not 0 <= member.size <= LIMIT or name in files
-                    or manifest is not None or len(files) >= 100000):
-                raise ValueError("Invalid source archive member")
-            modes[name] = member.mode
-            stream = archive.extractfile(member)
-            if name == "MANIFEST.json":
-                if member.size > 32 * 1024**2:
-                    raise ValueError("Invalid source manifest size")
-                manifest = json.load(stream)
-            elif release and name in ("inventories/arm64.json", "inventories/x86_64.json"):
-                if member.size > 16 * 1024**2:
-                    raise ValueError("Invalid native inventory size")
-                data = stream.read()
-                files[name] = hashlib.sha256(data).hexdigest()
+    capture = {"MANIFEST.json": 32 * 1024**2}
+    if release:
+        capture.update({f"inventories/{arch}.json": 16 * 1024**2 for arch in ARCHES})
+    for name, mode, digest, data in canonical_members(path, capture, LIMIT):
+        if name in files or manifest is not None:
+            raise ValueError("Invalid source archive member order or duplicate")
+        modes[name] = mode
+        if name == "MANIFEST.json":
+            manifest = json.loads(data)
+            if (not isinstance(manifest, dict) or set(manifest) != {"version", "commit", "architectures", "inputs", "files"}
+                    or data != json_bytes(manifest)):
+                raise ValueError("Invalid public source manifest")
+        else:
+            files[name] = digest
+            if data is not None:
                 inventories[name] = json.loads(data)
-            else:
-                files[name] = hashlib.file_digest(stream, "sha256").hexdigest()
     if (not manifest or manifest.get("files") != files or manifest.get("version") != version
             or not re.fullmatch(r"[0-9a-f]{40}", manifest.get("commit", ""))
             or commit is not None and manifest["commit"] != commit):
@@ -209,7 +204,7 @@ def verify_tar(path, version, commit=None, *, release=False, root=ROOT, reposito
             record = manifest["architectures"][arch]
             name = f"inventories/{arch}.json"
             volume = inventories.get(name, {})
-            if (record.get("inventory") != name or volume.get("projectCommit") != manifest["commit"]
+            if (set(record) != {"zip", "inventory"} or record.get("inventory") != name or volume.get("projectCommit") != manifest["commit"]
                     or volume.get("arch") != arch or volume.get("version") != version or not volume.get("members")
                     or not volume.get("notices") or not volume.get("owners") or volume["runtime"]["archive"] not in inputs
                     or any("python/" + owner not in inputs for owner in volume["owners"])):
@@ -222,17 +217,8 @@ def verify_tar(path, version, commit=None, *, release=False, root=ROOT, reposito
 
 
 def project_entries(root, commit):
-    records = subprocess.check_output(["git", "-C", root, "ls-tree", "-rz", "--full-tree", commit]).split(b"\0")
-    for row in records:
-        if not row:
-            continue
-        header, raw_name = row.split(b"\t", 1)
-        mode, kind, object_id = header.split()
-        name = relative_name(raw_name.decode())
-        if kind != b"blob" or mode not in (b"100644", b"100755"):
-            raise ValueError("Unexpected tracked source member type")
-        data = subprocess.check_output(["git", "-C", root, "cat-file", "blob", object_id])
-        yield "project/" + name, int(mode, 8) & 0o777, io.BytesIO(data), len(data)
+    for name, mode, data in tracked_blobs(root, commit):
+        yield "project/" + name, mode, io.BytesIO(data), len(data)
 
 
 def trusted_file(root, commit, name):
@@ -286,7 +272,6 @@ def verify_release_inputs(folder, root, repository, version, manifest, files, mo
         raise ValueError("Invalid source archive data mode")
     if expected != files or inputs != manifest["inputs"]:
         raise ValueError("The source archive differs from the release commit, frozen inputs or source locks")
-
 
 
 def assemble(input_dir, release, version, commit, repository, root=ROOT):

@@ -305,8 +305,12 @@ def verify_distribution(folder, version, repository, commit=None):
         seen.add(name)
     if seen != expected:
         raise ValueError("Supply checksums for all release assets")
-    from source_archive import verify_tar
-    verify_tar(folder / source_name, version, commit, release=True, root=ROOT, repository=repository)
+    from source_archive import trusted_file, verify_tar
+    source_manifest = verify_tar(folder / source_name, version, commit, release=True, root=ROOT, repository=repository)
+    from mcp_bundle import verify_bundle
+    revision = source_manifest["commit"]
+    verify_bundle(folder / bundle_name, folder, version, repository, trusted_file(ROOT, revision, "LICENSE"),
+                  trusted_file(ROOT, revision, "macapp/mcp_launcher.sh"))
     metadata = json.loads((folder / "server.json").read_text())
     with (folder / bundle_name).open("rb") as stream:
         bundle_hash = hashlib.file_digest(stream, "sha256").hexdigest()

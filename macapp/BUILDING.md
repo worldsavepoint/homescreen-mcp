@@ -239,8 +239,6 @@ To assemble a bundle from the two downloaded native Actions artifacts:
 python3.12 macapp/release.py collect --input-dir artifacts --output-dir release
 python3.12 macapp/mcp_bundle.py --assets-dir release --output-dir release \
   --repository worldsavepoint/ios-homescreen-organizer
-python3.12 macapp/release.py verify --input-dir release \
-  --repository worldsavepoint/ios-homescreen-organizer
 ```
 
 `artifacts/` must contain the `home-screen-organizer-macos-arm64` and
@@ -255,7 +253,10 @@ The output adds these files beside the four native archives:
 - `home-screen-organizer-<version>-macos.mcpb`
 - `server.json`, identifying `io.github.worldsavepoint/home-screen-organizer` and
   the exact versioned GitHub MCPB URL and SHA256.
-- `SHA256SUMS.txt`, covering all four native archives, the MCPB and `server.json`.
+- `SHA256SUMS.txt`, covering the native archives, MCPB and Registry metadata.
+
+The source assembly step below adds the versioned Corresponding Source archive
+and its digest to the shared checksum manifest.
 
 To check a locally extracted bundle on the matching native Mac:
 
@@ -304,8 +305,9 @@ To publish a new version:
 1. Set `project.version` in `pyproject.toml` to the new SemVer release version.
 2. Merge the contribution into `main`, or push its matching `v<version>` tag.
 3. After both native builds and standalone MCPB checks pass, CI publishes both
-   DMGs, both ZIPs, the dual-architecture MCPB, `server.json` and the shared
-   `SHA256SUMS.txt` in a GitHub release targeted at the exact built commit.
+   DMGs, both ZIPs, the dual-architecture MCPB, the Corresponding Source archive,
+   `server.json` and the shared `SHA256SUMS.txt` in a GitHub release targeted
+   at the exact built commit.
 4. A following job validates and publishes the released `server.json` to the
    official MCP Registry using GitHub OIDC authentication.
 

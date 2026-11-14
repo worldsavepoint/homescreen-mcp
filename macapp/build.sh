@@ -158,6 +158,6 @@ rm -rf "$STAGE"
 echo "built $APP ($(du -sh "$APP" | cut -f1)) and $DMG ($(du -sh "$DMG" | cut -f1))"
 
 echo "• release archives"
-"$VENV/bin/python" "$ROOT/macapp/build_paths.py" app-record "$BUILD" "$ROOT" "$BUILD" "$VENV" "${BUILD_PATH_ARGS[@]}"
+"$VENV/bin/python" "$ROOT/macapp/build_paths.py" app-record "$BUILD" "$CHECKOUT" "$ROOT" "$BUILD" "$VENV" "${BUILD_PATH_ARGS[@]}"
 "$VENV/bin/python" "$ROOT/macapp/release.py" package --build-dir "$BUILD" --output-dir "$CHECKOUT/build/release/$ARCH" --arch "$ARCH"
 "$VENV/bin/python" "$ROOT/macapp/source_archive.py" native --inputs "$SOURCE_STAGE" --archive "$CHECKOUT/build/release/$ARCH/home-screen-organizer-$VERSION-macos-$ARCH.zip" --output "$BUILD/source-inputs.zip"

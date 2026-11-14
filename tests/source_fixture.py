@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "macapp"))
 from frozen_sources import distribution_notice
 from source_archive import payload_tar
+import mcp_bundle
 from source_inputs import json_bytes, sha256
 
 
@@ -21,9 +22,10 @@ def fixture_checkout(root, version):
     scripts = root / "macapp"
     scripts.mkdir(parents=True)
     for name in ("publish_release.sh", "release.py", "source_archive.py", "source_inputs.py", "native_sources.py",
-                 "frozen_sources.py", "mcp_bundle.py", "wheelhouse.py"):
+                 "frozen_sources.py", "mcp_bundle.py", "wheelhouse.py", "source_checkout.py", "source_tar.py"):
         shutil.copyfile(ROOT / "macapp" / name, scripts / name)
     (root / "LICENSE").write_text("Fixture original grant\n")
+    (scripts / "mcp_launcher.sh").write_text("#!/bin/sh\nexit 0\n")
     (scripts / "engine.spec").write_text("fixture build instructions\n")
     (scripts / "SOURCE.md").write_text("fixture source instructions\n")
     (root / "pyproject.toml").write_text(f'[project]\nversion = "{version}"\n')
@@ -90,6 +92,13 @@ def release_source(folder, version, root, repository="example/project"):
             z.writestr("Screen Organizer.app/Contents/Info.plist",plistlib.dumps({"CFBundleShortVersionString":version.split("-")[0],
                        "HomeScreenOrganizerReleaseVersion":version,"HomeScreenOrganizerArchitecture":arch}))
         native[arch]={"zip":sha256(archive),"inventory":name}
+    for arch in ("arm64", "x86_64"):
+        (folder / f"home-screen-organizer-{version}-macos-{arch}.dmg").touch()
+    (folder / "SHA256SUMS.txt").write_text("".join(
+        sha256(path) + "  " + path.name + "\n" for path in sorted(folder.iterdir()) if path.suffix in (".dmg", ".zip")))
+    from unittest.mock import patch
+    with patch.object(mcp_bundle, "ROOT", root):
+        mcp_bundle.assemble(folder, folder, repository, version)
     name=f"home-screen-organizer-{version}-corresponding-source.tar.gz"
     payload_tar(folder/name,((n,0o644,io.BytesIO(v),len(v)) for n,v in sorted(files.items())),
                 {"version":version,"commit":commit,"architectures":native,"inputs":selected})

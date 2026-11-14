@@ -192,17 +192,8 @@ def test_collect_checks_each_archive_before_copying(tmp_path):
 
 
 def distribution(tmp_path):
-    import json
-    incoming = artifact_set(tmp_path)
     output = tmp_path / "release"
-    result = release("collect", "--input-dir", incoming, "--output-dir", output)
-    assert result.returncode == 0, result.stderr
-    bundle = output / f"home-screen-organizer-{VERSION}-macos.mcpb"
-    bundle.write_bytes(b"bundle fixture")
-    metadata = {"name": "io.github.worldsavepoint/home-screen-organizer", "version": VERSION, "packages": [{
-        "registryType": "mcpb", "identifier": f"https://github.com/example/project/releases/download/v{VERSION}/{bundle.name}",
-        "fileSha256": hashlib.sha256(bundle.read_bytes()).hexdigest(), "transport": {"type": "stdio"}}]}
-    (output / "server.json").write_text(json.dumps(metadata))
+    output.mkdir()
     from source_fixture import release_source
     release_source(output, VERSION, tmp_path / "source-checkout")
     refresh_distribution_checksums(output)
@@ -224,6 +215,33 @@ def test_verify_distribution_checks_all_assets_and_package_metadata(tmp_path):
     output = distribution(tmp_path)
     result = verify_fixture(tmp_path, "--input-dir", output, "--repository", "example/project", "--tag", f"v{VERSION}")
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("damage", ["non-zip", "engine", "notice", "mode"])
+def test_verify_rejects_unrelated_bundle_even_with_matching_registry_hash(tmp_path, damage):
+    output = distribution(tmp_path)
+    bundle = next(output.glob("*.mcpb"))
+    if damage == "non-zip":
+        bundle.write_bytes(b"unrelated bundle")
+    else:
+        target = "licenses/arm64/THIRD-PARTY-NOTICES.txt" if damage == "notice" else "server/arm64/engine"
+        with zipfile.ZipFile(bundle) as original:
+            entries = [(entry, original.read(entry)) for entry in original.infolist()]
+        with zipfile.ZipFile(bundle, "w") as modified:
+            for entry, data in entries:
+                if entry.filename == target:
+                    if damage == "mode":
+                        entry.external_attr ^= 0o100 << 16
+                    else:
+                        data = bytes([data[0] ^ 1]) + data[1:]
+                modified.writestr(entry, data)
+    meta = output / "server.json"
+    data = json.loads(meta.read_bytes())
+    data["packages"][0]["fileSha256"] = hashlib.sha256(bundle.read_bytes()).hexdigest()
+    meta.write_text(json.dumps(data))
+    refresh_distribution_checksums(output)
+    result = verify_fixture(tmp_path, "--input-dir", output, "--repository", "example/project", "--tag", f"v{VERSION}")
+    assert result.returncode != 0
 
 
 @pytest.mark.parametrize("damage", ["missing-checksum", "duplicate-checksum", "hash", "url", "version", "name"])
@@ -375,6 +393,30 @@ def test_app_record_retains_builder_account_rules(tmp_path, monkeypatch, host):
     roots = read_roots(tmp_path)
     assert (original in roots) == (host != "github-hosted")
     assert (runner_temp in roots) == (host != "local")
+
+
+def test_official_build_records_physical_checkout_and_export(tmp_path, monkeypatch):
+    from macapp.build_paths import read_roots
+    from macapp.check_package_paths import check_archive
+    from test_package_privacy import native_zip
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "github-hosted")
+    build, checkout, export, venv = (tmp_path / name for name in ("build", "checkout", "export", "venv"))
+    build.mkdir()
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path / "runner-temp"))
+    line, = (line for line in SCRIPT.with_name("build.sh").read_text().splitlines() if " app-record " in line)
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin/python").symlink_to(sys.executable)
+    (export / "macapp").mkdir(parents=True)
+    (export / "macapp/build_paths.py").symlink_to(SCRIPT.with_name("build_paths.py"))
+    env = {**os.environ, "BUILD": str(build), "CHECKOUT": str(checkout), "ROOT": str(export), "VENV": str(venv)}
+    subprocess.run(["zsh", "-c", "BUILD_PATH_ARGS=()\n" + line], env=env, check=True)
+    roots = read_roots(build)
+    for private in (checkout, export):
+        with pytest.raises(ValueError, match="build path"):
+            check_archive(native_zip(tmp_path, config=str(private / "src")), roots)
+    check_archive(native_zip(tmp_path, config=str(tmp_path / "other-checkout/src")), roots)
 
 
 def test_replacement_preserves_permissions_and_drops_managed_prior_pair(tmp_path):

@@ -21,12 +21,6 @@ def publish(tmp_path, state="", tag_target="", corrupt=False, tag="v1.2.0", api_
     names += [f"home-screen-organizer-{version}-macos.mcpb", f"home-screen-organizer-{version}-corresponding-source.tar.gz", "server.json"]
     if omit_intel:
         names = [name for name in names if "x86_64" not in name]
-    for name in names:
-        (assets / name).write_bytes(b"release fixture")
-    (assets / "server.json").write_text(json.dumps({
-        "name": "io.github.worldsavepoint/home-screen-organizer", "version": version, "packages": [{
-            "registryType": "mcpb", "identifier": f"https://github.com/example/project/releases/download/{tag}/home-screen-organizer-{version}-macos.mcpb",
-            "fileSha256": hashlib.sha256(b"release fixture").hexdigest(), "transport": {"type": "stdio"}}]}))
     from source_fixture import release_source
     target = release_source(assets, version, tmp_path / "project")
     (assets / "SHA256SUMS.txt").write_text("".join(

@@ -120,7 +120,7 @@ def test_source_archive_rejects_unsafe_metadata_and_rebuilds_reproducibly(tmp_pa
     hashes = []
     for index in range(2):
         output = tmp_path / str(index)
-        payload_tar(output, inputs(), {"version": "1.3.0", "commit": "a" * 40, "architectures": {}})
+        payload_tar(output, inputs(), {"version": "1.3.0", "commit": "a" * 40, "architectures": {}, "inputs": {}})
         verify_tar(output, version="1.3.0", commit="a" * 40)
         hashes.append(hashlib.sha256(output.read_bytes()).hexdigest())
         with tarfile.open(output) as archive:
@@ -132,6 +132,60 @@ def test_source_archive_rejects_unsafe_metadata_and_rebuilds_reproducibly(tmp_pa
     with pytest.raises(ValueError):
         payload_tar(tmp_path / "unsafe", [("../outside", 0o644, io.BytesIO(b"x"), 1)], {})
 
+
+
+@pytest.mark.parametrize("change", ["uname", "comment", "manifest", "arch", "oversize", "trailing", "gzip",
+                                    "gzip-name", "gzip-comment", "gzip-extra", "encoding"])
+def test_publication_rejects_private_archive_envelope(tmp_path, change):
+    import gzip
+    import io
+    import tarfile
+    from source_archive import verify_tar
+    from source_fixture import release_source
+    from source_inputs import json_bytes
+
+    release = tmp_path / "release"
+    release.mkdir()
+    root = tmp_path / "checkout"
+    commit = release_source(release, "1.3.0", root)
+    path = next(release.glob("*-source.tar.gz"))
+    verify_tar(path, "1.3.0", commit, release=True, root=root, repository="example/project")
+    with tarfile.open(path) as original:
+        rows = [(member, original.extractfile(member).read()) for member in original]
+    with path.open("wb") as raw, gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0, compresslevel=1) as compressed:
+        if change == "oversize":
+            header = tarfile.TarInfo("././@PaxHeader")
+            header.type, header.size = tarfile.XHDTYPE, 3 * 1024**2
+            compressed.write(header.tobuf())
+        else:
+            with tarfile.open(mode="w|", fileobj=compressed) as archive:
+                for member, data in rows:
+                    if member.name == "README.md" and change == "uname":
+                        member.uname = "private-builder"
+                    if member.name == "README.md" and change == "comment":
+                        member.pax_headers = {"comment": "private fixture note"}
+                    if member.name == "MANIFEST.json" and change in ("manifest", "arch", "encoding"):
+                        manifest = json.loads(data)
+                        if change == "manifest":
+                            manifest["builder"] = "private fixture note"
+                        if change == "arch":
+                            manifest["architectures"]["arm64"]["builder"] = "private fixture note"
+                        data = json_bytes(manifest) if change != "encoding" else json.dumps(manifest, indent=2).encode()
+                    member.size = len(data)
+                    archive.addfile(member, io.BytesIO(data))
+            if change == "trailing":
+                compressed.write(b"private trailing record")
+    if change == "gzip":
+        with path.open("ab") as raw, gzip.GzipFile(filename="private-builder", fileobj=raw, mode="wb") as compressed:
+            compressed.write(b"")
+    fields = {"gzip-name": (8, b"private-file\x00"), "gzip-comment": (16, b"private-comment\x00"),
+              "gzip-extra": (4, b"\x07\x00private")}
+    if change in fields:
+        raw = bytearray(path.read_bytes())
+        raw[3], raw[10:10] = fields[change]
+        path.write_bytes(raw)
+    with pytest.raises(ValueError, match="source|Source"):
+        verify_tar(path, "1.3.0", commit, release=True, root=root, repository="example/project")
 
 
 def test_editable_component_extracts_under_one_directory(tmp_path):
@@ -242,3 +296,18 @@ def test_local_project_can_be_refrozen_with_unmodified_dependency_lock(tmp_path)
     lock = tmp_path / "original.lock"
     lock.write_text("# h11-0.16.0-py3-none-any.whl\nh11==0.16.0 --hash=sha256:" + "a" * 64 + "\n")
     assert local_selections(lock, lock, {"h11"}) == {}
+
+
+def test_git_export_ignores_local_archive_attributes(tmp_path):
+    import subprocess
+    from source_checkout import export_project
+    def git(*args):
+        return subprocess.check_output(["git", "-C", tmp_path, *args], text=True).strip()
+    git("init", "-q")
+    (tmp_path / "tracked").write_text("original blob\n")
+    git("add", "tracked")
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "Fixture")
+    (tmp_path / ".git/info/attributes").write_text("tracked export-ignore\n")
+    output = tmp_path.parent / (tmp_path.name + "-export")
+    export_project(tmp_path, output)
+    assert (output / "tracked").read_text() == "original blob\n"

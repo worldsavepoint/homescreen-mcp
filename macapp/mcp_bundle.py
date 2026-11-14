@@ -129,6 +129,50 @@ def write_file(archive, name, data, mode=0o644):
     archive.writestr(info, data)
 
 
+def bundle_manifest(repository, version):
+    url = f"https://github.com/{repository}"
+    return {
+        "manifest_version": "0.3", "name": "home-screen-organizer", "display_name": "Screen Organizer",
+        "version": version, "description": "Arrange iPhone Home Screen apps, folders, widgets and the App Library from your Mac.",
+        "author": {"name": "Jonathan Kats", "url": "https://github.com/kats1123/homescreen-mcp"},
+        "homepage": url, "repository": {"type": "git", "url": url}, "support": url + "/issues", "license": "GPL-3.0-or-later",
+        "server": {"type": "binary", "entry_point": "server/launch.sh", "mcp_config": {
+            "command": "/bin/sh", "args": ["${__dirname}/server/launch.sh"], "env": {"HOMESCREEN_READ_ONLY": "1"}}},
+        "compatibility": {"platforms": ["darwin"]},
+    }
+
+
+def verify_bundle(path, assets, version, repository, license_text, launcher):
+    def verify_file(bundle, name, data, mode):
+        info = bundle.getinfo(name)
+        if (info.external_attr >> 16 != (stat.S_IFREG | mode) or info.file_size != len(data)
+                or bundle.read(info) != data):
+            raise ValueError("Different root MCP bundle member")
+
+    with zipfile.ZipFile(path) as bundle:
+        members = {i.filename: i for i in bundle.infolist()}
+        if len(members) != len(bundle.infolist()):
+            raise ValueError("Duplicate MCP bundle member")
+        expected = {"LICENSE", "server/launch.sh", "manifest.json", "THIRD-PARTY-NOTICES.txt"}
+        verify_file(bundle, "LICENSE", license_text, 0o644)
+        verify_file(bundle, "server/launch.sh", launcher, 0o755)
+        manifest = (json.dumps(bundle_manifest(repository, version), indent=2) + "\n").encode()
+        verify_file(bundle, "manifest.json", manifest, 0o644)
+        for arch in ARCHITECTURES:
+            with zipfile.ZipFile(assets / f"home-screen-organizer-{version}-macos-{arch}.zip") as source:
+                verify_file(bundle, "THIRD-PARTY-NOTICES.txt", source.read(RESOURCES + "THIRD-PARTY-NOTICES.txt"), 0o644)
+                for info, name in engine_entries(source, arch, version):
+                    copied = members.get(name)
+                    if copied is None or copied.external_attr != info.external_attr or copied.file_size != info.file_size:
+                        raise ValueError("Different native member in MCP bundle")
+                    with source.open(info) as left, bundle.open(copied) as right:
+                        if hashlib.file_digest(left, "sha256").digest() != hashlib.file_digest(right, "sha256").digest():
+                            raise ValueError("Different native member in MCP bundle")
+                    expected.add(name)
+        if members.keys() != expected:
+            raise ValueError("Unexpected MCP bundle member")
+
+
 def assemble(assets_dir, output_dir, repository, version):
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("Supply a GitHub OWNER/REPO repository")
@@ -139,15 +183,7 @@ def assemble(assets_dir, output_dir, repository, version):
             archive = stack.enter_context(zipfile.ZipFile(assets_dir / f"home-screen-organizer-{version}-macos-{arch}.zip"))
             archives.append((archive, engine_entries(archive, arch, version)))
         url = f"https://github.com/{repository}"
-        manifest = {
-            "manifest_version": "0.3", "name": "home-screen-organizer", "display_name": "Screen Organizer",
-            "version": version, "description": "Arrange iPhone Home Screen apps, folders, widgets and the App Library from your Mac.",
-            "author": {"name": "Jonathan Kats", "url": "https://github.com/kats1123/homescreen-mcp"},
-            "homepage": url, "repository": {"type": "git", "url": url}, "support": url + "/issues", "license": "GPL-3.0-or-later",
-            "server": {"type": "binary", "entry_point": "server/launch.sh", "mcp_config": {
-                "command": "/bin/sh", "args": ["${__dirname}/server/launch.sh"], "env": {"HOMESCREEN_READ_ONLY": "1"}}},
-            "compatibility": {"platforms": ["darwin"]},
-        }
+        manifest = bundle_manifest(repository, version)
         output_dir.mkdir(parents=True, exist_ok=True)
         bundle = output_dir / f"home-screen-organizer-{version}-macos.mcpb"
         with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as destination:

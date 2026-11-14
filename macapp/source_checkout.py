@@ -1,9 +1,22 @@
 """Export the exact tracked project inputs used for an official native build."""
 import argparse
-from pathlib import Path, PurePosixPath
-import shutil
+from pathlib import Path
 import subprocess
-import tarfile
+from source_inputs import relative_name
+
+
+def tracked_blobs(root, commit):
+    records = subprocess.check_output(["git", "-C", root, "ls-tree", "-rz", "--full-tree", commit]).split(b"\0")
+    for row in records:
+        if not row:
+            continue
+        header, raw_name = row.split(b"\t", 1)
+        mode, kind, object_id = header.split()
+        name = relative_name(raw_name.decode())
+        if kind != b"blob" or mode not in (b"100644", b"100755"):
+            raise ValueError("Unsupported tracked release member type")
+        data = subprocess.check_output(["git", "-C", root, "cat-file", "blob", object_id])
+        yield name, int(mode, 8) & 0o777, data
 
 
 def export_project(root, target):
@@ -11,24 +24,12 @@ def export_project(root, target):
     if subprocess.check_output(["git", "-C", root, "status", "--porcelain", "--untracked-files=all"]):
         raise ValueError("Use a clean release checkout or a local source rebuild")
     target.mkdir()
-    with subprocess.Popen(["git", "-C", root, "archive", commit], stdout=subprocess.PIPE) as git:
-        with tarfile.open(fileobj=git.stdout, mode="r|") as archive:
-            for member in archive:
-                name = PurePosixPath(member.name)
-                if name.is_absolute() or any(p in ("..", ".git") for p in name.parts):
-                    raise ValueError("Invalid tracked release member")
-                path = target / name
-                if member.isdir():
-                    path.mkdir(parents=True, exist_ok=True)
-                elif member.isfile():
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    with path.open("xb") as file:
-                        shutil.copyfileobj(archive.extractfile(member), file)
-                    path.chmod(0o755 if member.mode & 0o111 else 0o644)
-                else:
-                    raise ValueError("Unsupported tracked release member type")
-        if git.wait():
-            raise ValueError("Could not export release commit")
+    for name, mode, data in tracked_blobs(root, commit):
+        path = target / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("xb") as stream:
+            stream.write(data)
+        path.chmod(mode)
     return commit
 
 

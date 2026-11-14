@@ -209,3 +209,19 @@ def test_dangling_or_cyclic_symlink_fails_before_output(tmp_path, target):
     result = assemble(folder, output)
     assert result.returncode != 0
     assert not output.exists()
+
+
+def test_publish_checks_mcpb_members_against_signed_native_zips(tmp_path):
+    sys.path.insert(0, str(ROOT / "macapp"))
+    from mcp_bundle import verify_bundle
+    folder = assets(tmp_path)
+    output = tmp_path / "dist"
+    assert assemble(folder, output).returncode == 0
+    bundle = output / BUNDLE
+    verify_bundle(bundle, folder, VERSION, "worldsavepoint/ios-homescreen-organizer",
+                  (ROOT / "LICENSE").read_bytes(), (ROOT / "macapp/mcp_launcher.sh").read_bytes())
+    with zipfile.ZipFile(bundle, "a") as modified:
+        modified.writestr("server/arm64/unexpected.py", b"unexpected")
+    with pytest.raises(ValueError, match="bundle"):
+        verify_bundle(bundle, folder, VERSION, "worldsavepoint/ios-homescreen-organizer",
+                      (ROOT / "LICENSE").read_bytes(), (ROOT / "macapp/mcp_launcher.sh").read_bytes())
