@@ -418,3 +418,64 @@ def test_legacy_wire_observation_does_not_prove_a_config_only_element(tmp_path):
     run(session.read())
     assert apply(session)["status"] == "verified"
     assert "userSelectedElementIdentifier" not in source.payloads[0]["iconLists"][0][0]
+
+
+@pytest.mark.parametrize("original,added", [("alpha", None), (None, "beta"), ("alpha", "beta"),
+                                            ("alpha-new", None), (None, None)])
+def test_ambiguous_content_memory_never_transfers_to_a_new_folder(tmp_path, original, added):
+    from fake_phone import folder
+
+    item = {**folder("Tools", [app("example.a", "A")]), "uniqueIdentifier": "alpha"}
+    session, source = observed_session(tmp_path, [[item]])
+    source.reported = False
+    run(session.read())
+    session.edit(lambda lay: lay.pin("folder:alpha", 1, 5))
+    assert apply(session)["status"] == "verified"
+    exported = source.raw["iconLists"][0][0]
+    del exported["uniqueIdentifier"]
+    sibling = dict(exported)
+    if original:
+        exported["uniqueIdentifier"] = original
+    if added:
+        sibling["uniqueIdentifier"] = added
+    source.raw["iconLists"][0].append(sibling)
+    session = Session(source, session.dir)
+    run(session.read())
+    assert session.require().pins == {}
+    assert apply(session)["status"] == "verified"
+    assert not source.payloads[-1].get("listMetadata")
+
+
+@pytest.mark.parametrize("intermediate", ["element", "skipped", "other-element", "other-wire", "other-config"])
+@pytest.mark.parametrize("pin", [False, True])
+def test_partial_widget_exports_resolve_only_the_observed_pair(tmp_path, intermediate, pin):
+    first = {"displayIdentifier": "weather", "gridSize": "small", "configuration": b"one",
+             "uniqueIdentifier": "wire-a", "userSelectedElementIdentifier": "chosen-a"}
+    session, source = observed_session(tmp_path, [[first]])
+    current = source.raw["iconLists"][0][0]
+    if intermediate != "skipped":
+        del current["uniqueIdentifier"]
+        if intermediate == "other-element":
+            current["userSelectedElementIdentifier"] = "other-choice"
+        if intermediate == "other-wire":
+            current["uniqueIdentifier"] = "wire-b"
+        if intermediate == "other-config":
+            current["configuration"] = b"two"
+            del current["userSelectedElementIdentifier"]
+        run(session.read())
+    current.pop("uniqueIdentifier", None)
+    current.pop("userSelectedElementIdentifier", None)
+    run(session.read())
+    session = Session(source, session.dir)
+    recover = intermediate in ("element", "skipped")
+    if pin:
+        def place():
+            session.edit(lambda lay: lay.pin(lay.pages[0][0].id, 1, 0))
+        if recover:
+            place()
+        else:
+            with pytest.raises(LayoutError, match="wire identifier"):
+                place()
+    assert apply(session)["status"] == "verified"
+    written = source.payloads[-1]["iconLists"][0][0]
+    assert written.get("userSelectedElementIdentifier") == ("chosen-a" if recover else None)

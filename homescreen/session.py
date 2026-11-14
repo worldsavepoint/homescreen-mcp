@@ -139,10 +139,12 @@ def _memory_keys(nodes: list[Node], saved: dict[str, Any] | None = None) -> dict
     counts = Counter(keys.values())
     for node in nodes:
         key = keys[node.id]
-        if node.kind == "folder" and pin_key(node):
-            instance = "folder-instance:" + json.dumps([key, pin_key(node)], separators=(",", ":"))
-            if counts[key] > 1 or (saved is not None and instance in saved):
-                keys[node.id] = instance
+        if node.kind != "folder":
+            continue
+        wire = pin_key(node)
+        instance = "folder-instance:" + json.dumps([key, wire], separators=(",", ":")) if wire else None
+        if counts[key] > 1 or (saved is not None and instance in saved):
+            keys[node.id] = instance
     return keys
 
 
@@ -588,6 +590,9 @@ class Session:
             wire = widget.get("uniqueIdentifier")
             config = self._widget_key(widget)
             owner = wire or element
+            prior = owners.get(config)
+            if not wire and element and prior and known.get(self._widget_key(widget, prior)) == element:
+                owner = prior  # This element was previously exported with the recorded wire ID.
             if counts[config] > 1:
                 owners[config] = None
             elif owner:
