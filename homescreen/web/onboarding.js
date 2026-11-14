@@ -14,7 +14,7 @@
   if (accepted) resolveConsent();
 
   function syncInert() {
-    for (const node of document.querySelectorAll("header,main,footer,#selection-bar,#drawer,#toast,#modal,#mcp-dialog,#consent-dialog")) {
+    for (const node of document.querySelectorAll("header,main,footer,#selection-bar,#drawer,#toast,#busy,#modal,#mcp-dialog,#consent-dialog")) {
       node.inert = activeDialog ? node !== activeDialog.root : !accepted;
     }
   }

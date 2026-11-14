@@ -61,6 +61,7 @@ function errorKey(message, code) {
   message = message.replace(/^(?:couldn't read the device|apply failed|restore failed): /, "");
   if (code === "read_only" || message === "read-only mode: device writes are disabled") return "editor.readOnly";
   if (code === "invalid_credentials") return "editor.authenticationFailed";
+  if (/ (?:doesn't fit|can't be pinned) at row \d+, column \d+$/.test(message)) return "error.position";
   if (message === "the saved draft changed in another session; reopen it or read the device again") return "error.staleDraft";
   if (message === "the device placement changed in another session; read the device again" ||
       message === "device grid metrics must be positive integers; read the device again" ||
@@ -92,7 +93,7 @@ function errorKey(message, code) {
       /^(backup pins must identify |backup pin is outside |backup pin footprint |backup layout has problems, not restoring: |invalid pin cell |pin identifiers do not match |pins do not fit the loaded grid:)/.test(message)) return "error.savedPosition";
   if (/^(backup |no backup named)/.test(message)) return "error.backup";
   if (/^draft has problems/.test(message)) return "validation.unknown";
-  if (/^(can't place |cells are |that spot is taken |page \d+ has no room )/.test(message) || /doesn't fit at row/.test(message)) return "error.position";
+  if (/^(can't place |cells are |that spot is taken |page \d+ has no room )/.test(message)) return "error.position";
   return "error.operation";
 }
 function usageError(message) {
@@ -109,7 +110,8 @@ function widgetSize(size) {
 
 function showError(error) {
   const key = errorKey(error.message, error.code);
-  toast(usageError(error.message) || (() => t(key)), "error", error.message);
+  const usageMessage = key === "error.operation" && usageError(error.message);
+  toast(usageMessage || (() => t(key)), "error", error.message);
 }
 
 let V = null;               // current view from the server
@@ -164,8 +166,9 @@ async function op(name, args = {}, onSuccess) {
 
 async function withBusy(text, fn) {
   localized($("#busy-text"), text);
-  $("#busy").hidden = false;
-  try { return await fn(); } finally { $("#busy").hidden = true; }
+  const root = $("#busy");
+  if (!ScreenOrganizerOnboarding.openDialog(root, root)) throw new Error(t("error.busy"));
+  try { return await fn(); } finally { ScreenOrganizerOnboarding.closeDialog(root); }
 }
 
 // ---- helpers ---------------------------------------------------------------------------
@@ -210,19 +213,39 @@ function findItem(id) {
   return null;
 }
 
-function toast(message, kind = "", detail) {
+let pendingDiagnostic = null;
+function toast(message, kind = "", detail, backup) {
   localized($("#operation-status"), message);
   const box = $("#toast");
   const previous = box.querySelector("details");
-  if (!box.hidden && previous && (previous.open || box.contains(document.activeElement))) return;
+  if (!box.hidden && previous && (previous.open || box.contains(document.activeElement))) {
+    if (detail) pendingDiagnostic = {message, kind, detail, backup};
+    return;
+  }
+  displayToast({message, kind, detail, backup});
+}
+
+function displayToast({message, kind, detail, backup}) {
+  const box = $("#toast");
+  pendingDiagnostic = null;
   clearTimeout(toast.timer);
   box.replaceChildren(localizedEl("span", null, message));
   box.className = "toast " + kind;
   box.hidden = false;
   if (detail) {
     const close = localizedEl("button", null, () => t("common.close"));
-    close.onclick = () => { box.hidden = true; $("#read").focus(); };
-    box.append(diagnostic(detail), close);
+    close.onclick = () => {
+      if (pendingDiagnostic) {
+        displayToast(pendingDiagnostic);
+        box.querySelector("summary").focus();
+      } else {
+        box.hidden = true;
+        $("#read").focus();
+      }
+    };
+    box.appendChild(diagnostic(detail));
+    if (backup) box.appendChild(localizedEl("p", null, () => t("editor.backupSaved", {backup})));
+    box.appendChild(close);
   } else {
     toast.timer = setTimeout(() => { box.hidden = true; }, kind === "error" ? 6000 : 3000);
   }
@@ -237,6 +260,7 @@ function modal({ title, body, actions, initialInput }) {
     const close = value => {
       if (closed || !dialogs.closeDialog(root)) return;
       closed = true;
+      if (initialInput) initialInput.onkeydown = null;
       resolve(value);
     };
     localized($("#modal-title"), title);
@@ -255,11 +279,12 @@ function modal({ title, body, actions, initialInput }) {
     for (const button of b.querySelectorAll("[data-backup]")) button.onclick = () => close(button.dataset.backup);
     dialogs.openDialog(root, initialInput || a.firstChild, () => close(null));
     if (initialInput) {
+      const confirm = a.querySelector(".primary");
       initialInput.select();
       initialInput.onkeydown = event => {
         if (event.key === "Enter" && !event.isComposing) {
           event.preventDefault();
-          a.querySelector(".primary").click();
+          confirm.click();
         }
       };
     }
@@ -852,18 +877,20 @@ async function review() {
   if (!V?.loaded || V.read_only || V.diff.apply_token !== token || !V.diff.has_changes || V.diff.problems.length) return;
   try {
     const res = await withBusy(() => t("editor.writing", {device: D()}), () => api("/api/apply", { token }));
-    setView(res.view);
-    const r = res.result;
-    if (r.ok) toast(() => t("editor.applied", {device: D()}), "ok");
-    else showResult(r);
+    showWriteOutcome(res, () => t("editor.applied", {device: D()}));
   } catch (e) {
     showError(e);
   }
 }
 
+function showWriteOutcome({view, result}, success) {
+  setView(view);
+  if (result.ok) toast(success, "ok", result.error, result.backup);
+  else showResult(result);
+}
+
 function showResult(r) {
-  const clips = (r.mismatches?.added_by_ios || []).filter(id => findItem(id)?.kind === "webclip");
-  if (r.hidden_webclips?.length) return showHiddenClips(r, clips);
+  if (r.hidden_webclips?.length) return showHiddenClips(r);
   const body = el("div");
   const compared = r.mismatches && Object.keys(r.mismatches).length;
   const outcome = () => compared ? t("editor.resultMismatch", {device: D()}) : t("editor.resultUnknown");
@@ -880,9 +907,7 @@ function resultDetails(body, result) {
   if (result.backup) body.appendChild(localizedEl("p", null, () => t("editor.backupSaved", {backup: result.backup})));
 }
 
-// iOS keeps web clips that are off the Home Screen but never reports them over USB; when a
-// write frees a spot, it puts one there. Home Screen Organizer remembers them from now on.
-async function showHiddenClips(r, ids) {
+function showHiddenClips(r) {
   const body = el("div");
   const message = () => t("editor.hiddenClipsBody", {device: D(), count: number(r.hidden_webclips.length)});
   localized($("#operation-status"), message);
@@ -892,11 +917,7 @@ async function showHiddenClips(r, ids) {
   body.appendChild(ul);
   body.appendChild(localizedEl("p", null, () => t("editor.hiddenClipsHint")));
   resultDetails(body, r);
-  const actions = [{ label: () => t(ids.length ? "editor.keepHere" : "common.close") }];
-  if (ids.length) actions.push({ label: () => t("editor.sendToLibrary"), primary: true, value: () => "library" });
-  const act = await modal({ title: () => t("editor.hiddenClipsTitle"), body, actions });
-  if (act !== "library") return;
-  if (await op("move_many", { ids, target: "library" })) await review();
+  modal({ title: () => t("editor.hiddenClipsTitle"), body, actions: [{ label: () => t("common.close") }] });
 }
 
 function backupLabel(name) {
@@ -929,8 +950,7 @@ async function showBackups() {
   if (!name || !(await confirmBox(() => t("editor.restoreTitle"), () => t("editor.restoreBody", {device: D()}), () => t("editor.restore")))) return;
   try {
     const res = await withBusy(() => t("editor.restoring"), () => api("/api/restore", { name }));
-    setView(res.view);
-    res.result.ok ? toast(() => t("editor.restored"), "ok") : showResult(res.result);
+    showWriteOutcome(res, () => t("editor.restored"));
   } catch (e) { showError(e); }
 }
 

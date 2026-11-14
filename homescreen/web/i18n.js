@@ -7,7 +7,8 @@
   let manifest, english = {}, catalog = {}, locale = "en", preference = "system", revision = 0;
   const listeners = new Set(), transitions = new Set(), catalogs = new Map();
   let requested, committedTarget, pending = false, initialized = false, resolveReady, rejectReady;
-  let numberFormatter;
+  let numberFormatter, pickerIntent;
+  let awaitingHostEcho = [];
   const dateFormatters = new Map();
   try { preference = localStorage.getItem(storageKey) || "system"; } catch (_) { /* storage unavailable */ }
 
@@ -89,6 +90,7 @@
     const target = resolveLocale(requested);
     if (!pending && preference === requested && committedTarget === target && locale === target) return locale;
     const nextPreference = requested;
+    if (source === "picker") pickerIntent = nextPreference;
     pending = true;
     notify("start", source, current);
     let nextCatalog, effective = target;
@@ -115,12 +117,31 @@
       }
       for (const listener of listeners) listener(locale);
     }
-    notify("settle", source, current);
+    const fromPicker = pickerIntent === nextPreference;
+    pickerIntent = null;
+    if (fromPicker && globalThis.screenOrganizerHost?.native) {
+      awaitingHostEcho = awaitingHostEcho.filter(value => value !== nextPreference);
+      awaitingHostEcho.push(nextPreference);
+    }
+    notify("settle", fromPicker ? "picker" : source, current);
     resolveReady();
     return locale;
   }
 
   function setLocale(request, source = "host") {
+    if (source === "host" && initialized) {
+      const owner = request === "system" ? request : match(request) || "system";
+      const acknowledged = awaitingHostEcho.indexOf(owner);
+      if (acknowledged !== -1) {
+        // Native can coalesce rapid updates and confirm only the most recent one.
+        awaitingHostEcho.splice(0, acknowledged + 1);
+        // Native echoes a committed picker choice. A newer user choice may already be loading.
+        if (owner !== requested || (pending && pickerIntent === owner)) return Promise.resolve(locale);
+      } else {
+        awaitingHostEcho = [];
+      }
+    }
+    if (source !== "system") pickerIntent = null;
     requested = request;
     return select(request, source, ++revision);
   }

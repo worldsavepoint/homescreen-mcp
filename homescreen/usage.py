@@ -165,9 +165,9 @@ def swipes(lay: Layout, opens: dict[str, int]) -> int:
     return sum(opens.get(b, 0) * c for b, c in cost.items())
 
 
-def top_apps(lay: Layout, opens: dict[str, int], n: int = 25) -> list[dict[str, Any]]:
+def top_apps(lay: Layout, opens: dict[str, int], n: int = 25, *, locations: bool = True) -> list[dict[str, Any]]:
     names = {x.bundle_id: x.name for x in lay.nodes.values() if x.bundle_id}
-    pos = lay.positions()
+    pos = lay.positions() if locations else {}
     ranked = sorted(((b, c) for b, c in opens.items() if b in names), key=lambda kv: -kv[1])[:n]
     return [{"id": b, "name": names[b], "opens": c, "where": pos.get(b, "")} for b, c in ranked]
 

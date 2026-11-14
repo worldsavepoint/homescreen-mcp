@@ -790,3 +790,170 @@ for(const [op,key] of [['apply','editor.beforeApply'],['restore','editor.beforeR
  const display=label('20260228-110000-before-'+op+'-'+id+'.plist');
  assert.ok(display.includes(i18n.t(key)));assert.ok(display.includes(id));}
 ''',native=True)
+
+
+@pytest.mark.parametrize("old_first", [True, False])
+def test_system_picker_notifies_host_after_os_retarget(old_first):
+    browser('''
+const select=$('#language-select'), releases={};const fetch=context.fetch;
+context.fetch=(url,opts)=>['/static/locales/fr.json','/static/locales/es.json'].includes(url)
+ ?new Promise(r=>releases[url]=()=>fetch(url,opts).then(r)):fetch(url,opts);
+context.navigator.languages=['fr'];select.value='system';const old=select.onchange({target:select});
+context.navigator.languages=['es'];context.dispatchEvent({type:'languagechange'});await tick();
+if(OLD_FIRST){releases['/static/locales/fr.json']();await old;assert.equal(bridge.length,0);}
+releases['/static/locales/es.json']();await tick();assert.equal(i18n.locale,'es');assert.equal(i18n.preference,'system');
+if(!OLD_FIRST){releases['/static/locales/fr.json']();await old;}
+assert.deepEqual(bridge.map(m=>m.preference),['system']);assert.equal(stored.get('screenOrganizer.language'),'system');
+await i18n.setLocale('system');context.navigator.languages=['en'];context.dispatchEvent({type:'languagechange'});
+await tick();assert.equal(i18n.locale,'en');assert.equal(bridge.length,1);
+'''.replace('OLD_FIRST',json.dumps(old_first)),native=True)
+
+
+def test_old_host_echo_preserves_new_picker_in_progress():
+    browser('''
+const select=$('#language-select');select.value='fr';await select.onchange({target:select});
+let release;const fetch=context.fetch;context.fetch=(url,opts)=>url==='/static/locales/es.json'
+ ?new Promise(r=>release=()=>fetch(url,opts).then(r)):fetch(url,opts);
+select.value='es';const next=select.onchange({target:select});
+await i18n.setLocale('fr');release();await next;assert.equal(i18n.locale,'es');
+assert.deepEqual(bridge.map(m=>m.preference),['fr','es']);
+await i18n.setLocale('es');await i18n.setLocale('fr');assert.equal(i18n.locale,'fr');
+''',native=True)
+
+
+def test_detached_name_input_never_confirms_another_dialog():
+    browser('''
+fixture.read_only=false;vm.runInContext('render();promptText("Folder",null,"Typed")',context);
+const old=$('#modal-body input');$('#modal-actions').firstChild.click();await tick();$('#review').click();
+let writes=0;context.fetch=async(path,opts)=>{assert.equal(path,'/api/apply');assert.equal(opts.method,'POST');writes++;
+ return {ok:true,json:async()=>({view:fixture,result:{ok:true}})};};
+for(const isComposing of [true,false])old.dispatchEvent({type:'keydown',key:'Enter',isComposing});
+await tick();assert.equal(writes,0);assert.equal($('#modal').hidden,false);
+''',native=True)
+
+
+def test_focused_diagnostic_retains_newest_error_until_dismissed():
+    browser('''
+const show=text=>vm.runInContext('showError(new Error('+JSON.stringify(text)+'))',context);
+show('first raw');const first=$('#toast details');first.open=true;first.querySelector('summary').focus();
+show('second raw');show('third raw');vm.runInContext('toast("Later success","ok")',context);
+assert.equal($('#operation-status').textContent,'Later success');assert.equal($('#toast details'),first);
+$('#toast button').click();assert.ok(!$('#toast').hidden);assert.ok($('#toast').textContent.includes('third raw'));
+assert.ok($('#toast').contains(document.activeElement));$('#toast button').click();assert.ok($('#toast').hidden);
+''',native=True)
+
+
+@pytest.mark.parametrize("operation", ["apply", "restore"])
+def test_verified_write_warning_keeps_status_and_recovery_details(operation):
+    browser('''
+fixture.read_only=false;vm.runInContext('render()',context);const raw='Write returned synthetic. Readback result: matched.';
+const name='recovery.plist';context.fetch=async(path,opts)=>{
+ if(path==='/api/backups'&&!opts.method)return {ok:true,json:async()=>({backups:[name]})};
+ assert.equal(path,'/api/'+OP);assert.equal(opts.method,'POST');
+ return {ok:true,json:async()=>({view:fixture,result:{ok:true,status:'verified',error:raw,backup:name}})};};
+if(OP==='restore'){$('#backups-btn').click();await tick();$('#modal-body button').click();await tick();}
+else $('#review').click();
+$('#modal-actions').lastChild.click();await tick();await tick();
+assert.equal($('#operation-status').textContent,OP==='apply'?i18n.t('editor.applied',{device:'iPhone'}):i18n.t('editor.restored'));
+assert.ok($('#toast details').textContent.includes(raw));assert.ok($('#toast').textContent.includes(name));
+'''.replace('OP',json.dumps(operation)),native=True)
+
+
+def test_clip_result_requires_read_even_for_known_clip():
+    browser('''
+await i18n.setLocale('en');fixture.pages[0][0].pages[0][0].kind='webclip';
+vm.runInContext("showResult({hidden_webclips:['Known clip'],mismatches:{added_by_ios:['synthetic.app'],moved:{a:'changed'}}})",context);
+assert.ok($('#modal-body p').textContent.includes('Read'));assert.ok(!$('#modal-body').textContent.includes('Everything else landed as planned'));
+assert.ok($('#modal-body').textContent.includes('changed'));assert.equal($('#modal-actions').children.length,1);
+''',native=True)
+
+
+@pytest.mark.parametrize("kind", ["widget", "folder"])
+def test_flowing_placement_cells_appear_when_neighbor_is_pinned(monkeypatch, kind):
+    from homescreen.model import Layout
+    from fake_phone import app, folder, widget
+    raw = widget('Weather','small') if kind == 'widget' else folder('Folder',[app('c','C')])
+    lay = Layout([[],[raw,app('a','A')],[app('b','B')]],library=[])
+    special = lay.pages[0][0]
+    lay.pin('a',1,0)
+    rows = {r['id']:r for r in view_for(monkeypatch,lay)['diff']['placement_changes']}
+    assert set(rows) == {special.id, 'a'}
+    row = rows[special.id]
+    assert row['from']['index'] == row['to']['index'] == 1
+    assert (row['from']['row'], row['from']['column']) == (1,1)
+    assert (row['to']['row'], row['to']['column']) == (1,3 if kind == 'widget' else 2)
+
+
+def test_opaque_plist_real_bits_determine_dirtiness(monkeypatch):
+    import plistlib
+    import struct
+    from homescreen.model import Layout
+    from fake_phone import app
+    def real(bits):
+        return struct.unpack('>d', bytes.fromhex(bits))[0]
+
+    for before, after in [('7ff8000000000001','7ff8000000000002'), ('8000000000000000','0000000000000000')]:
+        raw=app('id','App')
+        raw['opaque']={'nested':[real(before)]}
+        lay=Layout(plistlib.loads(plistlib.dumps([[],[raw]],fmt=plistlib.FMT_BINARY)))
+        assert not view_for(monkeypatch,lay)['diff']['has_changes']
+        lay.nodes['id'].raw['opaque']['nested'][0]=real(after)
+        assert view_for(monkeypatch,lay)['diff']['has_changes']
+
+
+def test_usage_ranking_avoids_full_positions_in_web_view(monkeypatch):
+    from homescreen import usage
+    from homescreen.model import Layout
+    from fake_phone import app
+    apps=[app(f'a{i}',str(i)) for i in range(512)]
+    lay=Layout([[],apps[:24]],library=apps[24:])
+    calls=[]
+    positions=Layout.positions
+    def counted(layout):
+        calls.append(layout)
+        return positions(layout)
+    monkeypatch.setattr(Layout,'positions',counted)
+    view_for(monkeypatch,lay)
+    baseline=len(calls)
+    for opens in ({}, {'a2':2},{f'a{i}':20-i for i in range(20)}):
+        calls.clear()
+        result=view_for(monkeypatch,lay,{'ok':True,'days':1,'opens':opens})
+        assert len(calls)==baseline
+        assert result['usage']['top']==usage.top_apps(lay,opens,12)
+        assert len(result['location_labels'])==min(len(opens),12)
+
+
+@pytest.mark.parametrize("suffix", ["doesn't fit at row 6, column 1", "can't be pinned at row 1, column 6"])
+def test_named_position_diagnostic_precedes_usage_and_backup_prefixes(suffix):
+    browser('''
+for(const name of ['Clock','backup clock','iOS 16 clock','Read-only mode',"the phone's clock",'No synced Screen Time data on this Mac.']){
+ const raw=name+' '+SUFFIX;
+ vm.runInContext('showError(new Error('+JSON.stringify(raw)+'))',context);
+ assert.equal($('#operation-status').textContent,i18n.t('error.position'),name);
+ assert.equal($('#toast pre').textContent,raw);
+}
+'''.replace('SUFFIX',json.dumps(suffix)),native=True)
+
+
+def test_native_may_coalesce_picker_acknowledgments():
+    browser('''
+const select=$('#language-select');
+for(const code of ['fr','es']){select.value=code;await select.onchange({target:select});}
+await i18n.setLocale('es');
+await i18n.setLocale('fr');
+assert.equal(i18n.locale,'fr');
+assert.deepEqual(bridge.map(m=>m.preference),['fr','es']);
+''',native=True)
+
+
+@pytest.mark.parametrize("source,expected", [("picker", "pt"), ("host", "de")])
+def test_new_explicit_choice_supersedes_system_notification(source,expected):
+    browser('''
+const select=$('#language-select');let release;const fetch=context.fetch;
+context.fetch=(url,opts)=>url==='/static/locales/fr.json'?new Promise(r=>release=()=>fetch(url,opts).then(r)):fetch(url,opts);
+context.navigator.languages=['fr'];select.value='system';const old=select.onchange({target:select});
+if(SOURCE==='picker'){select.value=EXPECTED;await select.onchange({target:select});}
+else await i18n.setLocale(EXPECTED);
+release();await old;assert.equal(i18n.locale,EXPECTED);assert.equal(i18n.preference,EXPECTED);
+assert.deepEqual(bridge.map(m=>m.preference),SOURCE==='picker'?[EXPECTED]:[]);
+'''.replace('SOURCE',json.dumps(source)).replace('EXPECTED',json.dumps(expected)),native=True)

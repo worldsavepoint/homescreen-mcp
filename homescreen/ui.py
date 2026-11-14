@@ -12,6 +12,7 @@ import hmac
 import os
 import re
 import secrets
+import struct
 import threading
 import webbrowser
 from pathlib import Path
@@ -59,8 +60,11 @@ def _item(n: Node, lay: Layout) -> dict[str, Any]:
     return d
 
 
-def _page(page: list[Node], lay: Layout) -> list[dict[str, Any]]:
-    pos, _ = lay.place(page)
+_GridPosition = tuple[int, int, int, int]
+_PageCells = dict[str, _GridPosition]
+
+
+def _page(page: list[Node], lay: Layout, pos: _PageCells) -> list[dict[str, Any]]:
     out = []
     for n in page:
         d = _item(n, lay)
@@ -81,7 +85,7 @@ def _usage_view(lay: Layout, u: dict[str, Any] | None, original: Callable[[], La
     return {"ok": True, "days": u["days"], "source": u.get("source", "mac"), "reports": u.get("reports"),
             "background": [lay.nodes[b].name for b in u.get("background", []) if b in lay.nodes],
             "original": usage.swipes(original(), opens),
-            "now": usage.swipes(lay, opens), "top": usage.top_apps(lay, opens, 12)}
+            "now": usage.swipes(lay, opens), "top": usage.top_apps(lay, opens, 12, locations=False)}
 
 
 def _read_only() -> bool:
@@ -96,6 +100,8 @@ def _same_fields(a: Any, b: Any) -> bool:
         return a.keys() == b.keys() and all(_same_fields(value, b[key]) for key, value in a.items())
     if isinstance(a, list):
         return len(a) == len(b) and all(_same_fields(x, y) for x, y in zip(a, b))
+    if isinstance(a, float):
+        return struct.pack(">d", a) == struct.pack(">d", b)
     return a == b
 
 
@@ -109,19 +115,37 @@ def _has_changes(lay: Layout, original: Callable[[], Layout]) -> bool:
     return not _same_fields(state, lay.source) and not _same_fields(state, original().to_state())
 
 
-def _special_positions(lay: Layout, pinned: set[str]) -> dict[str, tuple[str, int, int]]:
+def _original_cells(original: Layout, lay: Layout, current_cells: dict[int, _PageCells],
+                    pinned: set[str]) -> dict[int, _PageCells]:
+    """Reuse current geometry when order, footprints and anchors match the original page."""
+    cells = {}
+    for page, nodes in enumerate(original.pages, 1):
+        if not any(n.kind in ("widget", "folder") or n.id in pinned for n in nodes):
+            continue
+        current = lay.pages[page - 1] if page <= len(lay.pages) else []
+        same = (len(nodes) == len(current) and original.grid == lay.grid and
+                all(old.id == new.id and original.dims(old) == lay.dims(new)
+                    and original.pins.get(old.id) == lay.pins.get(new.id) for old, new in zip(nodes, current)))
+        cells[page] = current_cells[page] if same else original.place(nodes)[0]
+    return cells
+
+
+def _special_positions(
+    lay: Layout, pinned: set[str], cells: dict[int, _PageCells]
+) -> dict[str, tuple[str, int, int, _GridPosition | None]]:
     positions = {}
     for kind, page, nodes in [("dock", 0, lay.dock), ("bank", 0, lay.bank),
                               *(("page", p, nodes) for p, nodes in enumerate(lay.pages, 1))]:
         for index, node in enumerate(nodes, 1):
             if node.kind in ("folder", "widget") or node.id in pinned:
-                positions[node.id] = (kind, page, index)
+                positions[node.id] = (kind, page, index, cells.get(page, {}).get(node.id))
     return positions
 
 
-def _placement_changes(lay: Layout, original: Layout) -> dict[str, dict[str, Any]]:
-    pins = {key for key in lay.pins.keys() | original.pins.keys() if lay.pins.get(key) != original.pins.get(key)}
-    old, new = _special_positions(original, pins), _special_positions(lay, pins)
+def _placement_changes(lay: Layout, original: Layout, pins: set[str], old_cells: dict[int, _PageCells],
+                       new_cells: dict[int, _PageCells]) -> dict[str, dict[str, Any]]:
+    old = _special_positions(original, pins, old_cells)
+    new = _special_positions(lay, pins, new_cells)
     changes = {}
     for nid in sorted(old.keys() | new.keys()):
         before, after = original.nodes.get(nid), lay.nodes.get(nid)
@@ -151,12 +175,13 @@ def _placement_changes(lay: Layout, original: Layout) -> dict[str, dict[str, Any
     return changes
 
 
-def _locations(lay: Layout, wanted: set[str], physical: set[str]) -> dict[str, tuple[str, dict[str, Any]]]:
+def _locations(lay: Layout, wanted: set[str], physical: set[str],
+               page_cells: dict[int, _PageCells]) -> dict[str, tuple[str, dict[str, Any]]]:
     """Only materialize endpoints needed by Review or the visible usage list."""
     found = {}
 
     def walk(nodes: list[Node], kind: str, where: str, page: int = 0, name: str = "") -> None:
-        cells = lay.place(nodes)[0] if kind == "page" and any(n.id in physical for n in nodes) else {}
+        cells = page_cells.get(page, {}) if kind == "page" else {}
         for index, node in enumerate(nodes, 1):
             if node.id in wanted:
                 descriptor = {"kind": kind}
@@ -229,7 +254,13 @@ def view() -> dict[str, Any]:
         return baseline
 
     has_changes = _has_changes(lay, original)
-    placements = _placement_changes(lay, original()) if has_changes else {}
+    new_cells = {page: lay.place(nodes)[0] for page, nodes in enumerate(lay.pages, 1)}
+    old_cells = {}
+    placements = {}
+    if has_changes:
+        pins = {key for key in lay.pins.keys() | lay.source_pins.keys() if lay.pins.get(key) != lay.source_pins.get(key)}
+        old_cells = _original_cells(original(), lay, new_cells, pins)
+        placements = _placement_changes(lay, original(), pins, old_cells, new_cells)
     moved = {}
     if d["moves"]:
         for node in lay.nodes.values():
@@ -248,8 +279,8 @@ def view() -> dict[str, Any]:
     changed_ids = moved.keys() | placements.keys()
     wanted = changed_ids | {usage_ids[row["id"]] for row in top}
     physical = set(placements)
-    old = _locations(original(), changed_ids, physical) if changed_ids else {}
-    new = _locations(lay, wanted, physical) if wanted else {}
+    old = _locations(original(), changed_ids, physical, old_cells) if changed_ids else {}
+    new = _locations(lay, wanted, physical, new_cells) if wanted else {}
     labels = dict(old.values())
     labels.update(new.values())
     for row in top:
@@ -267,7 +298,7 @@ def view() -> dict[str, Any]:
         "device_id": s.device_id,
         "device": s.info,
         "dock": [_item(n, lay) for n in lay.dock],
-        "pages": [_page(p, lay) for p in lay.pages],
+        "pages": [_page(nodes, lay, new_cells[page]) for page, nodes in enumerate(lay.pages, 1)],
         "library": None if lay.library is None else [_item(n, lay) for n in lay.library],
         "bank": [_item(n, lay) for n in lay.bank],
         "usage": usage_view,
